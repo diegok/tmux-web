@@ -1297,6 +1297,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
+	"strings"
 )
 
 // AppOption is the tmux user option marking a session as app-created.
@@ -1335,31 +1337,49 @@ func AttachArgs(base, name string) []string {
 // Sweep kills app-created sessions with no attached clients. It runs at startup
 // to collect sessions orphaned by a crash, since destroy-unattached cannot fire
 // if the daemon died mid-attach.
+//
+// The listing and the kills are not atomic: a session reported with zero
+// clients could in principle gain one before its kill lands, closing a live
+// browser tab. That is tolerable only because the sole caller is startup, when
+// no app session is attaching. A periodic sweep would need a different design.
+//
+// A failure that is not "no server" is returned rather than swallowed. Startup
+// logs it and carries on -- an uncollectable orphan must not stop the daemon
+// serving -- but it has to be visible, because the conditions that produce one
+// (an unreadable socket, say) persist across every restart and leak a session
+// each time.
 func (c *Client) Sweep(ctx context.Context) error {
 	out, err := c.Run(ctx, "list-sessions", "-F",
 		"#{session_name}"+Sep+"#{"+AppOption+"}"+Sep+"#{session_attached}")
 	if err != nil {
-		return nil // no server, nothing to sweep
+		if noServer(err.Error()) {
+			return nil // nothing to sweep
+		}
+		return err
 	}
-	for _, line := range splitLines(out) {
-		f := splitSep(line)
+	var errs []error
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Split(line, Sep)
 		if len(f) != 3 {
 			continue
 		}
 		name, app, attached := f[0], f[1], f[2]
-		if app == "1" && attached == "0" {
-			_, _ = c.Run(ctx, "kill-session", "-t", name)
+		if app != "1" || attached != "0" {
+			continue
+		}
+		if _, err := c.Run(ctx, "kill-session", "-t", name); err != nil {
+			// The session going away between the listing and the kill is the
+			// expected race, not a fault. Anything else is worth surfacing.
+			// Matched on message text for the same reason as noServer: tmux
+			// exits 1 for every failure alike.
+			if !strings.Contains(err.Error(), "can't find session") {
+				errs = append(errs, err)
+			}
 		}
 	}
-	return nil
+	// Nil when errs is empty, so the common path returns no error.
+	return errors.Join(errs...)
 }
-```
-
-Add the two helpers next to `ParseRows` in `snapshot.go`:
-
-```go
-func splitLines(s string) []string { return strings.Split(s, "\n") }
-func splitSep(s string) []string   { return strings.Split(s, Sep) }
 ```
 
 **Step 4: Run the unit test**
@@ -1377,6 +1397,14 @@ check from `Sweep` passed the suite, and a daemon restart would then kill every
 live tab's session. It is the counterpart to the name-prefix case — `Sweep` has
 two independent conditions and each needs its own test.
 
+`TestSweepPropagatesRealErrors` needs a tmux failure that is *not* "no server",
+which the harness by construction cannot produce — its sockets work. It is the
+one tmux invocation in the package that does not go through `testutil.Server`:
+a read-only `list-sessions` against an explicit `-S` path under `t.TempDir()`
+that exceeds the unix `sun_path` limit. A socket in an unreadable directory is
+the more realistic case but does not fail for root, so it would pass vacuously
+in a container.
+
 ```go
 package tmux_test
 
@@ -1384,6 +1412,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -1459,6 +1488,11 @@ func TestSweepSparesAttachedAppSessions(t *testing.T) {
 
 func TestSweepSparesUserSessions(t *testing.T) {
 	srv := testutil.NewServer(t)
+	// An unrelated session, purely to keep the server alive if the sweep kills
+	// everything it should have spared. Without it the last session's death
+	// takes the server with it, and the assertions below fail with "no server
+	// running" -- naming the harness instead of the bug.
+	srv.Run(t, "new-session", "-d", "-s", "keepalive")
 	srv.Run(t, "new-session", "-d", "-s", "_web-notes") // user's own, unmarked
 	srv.Run(t, "new-session", "-d", "-s", "_web-orphan")
 	srv.Run(t, "set", "-t", "_web-orphan", tmux.AppOption, "1")
@@ -1481,6 +1515,37 @@ func TestSweepSparesUserSessions(t *testing.T) {
 // rather than deferred in the caller, so that a t.Fatal anywhere in the test
 // still collects the client: a surviving `tmux attach` holds the session open
 // and defeats destroy-unattached.
+func TestSweepWithNoServerIsNotAnError(t *testing.T) {
+	// NewServer reserves a socket without starting tmux, so this is the
+	// never-started case: nothing to sweep is not a failure.
+	if err := tmux.NewClient(testutil.NewServer(t).Args()).Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep with no server = %v, want nil", err)
+	}
+}
+
+// A tmux failure that is not "no server" must reach the caller. Startup logs it
+// and carries on, but silently reporting success would hide, for instance, a
+// socket the daemon cannot read -- where every orphan survives and every
+// restart leaks another.
+//
+// The socket path is deliberately over the unix sun_path limit: it fails
+// identically for any uid, whereas the realistic case -- a socket whose
+// directory denies access, which tmux reports as "(Permission denied)" -- does
+// not fail at all for root. This is the one tmux invocation in the package that
+// does not go through testutil.Server, because the harness by construction
+// hands out sockets that work. It is read-only and names an explicit -S path
+// under t.TempDir(), so it cannot reach any real server.
+func TestSweepPropagatesRealErrors(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), strings.Repeat("x", 200))
+	err := tmux.NewClient([]string{"-S", socket, "-f", "/dev/null"}).Sweep(context.Background())
+	if err == nil {
+		t.Fatal("Sweep on an unusable socket = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "File name too long") {
+		t.Fatalf("Sweep error = %v, want the underlying tmux failure", err)
+	}
+}
+
 func startAttached(t *testing.T, srv *testutil.Server, base string) (string, *os.File, *exec.Cmd) {
 	t.Helper()
 	name := tmux.NewSessionName()
@@ -2393,7 +2458,10 @@ v1 serves one hostname, and a DNS-01 wildcard would put zone-editing credentials
 on the box for a feature that is deferred. A `--dev` flag serves plain HTTP on
 localhost so the whole stack is testable without certificates.
 
-At startup: `tmux.Client.Sweep` before serving.
+At startup: `tmux.Client.Sweep` before serving. Its error is logged and
+startup continues -- failing to collect orphans must not stop the daemon
+serving. It returns nil when there is no tmux server at all, so the ordinary
+cold-start case logs nothing.
 
 ```bash
 git commit -m "feat: http server, enrollment flow, and single-name tls"

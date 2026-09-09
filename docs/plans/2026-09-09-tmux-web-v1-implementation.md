@@ -3549,6 +3549,62 @@ Render `SidebarGroup` / `SidebarMenu` / `SidebarMenuSub`, with a `Badge` showing
 `command`. Panes render as sub-items only when a window has more than one.
 Clicking sends a `select` control frame.
 
+**As built.** `web/src/lib/useSnapshot.ts` (poll, parse, group, resolve the base
+session), `web/src/components/AppSidebar.tsx` (the tree and its four empty
+states), and `web/src/App.tsx`, which replaces task 20's placeholder shell with
+`SidebarProvider` + `Sidebar` + `SidebarInset`: header breadcrumb, connection
+dot, copy-mode button, terminal. Tests in `useSnapshot.test.ts` and
+`AppSidebar.test.tsx`.
+
+- **A failed poll never blanks the tree.** The last good rows are held and the
+  failure is reported beside them, mirroring what the daemon already does one
+  layer down. The "stale" note needs **two** consecutive troubled polls (~3s):
+  the daemon sets its own `stale` flag on a single failed fork, and flashing a
+  warning for 1.5s every time tmux hiccups trains the user to ignore it. A poll
+  that never settles is abandoned after 8s -- a hung request is otherwise a
+  frozen sidebar with nothing on screen to say so.
+- **A hidden tab stops polling** and polls once on the way back, rather than
+  leaving an interval to be throttled to something between "once a minute" and
+  "never" by the browser. Nothing is queued while hidden: the daemon's cache is
+  current whenever the tab returns. Only one request is ever in flight, so a
+  slow response cannot stack requests behind it.
+- **401/403 stops the loop for good.** A revoked device cannot be fixed by
+  retrying, and hammering it every 1.5s only moves the daemon's rate limiter.
+  The sidebar says so and points at `wterm-web enroll`.
+- **The highlight is the terminal's pane, never `paneActive`.** `paneActive` is
+  tmux's active pane *per window* -- shared by the whole group and up to 1.5s
+  old -- so it answers "what would this window show", not "what is this tab
+  looking at". `TerminalSession.select` records the pane and emits a status
+  synchronously, so the highlight moves on click with no round trip. A pane that
+  dies under the selection simply stops appearing: the row is gone, nothing is
+  highlighted, and the breadcrumb reads `%3 is gone` rather than pretending.
+- **The first load does not offer to create a session.** The design asks for it,
+  but v1's API has no session-creating endpoint (`GET /ws` requires
+  `has-session -t =<name>` to pass), so the button could not work. The empty
+  state explains and names `tmux new -s work` instead. Worth reopening if a
+  create endpoint lands.
+- **Clicking a pane in another session group re-attaches first.** A pane can
+  only be selected from a socket whose session is in that pane's group;
+  otherwise the daemon logs a failed `select-window` and carries on, so a naive
+  sidebar would silently do nothing. App.tsx switches the base session, then
+  replays the selection when the new socket reports ready. A group whose own
+  session was killed (`appOnly`) is shown -- those agents are still running --
+  but its rows are disabled unless this tab is already inside it, because
+  attaching by that name is exactly what the daemon 404s on.
+- **The base session comes from the snapshot**, resolved during render so no
+  frame is drawn against a session already ruled out. A remembered session
+  (`sessionStorage`) is trusted until a loaded snapshot contradicts it;
+  `?session=` still pins a tab by hand and disables the resolver.
+- **`SidebarMenuButton tooltip=` needs a `TooltipProvider`** that this version of
+  shadcn's `SidebarProvider` does not supply -- without one Radix throws and the
+  page renders nothing. `AppSidebar` provides its own. Task 22: tooltips outside
+  that subtree need their own, or move it up to `App`.
+- **Rendering is tested with `react-dom/server`**, in the existing node
+  environment -- no jsdom, no testing library, no new dependency. It is enough
+  for which rows exist, which one is marked active and which empty state is
+  showing; it is what caught the missing `TooltipProvider`. Clicks reaching the
+  terminal ref are Task 23's Playwright run.
+
 ```bash
 git commit -m "feat: sidebar tree from tmux snapshot"
 ```

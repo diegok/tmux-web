@@ -28,7 +28,7 @@ sidebar that navigates tmux.
 | Reconnect after network drop | |
 
 Publishing and the git panel are the reason several v1 decisions look
-over-built (the routing table, `pane_current_path` in the snapshot). They are
+over-built (the routing table, the per-pane path query). They are
 hooks, not implementations. The wildcard certificate deliberately is *not* one:
 see the TLS decision below.
 
@@ -162,10 +162,10 @@ One command, polled every ~1.5s **globally** — a single poll fanned out to eve
 connected client, never one poll per tab.
 
 ```sh
-tmux list-panes -a -F '#{?#{session_group},#{session_group},#{session_name}}␟#{pane_id}␟#{@wterm_web}␟#{window_index}␟#{window_name}␟#{pane_active}␟#{pane_current_command}␟#{pane_current_path}'
+tmux list-panes -a -F '#{?#{session_group},#{session_group},#{session_name}}␟#{pane_id}␟#{pane_index}␟#{@wterm_web}␟#{window_index}␟#{window_name}␟#{pane_active}␟#{pane_current_command}'
 ```
 
-The rows are then **deduplicated in Go by `(group_key, pane_id)`, preferring a
+The rows are then **deduplicated in Go by `pane_id`, preferring a
 row that came from a non-app session.** That dedupe, not a tmux filter, is what
 makes the snapshot correct. Four things to understand about why:
 
@@ -190,12 +190,23 @@ survives both.
 argument; tmux does not expand `\x1f` in a format string. `\t` is wrong
 regardless, since window names and paths may contain tabs. Note that tmux
 sanitizes session and window names but **not** `pane_current_path`, which can
-contain a raw newline — verified. Path is therefore the last field, and rows
-with an unexpected field count are treated as a continuation of the previous
-row's path rather than as a new pane.
+contain a raw newline or a raw 0x1f — verified, and `#{q:}` escapes neither.
+
+**The snapshot therefore does not carry the path at all.** Making it the last
+field does not contain the damage: a newline in it simply starts a fresh line
+whose eight fields are all pane-controlled, so a pane can forge a second pane
+into the sidebar — verified, a directory name yielded a fabricated `PWNED`
+row. A 0x1f in it is worse: the following pane's record is swallowed into the
+path field and that live pane disappears from the sidebar — verified. Since no
+v1 surface renders the path, dropping the field removes both. A malformed line
+is now skipped and counted, never merged into its neighbour.
+
+`#{pane_index}` replaces it. Panes must be ordered by index, not by `pane_id`:
+after a split-and-kill cycle the ids run `%0 %4 %2 %1` while the layout the
+user sees runs `0 1 2 3` — verified.
 
 The snapshot renders directly to the sidebar tree, so the client keeps no model
-of tmux that could drift. `pane_current_path` is the hook the git panel will use.
+of tmux that could drift.
 
 Sidebar clicks issue `select-window` / `select-pane` against the tab's own
 grouped session, so navigation never disturbs other clients.
@@ -516,7 +527,10 @@ implementation.
 
 ### Git context
 
-`pane_current_path` is already in every snapshot. Walk to the repo root and show
+Query `pane_current_path` for the selected pane only, with
+`display-message -p -t <pane>`; it is deliberately not in the shared snapshot
+(see "Sidebar state"), and a single-pane result needs no field splitting, so
+neither hazard applies. Walk to the repo root and show
 branch, ahead/behind, dirty files, and stashes. Read-only first; manipulation
 only if using the shell for it proves annoying.
 

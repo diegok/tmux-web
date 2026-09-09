@@ -710,22 +710,33 @@ git commit -m "feat: parse tmux pane rows into a typed snapshot"
 
 ### Task 4: Deduplication by group
 
-This is the fix for two separate bugs. Read the design doc's "Sidebar state" section first.
+This is the fix for three separate bugs: duplicate rows, panes vanishing when
+the base session dies, and a sidebar that reshuffles on every poll. Read the
+design doc's "Sidebar state" section first.
 
 **Files:**
 - Modify: `internal/tmux/snapshot.go`
 - Test: `internal/tmux/snapshot_test.go`
 
+Unlike Task 3's, the code blocks below are *fragments appended to* files Task 3
+created, not whole-file listings. Task 3's blocks are complete files and are
+kept byte-identical to what ships; once this task lands they become strict
+prefixes of those files instead.
+
 **Step 1: Write the failing test**
 
 ```go
 func TestDedupe(t *testing.T) {
+	// The app-owned copies carry different display fields, so this asserts
+	// which row's payload survived -- not merely how many rows did. Each pane
+	// appears with the app copy on either side of the real one, so both
+	// directions of the preference are exercised.
 	t.Run("grouped sessions collapse to one row per pane", func(t *testing.T) {
 		rows := []Row{
-			{GroupKey: "work", PaneID: "%0", AppOwned: false, Command: "zsh"},
-			{GroupKey: "work", PaneID: "%0", AppOwned: true, Command: "zsh"},
-			{GroupKey: "work", PaneID: "%1", AppOwned: true, Command: "vim"},
-			{GroupKey: "work", PaneID: "%1", AppOwned: false, Command: "vim"},
+			{PaneID: "%0", GroupKey: "work", PaneIndex: 0, WindowName: "api", Command: "zsh", AppOwned: false},
+			{PaneID: "%0", GroupKey: "work", PaneIndex: 0, WindowName: "stale", Command: "stale", AppOwned: true},
+			{PaneID: "%1", GroupKey: "work", PaneIndex: 1, WindowName: "stale", Command: "stale", AppOwned: true},
+			{PaneID: "%1", GroupKey: "work", PaneIndex: 1, WindowName: "api", Command: "vim", AppOwned: false},
 		}
 		got := Dedupe(rows)
 		if len(got) != 2 {
@@ -735,35 +746,108 @@ func TestDedupe(t *testing.T) {
 			if r.AppOwned {
 				t.Fatalf("should prefer the non-app row: %+v", r)
 			}
+			if r.WindowName != "api" || r.Command == "stale" {
+				t.Fatalf("kept the app row's payload: %+v", r)
+			}
 		}
 	})
 
-	// The regression that motivated dedupe over a tmux filter: kill the base
-	// session while a tab is open and the group survives with only app-owned
-	// members. Filtering would return nothing; the agents are still running.
-	t.Run("app owned rows survive when they are all that is left", func(t *testing.T) {
+	// The regression that motivated dedupe over a tmux filter. Kill the base
+	// session while two tabs are open and the group survives with only
+	// app-owned members -- so every pane still arrives duplicated, and every
+	// copy is AppOwned. There is nothing to prefer, and a filter returns
+	// nothing at all while the agents are still running.
+	//
+	// The fixture must contain duplicates. Two distinct panes with one row each
+	// prove only that Dedupe does not filter, which no plausible implementation
+	// gets wrong.
+	t.Run("duplicated app owned rows collapse but survive", func(t *testing.T) {
 		rows := []Row{
-			{GroupKey: "work", PaneID: "%0", AppOwned: true, Command: "claude"},
-			{GroupKey: "work", PaneID: "%1", AppOwned: true, Command: "npm"},
+			{PaneID: "%0", GroupKey: "work", PaneIndex: 0, Command: "claude", AppOwned: true},
+			{PaneID: "%1", GroupKey: "work", PaneIndex: 1, Command: "npm", AppOwned: true},
+			{PaneID: "%0", GroupKey: "work", PaneIndex: 0, Command: "claude", AppOwned: true},
+			{PaneID: "%1", GroupKey: "work", PaneIndex: 1, Command: "npm", AppOwned: true},
 		}
 		got := Dedupe(rows)
 		if len(got) != 2 {
-			t.Fatalf("app-owned panes must survive, got %+v", got)
+			t.Fatalf("app-owned panes must survive and collapse, got %d: %+v", len(got), got)
+		}
+		for _, r := range got {
+			if !r.AppOwned {
+				t.Fatalf("nothing here to prefer: %+v", r)
+			}
 		}
 	})
 
-	t.Run("ordering is stable", func(t *testing.T) {
+	// Every field contradicts the others, so an implementation that sorts by
+	// PaneID alone -- or that keeps PaneID as the tiebreak within a window --
+	// produces a different answer from the correct one. A fixture whose pane
+	// ids happen to already be in the intended order tests nothing.
+	t.Run("output is ordered by group, then window, then pane index", func(t *testing.T) {
 		rows := []Row{
-			{GroupKey: "b", PaneID: "%9", WindowIndex: 0},
-			{GroupKey: "a", PaneID: "%2", WindowIndex: 1},
-			{GroupKey: "a", PaneID: "%1", WindowIndex: 0},
+			{PaneID: "%1", GroupKey: "b", WindowIndex: 0, PaneIndex: 0},
+			{PaneID: "%9", GroupKey: "a", WindowIndex: 2, PaneIndex: 0},
+			{PaneID: "%4", GroupKey: "a", WindowIndex: 0, PaneIndex: 1},
+			{PaneID: "%7", GroupKey: "a", WindowIndex: 0, PaneIndex: 0},
 		}
 		got := Dedupe(rows)
-		want := []string{"%1", "%2", "%9"}
+		want := []string{"%7", "%4", "%9", "%1"}
+		if len(got) != len(want) {
+			t.Fatalf("want %d rows, got %+v", len(want), got)
+		}
 		for i, w := range want {
 			if got[i].PaneID != w {
-				t.Fatalf("order: got %+v", got)
+				t.Fatalf("order = %+v, want %v", got, want)
 			}
+		}
+	})
+
+	// sort.Slice is explicitly not a stable sort and map iteration order is
+	// randomised, so determinism has to be proven rather than assumed. Without
+	// a total order, one window with four panes produced four different
+	// orderings across 200 runs -- a sidebar that reshuffles every 1.5s poll.
+	//
+	// The fixture is the verified real case: after a split-and-kill cycle the
+	// pane ids run %0 %4 %2 %1 while pane_index runs 0 1 2 3, so this also pins
+	// that layout order wins over id order.
+	t.Run("repeated calls return the same order", func(t *testing.T) {
+		rows := []Row{
+			{PaneID: "%0", GroupKey: "w", WindowIndex: 0, PaneIndex: 0},
+			{PaneID: "%4", GroupKey: "w", WindowIndex: 0, PaneIndex: 1},
+			{PaneID: "%2", GroupKey: "w", WindowIndex: 0, PaneIndex: 2},
+			{PaneID: "%1", GroupKey: "w", WindowIndex: 0, PaneIndex: 3},
+		}
+		want := []string{"%0", "%4", "%2", "%1"}
+		for run := 0; run < 200; run++ {
+			got := Dedupe(rows)
+			for i, w := range want {
+				if got[i].PaneID != w {
+					t.Fatalf("run %d: order = %+v, want %v", run, got, want)
+				}
+			}
+		}
+	})
+
+	// Snapshot returns nil when no server is running. If Dedupe returned an
+	// empty slice here the API would emit [] in one case and null in the other,
+	// and Task 21's sidebar would map over null.
+	t.Run("an empty result is nil, not an empty slice", func(t *testing.T) {
+		if got := Dedupe(nil); got != nil {
+			t.Fatalf("Dedupe(nil) = %+v, want nil", got)
+		}
+		if got := Dedupe([]Row{}); got != nil {
+			t.Fatalf("Dedupe([]Row{}) = %+v, want nil", got)
+		}
+	})
+
+	// Task 7's Poller hands this slice to concurrent HTTP readers without
+	// copying it, which is only safe if it never aliases the poll's input.
+	t.Run("the result does not alias the input", func(t *testing.T) {
+		rows := []Row{{PaneID: "%0", GroupKey: "w", Command: "zsh"}}
+		got := Dedupe(rows)
+		got[0].Command = "mutated"
+		if rows[0].Command != "zsh" {
+			t.Fatal("Dedupe returned rows aliasing its input")
 		}
 	})
 }
@@ -776,36 +860,70 @@ Expected: FAIL — `Dedupe` undefined.
 
 **Step 3: Implement**
 
-```go
-import "sort"
+`snapshot.go` already imports `strconv` and `strings`; extend that block rather
+than adding a second `import` declaration:
 
-// Dedupe collapses rows to one per (GroupKey, PaneID).
+```go
+import (
+	"sort"
+	"strconv"
+	"strings"
+)
+
+// Dedupe collapses rows to one per pane and puts them in the order the user
+// sees on screen.
 //
 // Grouped sessions share a window list, so `list-panes -a` reports every pane
-// once per member of the group. A tmux -f filter cannot do this job: excluding
-// app-owned sessions silently drops panes entirely once the user kills the base
-// session while a browser tab is open, leaving a group whose only members are
-// app-owned. Preferring a non-app row keeps the label honest; keeping an
-// app-owned row when it is the only one keeps running agents visible.
+// once per member of the group: with two browser tabs open on one base session,
+// three copies of every pane. A tmux -f filter cannot do this job. Excluding
+// app-owned sessions looks equivalent until the user kills the base session
+// while a tab is open: the group survives with only app-owned members, so a
+// filtered snapshot comes back empty while the agents are still running and
+// still visible in the attached tab. Preferring a non-app row keeps the label
+// honest; keeping an app-owned row when it is the only one keeps those agents
+// in the sidebar.
+//
+// Panes are keyed by PaneID alone. Pane ids are unique per server, so GroupKey
+// adds no discrimination -- only a failure mode, if session_group is ever empty
+// for one member of a group and the same pane keys twice.
+//
+// The returned slice is freshly allocated and never aliases rows. Task 7's
+// Poller hands it to concurrent HTTP readers without copying, which is only
+// safe because of that. An empty result is nil rather than an empty slice, to
+// match Snapshot's no-server path.
 func Dedupe(rows []Row) []Row {
-	type key struct{ group, pane string }
-	best := map[key]Row{}
+	best := make(map[string]Row, len(rows))
 	for _, r := range rows {
-		k := key{r.GroupKey, r.PaneID}
-		if cur, ok := best[k]; !ok || (cur.AppOwned && !r.AppOwned) {
-			best[k] = r
+		if cur, ok := best[r.PaneID]; !ok || (cur.AppOwned && !r.AppOwned) {
+			best[r.PaneID] = r
 		}
+	}
+	if len(best) == 0 {
+		return nil
 	}
 	out := make([]Row, 0, len(best))
 	for _, r := range best {
 		out = append(out, r)
 	}
+	// Order by what the user sees. PaneIndex, not PaneID: after a split-and-kill
+	// cycle the ids run %0 %4 %2 %1 while the layout runs 0 1 2 3, so sorting by
+	// id -- lexicographically or numerically -- disagrees with the screen.
+	//
+	// sort.Slice is explicitly NOT stable and map iteration order is randomised,
+	// so this comparator has to be a total order or the output varies run to
+	// run. (GroupKey, WindowIndex, PaneIndex) is already one over a correctly
+	// deduped set, since pane indices are unique within a window; PaneID is a
+	// final tiebreak so that a snapshot violating that assumption degrades to a
+	// wrong-but-stable order rather than a sidebar that reshuffles every poll.
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].GroupKey != out[j].GroupKey {
 			return out[i].GroupKey < out[j].GroupKey
 		}
 		if out[i].WindowIndex != out[j].WindowIndex {
 			return out[i].WindowIndex < out[j].WindowIndex
+		}
+		if out[i].PaneIndex != out[j].PaneIndex {
+			return out[i].PaneIndex < out[j].PaneIndex
 		}
 		return out[i].PaneID < out[j].PaneID
 	})
@@ -815,14 +933,14 @@ func Dedupe(rows []Row) []Row {
 
 **Step 4: Run the tests**
 
-Run: `go test ./internal/tmux/ -run TestDedupe -v`
+Run: `go test ./internal/tmux/ -v -count=1`
 Expected: PASS.
 
 **Step 5: Commit**
 
 ```bash
 git add internal/tmux
-git commit -m "feat: dedupe pane rows by group, preferring real sessions"
+git commit -m "feat: dedupe pane rows, preferring real sessions over app ones"
 ```
 
 ---

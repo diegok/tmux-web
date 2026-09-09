@@ -3042,6 +3042,71 @@ func TestSetCookieUsesHostPrefix(t *testing.T) {
 }
 ```
 
+**As built.** `NewAuth(store DeviceStore, origins []string) (*Auth, error)`,
+`(*Auth).Protect(http.Handler)`, `(*Auth).ProtectSocket(http.Handler)`,
+`(*Auth).AllowsOrigin(string) bool`, `(*Auth).Origins() []string`,
+`DeviceFrom(ctx) (auth.Device, bool)`, `SetDeviceCookie` / `ClearDeviceCookie`,
+and `AllowedOrigins(host string, dev bool, devPort int) ([]string, error)`.
+`DeviceStore` is the two-method slice of `*auth.Store` this layer uses
+(`Lookup`, `Touch`), declared at the consumer so a test can count writes and
+make them fail.
+
+- **A present `Origin` must match exactly, on every method — including `GET`.**
+  Our own pages send either no `Origin` or ours, so refusing a foreign one on a
+  `GET` breaks nothing and closes the read-shaped requests a "GET is safe" rule
+  would wave through. An absent `Origin` is tolerated only on `GET` and `HEAD`;
+  everything else fails closed, `OPTIONS` and `TRACE` included. RFC 9110 calls
+  those safe, but this app answers neither, and an extension method's semantics
+  are unknowable from here. The cost is real and deliberate: a non-browser
+  client must send an `Origin` to `POST`, because nothing distinguishes it from
+  a browser being driven by someone else's page.
+- **The WebSocket handshake is not exempt.** `ProtectSocket` additionally
+  requires the header to be *present*, so the one `GET` that opens a shell can
+  never take the navigation exemption. Browsers always send `Origin` on a
+  handshake, so this costs a real client nothing. Task 10 should wrap `/ws` in
+  `ProtectSocket` and, for the check it makes inside the upgrade, call
+  `AllowsOrigin` rather than a second copy of the rule.
+- **The comparison is byte-exact against a configured allowlist**, and nothing
+  parses the `Origin` header at request time — parsing is where this class of
+  bug lives. Entries are validated once, at startup, against trusted input;
+  `NewAuth` refuses an empty or malformed allowlist rather than failing closed
+  silently at the worst moment. The allowlist never comes from `r.Host`, which
+  is whatever the caller wrote.
+- **`AllowedOrigins` derives it from `--host`**: exactly one entry,
+  `https://<host>`, matching the single-name certificate. `--dev` *replaces* it
+  with the three loopback origins on the listen port — `localhost`, `127.0.0.1`
+  and `[::1]`, each matched exactly — rather than adding to it. Dev mode changes
+  which origins are allowed, never whether the check happens; that is the
+  difference between a dev switch and a hole. (`__Host-` cookies still work
+  there: browsers treat `http://localhost` and `http://127.0.0.1` as secure
+  contexts, so a `Secure` cookie is accepted over plain HTTP on loopback.)
+- **`Touch` is throttled to one write per device per `TouchInterval` (5m).** It
+  rewrites and fsyncs the whole device file, so it cannot sit on every request.
+  The cost is that last-seen can be up to five minutes stale; the devices list
+  exists to let the owner recognise a device, not to audit its traffic. A failed
+  `Touch` is logged and dropped — last-seen is decoration, and a full disk must
+  not sign the owner out of the tool they would use to notice.
+- **The cookie is persistent (400 days), not a session cookie.** Device sessions
+  never expire and revocation is the control, so the cookie must outlive the
+  browser process; a session cookie would sign the owner out on restart, and
+  re-enrolling costs an ssh session. 400 days because Chrome caps and silently
+  truncates anything longer. `SameSite=Lax` is asserted by a test so that
+  dropping it is a deliberate act, and the test says in its own words that it is
+  not the boundary.
+- **Origin is checked before the cookie**, so a forged-origin request never
+  reaches the store: it cannot time a lookup or move a last-seen timestamp.
+
+Twenty-two mutants, all killed: the `Origin` check skipped for `POST`; matched
+by registrable-domain suffix (the `test.example.com` attack); compared against
+`r.Host`; waved through on `GET`; `ProtectSocket` collapsed into `Protect`; the
+`__Host-` prefix, `Secure`, `HttpOnly`, `Path=/` and `MaxAge` dropped; a
+`Domain` added; the deletion cookie losing its attributes; the store lookup not
+consulted; the throttle removed; the device not reaching the context; allowlist
+validation removed. One mutant is not worth pinning and is named here instead:
+lowercasing the incoming `Origin` before comparing survives, and honestly so —
+browsers serialize an origin lowercase, and an attacker cannot send a cased
+spelling of a host they do not control.
+
 ```bash
 git commit -m "feat: device cookie auth with exact-origin csrf boundary"
 ```

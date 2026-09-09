@@ -1231,6 +1231,10 @@ The single most important detail in the project. Re-read "Attach model" in the d
 
 **Step 1: Write the failing unit test for the command builder**
 
+`TestNewSessionNameIsUniqueAndPrefixed` is the other half of this file: without
+it, `NewSessionName` returning a constant passes the suite, and two tabs opened
+together would collide on one session name.
+
 ```go
 package tmux
 
@@ -1259,6 +1263,22 @@ func TestAttachArgs(t *testing.T) {
 	// client's context.
 	if strings.Index(joined, "new-session") > strings.Index(joined, "destroy-unattached") {
 		t.Fatal("new-session must come first")
+	}
+}
+
+// Two tabs opened at the same moment must not land on one session: a colliding
+// name makes the second new-session fail outright.
+func TestNewSessionNameIsUniqueAndPrefixed(t *testing.T) {
+	seen := make(map[string]bool)
+	for range 100 {
+		name := NewSessionName()
+		if !strings.HasPrefix(name, "_web-") {
+			t.Fatalf("NewSessionName() = %q, want the _web- prefix", name)
+		}
+		if seen[name] {
+			t.Fatalf("NewSessionName() repeated %q", name)
+		}
+		seen[name] = true
 	}
 }
 ```
@@ -1351,11 +1371,18 @@ Expected: PASS.
 
 Note the shell quoting: `exec.Command` passes `;` as a literal argument, which is exactly what tmux wants — no shell involved.
 
+`TestSweepSparesAttachedAppSessions` exists because mutation testing found the
+gap: with only `TestSweepSparesUserSessions`, dropping the `session_attached`
+check from `Sweep` passed the suite, and a daemon restart would then kill every
+live tab's session. It is the counterpart to the name-prefix case — `Sweep` has
+two independent conditions and each needs its own test.
+
 ```go
 package tmux_test
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -1370,21 +1397,7 @@ func TestAttachLifecycle(t *testing.T) {
 	srv := testutil.NewServer(t)
 	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
 
-	name := tmux.NewSessionName()
-	args := append(srv.Args(), tmux.AttachArgs("work", name)...)
-	cmd := exec.Command("tmux", args...)
-	f, err := pty.Start(cmd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = f.Close() }()
-
-	waitFor(t, 3*time.Second, func() bool {
-		// Check the error: a failed command yields empty output, and a
-		// Contains check on empty output would make this wait vacuous.
-		out, err := srv.TryRun("list-sessions", "-F", "#{session_name} #{session_attached}")
-		return err == nil && strings.Contains(out, name+" 1")
-	}, "session never came up attached")
+	name, f, cmd := startAttached(t, srv, "work")
 
 	// These assertions are only meaningful because the harness starts tmux
 	// with -f /dev/null: the developer's ~/.tmux.conf already sets mouse on
@@ -1418,6 +1431,32 @@ func TestAttachLifecycle(t *testing.T) {
 	}, "session was not reaped on detach")
 }
 
+// Sweep runs at startup, but the daemon can be restarted while a browser tab is
+// attached. Collecting orphans must not kill a live session out from under it.
+func TestSweepSparesAttachedAppSessions(t *testing.T) {
+	srv := testutil.NewServer(t)
+	// "work" is not app-owned, so the sweep spares it and it keeps the server
+	// alive -- which makes the list-sessions below a real assertion rather than
+	// an error whose message would name the wrong cause.
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+	live, _, _ := startAttached(t, srv, "work")
+
+	srv.Run(t, "new-session", "-d", "-t", "work", "-s", "_web-orphan")
+	srv.Run(t, "set", "-t", "_web-orphan", tmux.AppOption, "1")
+
+	if err := tmux.NewClient(srv.Args()).Sweep(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	out := srv.Run(t, "list-sessions", "-F", "#{session_name}")
+	if !strings.Contains(out, live) {
+		t.Fatalf("sweep killed an attached app session, closing a live tab: %q", out)
+	}
+	if strings.Contains(out, "_web-orphan") {
+		t.Fatalf("sweep failed to collect an app-owned orphan: %q", out)
+	}
+}
+
 func TestSweepSparesUserSessions(t *testing.T) {
 	srv := testutil.NewServer(t)
 	srv.Run(t, "new-session", "-d", "-s", "_web-notes") // user's own, unmarked
@@ -1435,6 +1474,34 @@ func TestSweepSparesUserSessions(t *testing.T) {
 	if strings.Contains(out, "_web-orphan") {
 		t.Fatal("sweep failed to collect an app-owned orphan")
 	}
+}
+
+// startAttached runs the real one-shot attach command under a PTY and returns
+// once the session reports a client. Teardown is registered with t.Cleanup
+// rather than deferred in the caller, so that a t.Fatal anywhere in the test
+// still collects the client: a surviving `tmux attach` holds the session open
+// and defeats destroy-unattached.
+func startAttached(t *testing.T, srv *testutil.Server, base string) (string, *os.File, *exec.Cmd) {
+	t.Helper()
+	name := tmux.NewSessionName()
+	cmd := exec.Command("tmux", append(srv.Args(), tmux.AttachArgs(base, name)...)...)
+	f, err := pty.Start(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = f.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+
+	waitFor(t, 3*time.Second, func() bool {
+		// Check the error: a failed command yields empty output, and a
+		// Contains check on empty output would make this wait vacuous.
+		out, err := srv.TryRun("list-sessions", "-F", "#{session_name} #{session_attached}")
+		return err == nil && strings.Contains(out, name+" 1")
+	}, "session never came up attached")
+	return name, f, cmd
 }
 
 func waitFor(t *testing.T, d time.Duration, cond func() bool, msg string) {

@@ -1045,6 +1045,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 )
@@ -1093,9 +1094,16 @@ func (c *Client) Snapshot(ctx context.Context) ([]Row, error) {
 		}
 		return nil, err
 	}
-	rows, err := ParseRows(out)
+	rows, dropped, err := ParseRows(out)
 	if err != nil {
 		return nil, err
+	}
+	if dropped > 0 {
+		// A pane silently missing from the sidebar is the worst failure this
+		// project has, so an unparseable row is logged rather than swallowed.
+		// It is not promoted to an error: the panes that did parse are still
+		// worth showing.
+		slog.Warn("tmux snapshot: skipped malformed rows", "dropped", dropped)
 	}
 	return Dedupe(rows), nil
 }

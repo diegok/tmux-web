@@ -1,6 +1,9 @@
 package testutil_test
 
 import (
+	"errors"
+	"io/fs"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -8,7 +11,7 @@ import (
 	"github.com/diegok/tmux-web/internal/tmux/testutil"
 )
 
-func TestServerIsIsolatedAndCleansUp(t *testing.T) {
+func TestServerIsIsolated(t *testing.T) {
 	srv := testutil.NewServer(t)
 	srv.Run(t, "new-session", "-d", "-s", "probe")
 
@@ -64,5 +67,31 @@ func TestTryRunReturnsStdoutOnSuccess(t *testing.T) {
 	}
 	if out != "probe" {
 		t.Errorf("out = %q, want %q", out, "probe")
+	}
+}
+
+// Cleanup runs when a test returns, so it can only be observed from a parent
+// once the subtest that registered it has finished.
+func TestServerCleanupKillsServerAndRemovesSocket(t *testing.T) {
+	var socket, path string
+
+	t.Run("inner", func(t *testing.T) {
+		srv := testutil.NewServer(t)
+		socket, path = srv.Socket, srv.SocketPath()
+		srv.Run(t, "new-session", "-d", "-s", "probe")
+
+		// Anchor the path: if SocketPath were wrong, the parent's "it is gone"
+		// assertion below would pass without proving anything.
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("stat %s while the server is running: %v", path, err)
+		}
+	})
+
+	if out, err := exec.Command("tmux", "-L", socket, "-f", "/dev/null",
+		"has-session", "-t", "probe").CombinedOutput(); err == nil {
+		t.Errorf("server on %s survived cleanup: %s", socket, out)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat %s after cleanup: got %v, want not-exist", path, err)
 	}
 }

@@ -6,7 +6,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -16,20 +18,60 @@ type Server struct {
 	Socket string
 }
 
-// NewServer starts an isolated tmux server and registers its cleanup.
+// NewServer reserves a private tmux socket for a test and registers its
+// cleanup. It does not start the server: tmux does that lazily on the first
+// command run against the socket.
 func NewServer(t *testing.T) *Server {
 	t.Helper()
+
+	// Fail rather than skip: a suite that silently skips every tmux test
+	// because tmux is missing looks green while testing nothing.
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Fatalf("tmux not found in PATH: %v", err)
+	}
 
 	b := make([]byte, 6)
 	if _, err := rand.Read(b); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
-	s := &Server{Socket: "wterm-test-" + hex.EncodeToString(b)}
+	s := &Server{Socket: "wterm-test-" + socketSafe(t.Name()) + "-" + hex.EncodeToString(b)}
 
 	t.Cleanup(func() {
-		_ = exec.Command("tmux", "-L", s.Socket, "kill-server").Run()
+		_, _ = s.TryRun("kill-server")
+		// tmux does not unlink the socket on shutdown, so without this a dead
+		// socket file would accumulate per test.
+		_ = os.Remove(s.SocketPath())
 	})
 	return s
+}
+
+// socketSafe reduces a test name to characters that are safe in a socket name,
+// truncated to keep the socket path well inside the unix path length limit.
+func socketSafe(name string) string {
+	const max = 24
+	var b strings.Builder
+	for _, r := range name {
+		if b.Len() >= max {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
+}
+
+// SocketPath is the filesystem path of this server's socket. tmux places it in
+// $TMUX_TMPDIR/tmux-<uid>, falling back to /tmp.
+func (s *Server) SocketPath() string {
+	dir := os.Getenv("TMUX_TMPDIR")
+	if dir == "" {
+		dir = "/tmp"
+	}
+	return filepath.Join(dir, fmt.Sprintf("tmux-%d", os.Getuid()), s.Socket)
 }
 
 // Args prefixes tmux arguments with this server's socket. It also passes

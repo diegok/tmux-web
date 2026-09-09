@@ -3388,6 +3388,45 @@ debounced 150ms → control frame `{type:"resize",cols,rows}`. Store the current
 frame before enabling input, falling back to the group's active window if the
 remembered pane is gone.
 
+**As built.** `web/src/components/Terminal.tsx` exports `<Terminal>` plus the
+class that does the work, `TerminalSession`; tests in
+`web/src/components/Terminal.test.tsx`. `App.tsx` mounts one terminal as a
+placeholder shell until tasks 21-22 replace it.
+
+- **No `ResizeObserver`.** `@wterm/react` has `autoResize` and an
+  `onResize(cols, rows)` prop, which reports terminal *cells* rather than
+  pixels; a second observer would only convert pixels back into what the prop
+  already says. The 150ms debounce sits on that prop instead.
+- **`sessionStorage` holds the pane id** (`%3`), keyed
+  `wterm-web:pane:<session>`, and a stored value that is not a pane id is
+  discarded on read -- the daemon would refuse it on every reconnect otherwise.
+  A human-readable `session:window.pane` never enters the round trip.
+- **Reconnect: exponential backoff from 500ms to a 15s cap, +/-25% jitter,
+  forever, on every close but 1000.** 1000 is the one code the daemon sends
+  deliberately ("session ended"), so reconnecting from it would create a fresh
+  tmux session behind a user who just typed `exit`; that state offers a "New
+  session" button instead. The cap is short because the fault this app actually
+  sees is a phone changing networks, and there is no herd to protect.
+- **"Enabling input" is a phase, not the `onData` prop.** wterm tears out its
+  own input wiring when `onData` goes undefined, so gating that way would leave
+  keystrokes with nowhere to be *noticed*. The handler stays installed and
+  `TerminalSession.write` refuses anything typed before the socket is `ready`
+  -- which is set only after the resize and the `select` are on the wire.
+- **A dropped keystroke is visible.** Silently swallowed input is
+  indistinguishable from a hung agent, so the terminal dims and a corner pill
+  says "Reconnecting (n) -- typing is not being sent", with a "Retry now"
+  button. Never a modal: it would cover the output the user is waiting on.
+- **The component owns the current pane**, not the parent: it is the only thing
+  that knows a socket was replaced and the selection has to be replayed. The
+  sidebar drives it through the ref handle (`select`, `copyMode`, `focus`,
+  `retry`) and reads it back from `onStatusChange`.
+- **Testing without jsdom.** `TerminalSession` has no React in it, so the tests
+  run in the existing node environment against the *real* `Transport` with a
+  stubbed `WebSocket`, asserting on wire frames. Rendering was skipped
+  deliberately: what would break in the wrapper -- does a real terminal resize,
+  reconnect and land on the right pane -- is Task 23's Playwright run, and a
+  jsdom test proving React rendered would not have caught anything here.
+
 ```bash
 git commit -m "feat: terminal component with debounced resize and position restore"
 ```

@@ -13,58 +13,83 @@ const Sep = "\x1f"
 const fieldCount = 8
 
 // Row is one pane as reported by tmux, before deduplication.
+//
+// The JSON names are the wire contract with the frontend; without the tags Go
+// would marshal the exported Go names instead.
 type Row struct {
-	GroupKey    string // session_group, falling back to session_name
-	PaneID      string // e.g. "%3", stable for the pane's lifetime
-	AppOwned    bool   // set from the @wterm_web user option
-	WindowIndex int
-	WindowName  string
-	PaneActive  bool
-	Command     string
-	Path        string
+	GroupKey    string `json:"groupKey"`  // session_group, falling back to session_name
+	PaneID      string `json:"paneId"`    // e.g. "%3", stable for the pane's lifetime
+	PaneIndex   int    `json:"paneIndex"` // position within the window, in layout order
+	AppOwned    bool   `json:"appOwned"`  // set from the @wterm_web user option
+	WindowIndex int    `json:"windowIndex"`
+	WindowName  string `json:"windowName"`
+	PaneActive  bool   `json:"paneActive"`
+	Command     string `json:"command"`
 }
 
 // Format is the -F argument producing rows this package can parse.
-// Path is deliberately last: it is the only field tmux does not sanitize, so a
-// raw newline in it can only ever corrupt the tail of a record.
+//
+// pane_current_path is deliberately absent. tmux sanitizes session and window
+// names but not the path, so a pane sitting in a directory whose name contains
+// a 0x1f or a newline can forge a whole extra record or swallow the following
+// pane's -- either way the sidebar shows something other than the truth, and a
+// pane that exists can vanish from it. Being the last field does not bound the
+// damage: a newline simply starts a fresh line whose eight fields are all
+// attacker-controlled. tmux's #{q:} modifier does not escape either byte.
+// Nothing in v1 renders the path; the deferred git panel can query it per pane,
+// where a single-pane result needs no field splitting to interpret.
+//
+// pane_current_command is a theoretical residual: it is not known to be
+// sanitized either, and two attempts to make tmux report a command containing a
+// newline failed, but that is not a proof that it cannot happen.
 const Format = "#{?#{session_group},#{session_group},#{session_name}}" + Sep +
 	"#{pane_id}" + Sep +
+	"#{pane_index}" + Sep +
 	"#{@wterm_web}" + Sep +
 	"#{window_index}" + Sep +
 	"#{window_name}" + Sep +
 	"#{pane_active}" + Sep +
-	"#{pane_current_command}" + Sep +
-	"#{pane_current_path}"
+	"#{pane_current_command}"
 
-// ParseRows parses raw `tmux list-panes` output.
+// ParseRows parses raw `tmux list-panes` output into one Row per line.
 //
-// A line with the wrong field count is treated as the continuation of the
-// previous row's path rather than as a new pane, because pane_current_path may
-// contain newlines. Leading garbage with no preceding row is discarded.
-func ParseRows(out string) ([]Row, error) {
-	var rows []Row
+// Any line that is not a well-formed record -- wrong field count, or a
+// non-numeric index -- is skipped and counted in dropped. Lines are independent:
+// a malformed one never merges into or alters a neighbouring row. dropped is
+// returned rather than logged so the caller can surface a snapshot that is
+// quietly losing panes instead of it passing unnoticed.
+//
+// The error is always nil today. It is part of the signature because Snapshot
+// calls this in a context where an error is the natural shape.
+func ParseRows(out string) (rows []Row, dropped int, err error) {
+	out = strings.TrimSuffix(out, "\n")
+	if out == "" {
+		return nil, 0, nil
+	}
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Split(line, Sep)
 		if len(fields) != fieldCount {
-			if len(rows) > 0 {
-				rows[len(rows)-1].Path += "\n" + line
-			}
+			dropped++
 			continue
 		}
-		widx, err := strconv.Atoi(fields[3])
-		if err != nil {
+		// Distinct names: shadowing the named err return here would be
+		// harmless today only because it is always nil.
+		pidx, perr := strconv.Atoi(fields[2])
+		widx, werr := strconv.Atoi(fields[4])
+		if perr != nil || werr != nil {
+			dropped++
 			continue
 		}
 		rows = append(rows, Row{
 			GroupKey:    fields[0],
 			PaneID:      fields[1],
-			AppOwned:    fields[2] == "1",
+			PaneIndex:   pidx,
+			AppOwned:    fields[3] == "1",
 			WindowIndex: widx,
-			WindowName:  fields[4],
-			PaneActive:  fields[5] == "1",
-			Command:     fields[6],
-			Path:        fields[7],
+			WindowName:  fields[5],
+			PaneActive:  fields[6] == "1",
+			Command:     fields[7],
 		})
 	}
-	return rows, nil
+	return rows, dropped, nil
 }

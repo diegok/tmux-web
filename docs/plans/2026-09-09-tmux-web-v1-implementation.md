@@ -792,6 +792,7 @@ Expected: FAIL — `NewClient` undefined.
 package tmux
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
@@ -812,19 +813,31 @@ func (c *Client) command(ctx context.Context, args ...string) *exec.Cmd {
 }
 
 // Run executes a tmux command and returns trimmed stdout.
+//
+// stdout and stderr are captured separately, exactly as in the test harness and
+// for the same reason: Snapshot splits this return value on 0x1f and indexes
+// fields positionally, so a single diagnostic line merged into it would produce
+// a malformed row and fail far from its cause. stderr goes into the error,
+// where it is useful, rather than into data that gets parsed.
 func (c *Client) Run(ctx context.Context, args ...string) (string, error) {
-	out, err := c.command(ctx, args...).CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("tmux %s: %w: %s", strings.Join(args, " "), err, out)
+	var stdout, stderr bytes.Buffer
+	cmd := c.command(ctx, args...)
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimRight(stderr.String(), "\n"); msg != "" {
+			return "", fmt.Errorf("tmux %s: %w: %s", strings.Join(args, " "), err, msg)
+		}
+		return "", fmt.Errorf("tmux %s: %w", strings.Join(args, " "), err)
 	}
-	return strings.TrimRight(string(out), "\n"), nil
+	return strings.TrimRight(stdout.String(), "\n"), nil
 }
 
 // Snapshot returns one row per pane, deduplicated across session groups.
 func (c *Client) Snapshot(ctx context.Context) ([]Row, error) {
 	out, err := c.Run(ctx, "list-panes", "-a", "-F", Format)
 	if err != nil {
-		// No server running is not an error condition for the UI.
+		// No server running is not an error condition for the UI. tmux reports
+		// this on stderr, which Run folds into the error message.
 		if strings.Contains(err.Error(), "no server running") {
 			return nil, nil
 		}

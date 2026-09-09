@@ -2909,77 +2909,174 @@ git commit -m "feat: single-use enrollment tokens"
 - Create: `internal/auth/adminsock.go`
 - Test: `internal/auth/adminsock_test.go`
 
-**Step 1: Write the failing test**
+**What the admin API is.** `net/http` over the unix socket. The transport is the
+only unusual thing about it — `http.Serve` takes any `net.Listener` — and a
+hand-rolled line protocol would mean reinventing framing, methods, status codes
+and an error shape for a socket that carries a handful of requests a week. It
+also means the CLI's three operations are the same three routes Task 17 exposes
+to the browser behind a device cookie, rather than two parallel vocabularies for
+the same store. Nothing on this socket needs per-request auth or a CSRF
+boundary: a browser cannot open a unix socket, and everything that gets past
+`Accept` has already proved it runs as the service user.
+
+```
+POST   /enroll        {"name":"laptop"}  -> {"name","url"}   url = BaseURL + "/enroll#" + token
+GET    /devices                          -> {"devices":[{id,name,user_agent,created_at,last_seen}]}
+DELETE /devices/{id}                     -> 204, or 404 for an unknown id
+```
+
+`BaseURL` is on `AdminConfig` because the enrollment link is rendered where the
+host is known. The CLI has no way to learn `--host`, so it is handed a finished
+URL rather than a token and a guess. The check that `BaseURL` is set happens
+*before* `Mint`: a token that cannot be rendered into a link is a live
+credential nobody can see and nobody can use.
+
+`AdminMux` also carries `AdminClient(path)` and `AdminBaseURL`, the dialling
+half Task 14 needs, so the URL convention lives next to the server that answers
+it. The revoke handler removes the device from the store only; Task 16 must add
+the registry call that severs its live sockets.
+
+**Where the uid check goes: the accept loop, not middleware.** `SO_PEERCRED` is
+a property of the connection, and with keep-alive one connection carries many
+requests — a per-request check would re-derive the same answer from a request
+context that a future route could forget to thread through. Refusing at accept
+means a foreign process never sends a byte and no handler can be added later
+that skips the check.
+
+The refusal must **close the connection and continue the loop**, never surface
+as an `Accept` error: `http.Serve` treats a non-temporary `Accept` error as
+fatal, so one connection from another user would take the admin socket down
+until the next restart. That mutant is real and the tests kill it.
+
+The decision itself is `peerAllowed(peer, self uint32) bool` — a function of two
+uids rather than a branch buried in the loop — and `listenAdmin` takes the
+service uid and the credential source as parameters so a test can inject a
+foreign peer on any machine. Root is another uid, not an exception.
+
+**Where the socket lives.** `$XDG_RUNTIME_DIR/wterm-web.sock` whenever there is
+one: per-user, 0700, cleared on logout, which is exactly the lifetime of a
+socket that grants a shell. It is unset in cron jobs, some containers, and ssh
+sessions without a login manager, so `AdminSocketPath` falls back to
+`/run/user/<uid>` when that exists and we own it — on a systemd machine that is
+the same directory the daemon was given, so a CLI run from cron still finds the
+socket the service is listening on — and then to the state directory the device
+store already lives in.
+
+**Never `/tmp`.** It is world-writable, so a predictable path in it can be
+squatted before the daemon starts: `bind` then fails on the attacker's file, or
+the CLI is answered by a socket someone else owns. Every fallback here is a
+directory only this user can create entries in.
+
+**Stale sockets, and two things that are not stale.** `ListenAdmin` unlinks the
+socket a SIGKILLed daemon left behind, because otherwise every restart needs a
+manual `rm`. It refuses instead when a dial to the socket succeeds — that is a
+running daemon, and stealing its path would leave two daemons up with only one
+reachable and `revoke` landing on whichever won — and when the path is not a
+socket at all, symlinks included (`Lstat`, not `Stat`), because "unlink whatever
+is there" is how a daemon deletes a file it did not create. Only ECONNREFUSED
+(and a socket that vanished under us) is evidence of death; a permission error
+or a timeout is not, and does not license a delete.
+
+**Step 1: Write the failing tests**
+
+The plan's original test noted that a unit test cannot create a second uid and
+settled for asserting uid extraction. Two things can be done better than that.
+
+First, a *pid* distinguishes what a uid cannot. A self-connection's uid equals
+`os.Getuid()` whether `PeerUID` reads the socket or just reports our own
+credentials; a child process's pid does not.
 
 ```go
-func TestAdminSocketAcceptsOwnUID(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "admin.sock")
-	ln, err := auth.ListenAdmin(sock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-
-	fi, err := os.Stat(sock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("socket mode %v, want 0600", fi.Mode().Perm())
-	}
-
-	go http.Serve(ln, auth.AdminMux(...))
-
-	// A connection from this process is the service uid and must be accepted.
-	// Testing rejection requires a second uid, which a unit test cannot create;
-	// assert the uid extraction instead.
-	c, err := net.Dial("unix", sock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer c.Close()
-	uid, err := auth.PeerUID(c.(*net.UnixConn))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if uid != uint32(os.Getuid()) {
-		t.Fatalf("PeerUID = %d, want %d", uid, os.Getuid())
+func TestPeerCredentialsDescribeThePeerNotThisProcess(t *testing.T) {
+	// ... a child dials the socket; the parent reads credentials off the conn.
+	uid, pid, err := auth.PeerCredForTest(c.(*net.UnixConn))
+	if pid != int32(cmd.Process.Pid) {
+		t.Fatalf("peer pid = %d, want the child's %d (credentials must come from "+
+			"the connection, not from this process)", pid, cmd.Process.Pid)
 	}
 }
 ```
+
+Second, a second uid *is* reachable unprivileged: an unshared user namespace
+plus this user's `/etc/subuid` range. `unshare --map-auto --map-root-user` then
+`setpriv --reuid=1` runs a process at a genuinely different host uid, and the
+test skips wherever that machinery is missing rather than pretending.
+
+```go
+// The socket is deliberately opened to 0666 in a world-traversable directory
+// first, so that what refuses the connection is the uid check and not the
+// filesystem.
+func TestForeignUIDIsRefusedOverARealSocket(t *testing.T) { ... }
+```
+
+Its precondition is established *without* the code under test — the foreign
+process creates a file and the kernel's record of the owner is what says the uid
+was foreign. Asking `PeerUID` would make the test agree with whatever `PeerUID`
+reports.
+
+The rejection path also has an always-runs test through the injected seam
+(`ListenAdminForTest`), which pins the part the userns test cannot: that the
+listener **keeps serving** after a refusal, and that unreadable credentials are
+refused rather than waved through.
+
+The rest of the suite pins: socket mode 0600 and a 0700 directory; a stale
+socket replaced and the replacement actually live; a live socket and a non-socket
+refused; the token in the URL *fragment* and redeemable; a mint with no name or
+no base URL burning no token; the devices listing carrying no `token_hash`;
+`revoke` on an unknown id reporting 404; and the path fallbacks.
 
 **Step 3: Implement**
 
 ```go
 func PeerUID(c *net.UnixConn) (uint32, error) {
-	raw, err := c.SyscallConn()
+	cred, err := peerCred(c) // unix.GetsockoptUcred under raw.Control
 	if err != nil {
 		return 0, err
-	}
-	var cred *unix.Ucred
-	var cerr error
-	err = raw.Control(func(fd uintptr) {
-		cred, cerr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
-	})
-	if err != nil {
-		return 0, err
-	}
-	if cerr != nil {
-		return 0, cerr
 	}
 	return cred.Uid, nil
 }
+
+func (l *peerListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.AcceptUnix()
+		if err != nil {
+			return nil, err
+		}
+		uid, uerr := l.peerUID(c)
+		switch {
+		case uerr != nil:
+			slog.Warn("refused admin connection: peer credentials unavailable", "error", uerr)
+		case !peerAllowed(uid, l.self):
+			slog.Warn("refused admin connection from another user", "peer_uid", uid, "service_uid", l.self)
+		default:
+			return c, nil
+		}
+		c.Close() // never an Accept error: that would stop http.Serve for good
+	}
+}
 ```
 
-`ListenAdmin` unlinks a stale socket, listens, then `os.Chmod(sock, 0o600)`.
-The serving wrapper rejects any connection whose `PeerUID` differs from
-`os.Getuid()`.
+A refusal is logged. A dropped connection with no trace is a bad way to learn
+that another account on the box is poking at the admin socket.
+
+**Step 4: Mutation testing**
+
+Nineteen mutants, all killed. The ones worth recording: dropping the uid check,
+inverting it, and `PeerUID` reporting our own uid are killed only by the
+user-namespace test — no self-connection can tell them apart. Dropping `chmod`
+or making it 0666 is killed by the mode assertion; dropping the stale unlink by
+the crashed-daemon test; unlinking without the liveness probe by the
+second-daemon test; turning a refusal into an `Accept` error by the
+keeps-serving test; minting before the base-URL check by the pending-count
+assertion; serializing `Device` instead of `deviceView` by the token-hash
+assertion; honouring a relative `$XDG_RUNTIME_DIR`, falling back to `/tmp`, and
+skipping the ownership check by the path tests.
 
 ```bash
 go get golang.org/x/sys/unix
+go test ./internal/auth/ -race -count=1
 git commit -m "feat: admin unix socket authenticated by SO_PEERCRED"
 ```
-
 ---
 
 ### Task 14: CLI subcommands

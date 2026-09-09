@@ -3623,6 +3623,72 @@ palette in the capture phase, ahead of wterm's key handler — but the header
 button is the primary affordance, because `Ctrl+Alt+K` is AltGr+K on several
 European keyboard layouts. Include an explicit "enter copy mode" action.
 
+**As built.** `UserMenu.tsx` (footer button, dropdown, sign out),
+`DevicesDialog.tsx` (list, mint with QR, revoke) and `Palette.tsx` (chord,
+entries, dialog), mounted from `AppSidebar.tsx`'s `SidebarFooter` and from
+`App.tsx`, which also gains the header's "Jump to…" button and a `next-themes`
+`ThemeProvider`. Tests alongside each.
+
+- **The enrollment link is treated as the credential it is.** It is shown with
+  its ten minutes counting down out loud, so the user knows whether the phone in
+  their hand still has time; when they run out the link and the QR are
+  *replaced* by "that link has expired", because a dead QR left on screen is
+  something to scan that cannot work and a live one left on screen all afternoon
+  is what the TTL exists to prevent; and closing the dialog drops it from state
+  so it is neither in the DOM nor waiting to reappear. No auto-dismiss on a
+  timer: yanking a QR out from under a camera mid-scan is hostile, and the
+  countdown already says what the deadline is. `ENROLL_TTL_MS` is pinned against
+  `auth.EnrollTTL` in the Go source by a test -- a countdown that disagrees with
+  the daemon would say a dead link is fine.
+- **Sign out revokes, and only claims to have worked when it did.**
+  `DELETE /api/devices/{me}`, then a full reload onto the daemon's "not
+  enrolled" page, which is the one thing in the system that tells a person how
+  to get back in. A 401 or a 404 counts as success -- the credential is gone,
+  which was the ask, and revoking yourself races your own cookie being cleared.
+  Anything else, including the 6s timeout for a response that never lands
+  because revocation severed this device's sockets, leaves the page where it is
+  and says the device may still be enrolled. Reloading there would show a
+  signed-out page to a browser that is still, in fact, enrolled. Started from
+  the devices dialog, the failure is reported *into* the dialog: it is modal,
+  and a notice painted in the footer behind the overlay is a notice nobody
+  reads.
+- **Appearance is the theme and nothing else.** Three radio items in the menu
+  the user already opened, via `next-themes` writing `class` on `<html>`, which
+  is what `@custom-variant dark` in index.css keys off. Font size is not there:
+  the terminal's cell size belongs to wterm's own configuration, and a control
+  that changed the app's text and left the terminal alone would be a setting
+  that does not do what its name says. A separate Appearance *panel* would be a
+  dialog with one control in it. Note that `defaultTheme="system"` changes the
+  previous always-light default -- deliberately, since wterm's own default
+  terminal is dark.
+- **The palette moves between agents; it does not do everything.** Panes and
+  "enter copy mode", not devices and not the theme. Those are one click away in
+  the footer, are used about once a month, and as palette rows they would
+  compete for the first match -- typing "de" to reach a pane running `deploy`
+  should not surface "Devices…". Panes in an orphaned group are listed and
+  disabled, on the sidebar's rule: they are running agents, so hiding them reads
+  as a lost session, but attaching to that group by name is what the daemon
+  404s on.
+- **The chord is captured on `window` and swallowed there.** Capture phase puts
+  it ahead of wterm's handler on the terminal element, and `stopPropagation` in
+  that phase is what keeps the keystroke from also reaching the agent; without
+  both halves the palette opens *and* something gets typed. It matches on
+  `event.code === 'KeyK'` first so the chord stays on the same key cap where
+  Ctrl+Alt is AltGr and `key` is some other character entirely -- and the header
+  button exists precisely because that layout may never produce the chord at
+  all.
+- **Copy mode from the palette reports failure.** `copyMode()` returns false
+  when the socket is not ready; the palette stays open and says so rather than
+  closing on a command that did nothing, which is indistinguishable from one
+  that worked.
+- **Mutation-tested, with two honest survivors.** Nineteen of twenty-one
+  mutants are killed, including a cookie-only sign out, a QR encoding the link
+  without its fragment, a bubble-phase chord, a TTL that disagrees with the
+  daemon, camelCased wire names, and a list that keeps a revoked row. The two
+  survivors are JSX event wiring -- the handler that stores the pruned list, and
+  the one that stores the copy-mode failure -- which a `react-dom/server` render
+  cannot exercise because effects and handlers never run. Both are Task 23's.
+
 ```bash
 git commit -m "feat: user menu, devices dialog with qr, and command palette"
 ```

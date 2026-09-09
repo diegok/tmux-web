@@ -24,9 +24,12 @@
  * only while input is actually going somewhere.
  */
 
+import { Search } from 'lucide-react'
+import { ThemeProvider } from 'next-themes'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { AppSidebar } from '@/components/AppSidebar'
+import { PALETTE_CHORD_LABEL, Palette } from '@/components/Palette'
 import { Terminal } from '@/components/Terminal'
 import type { TerminalHandle, TerminalStatus } from '@/components/Terminal'
 import { Separator } from '@/components/ui/separator'
@@ -80,6 +83,9 @@ export default function App() {
    */
   const [pendingPane, setPendingPane] = useState<string | null>(null)
 
+  /** The command palette, opened by the header button or by Ctrl+Alt+K. */
+  const [paletteOpen, setPaletteOpen] = useState(false)
+
   const { groups, loaded } = snapshot
 
   // Task 20's placeholder guessed "main", which the daemon answers with a 404
@@ -130,42 +136,75 @@ export default function App() {
   const activePane = pendingPane ?? status?.pane ?? null
   const located = findPane(groups, activePane)
 
+  // False means the socket is not ready, which the palette reports rather than
+  // closing on a command that did nothing. The header button is disabled in
+  // that state, so it never gets there.
+  const copyMode = useCallback(() => term.current?.copyMode() ?? false, [])
+
   return (
-    <SidebarProvider>
-      <AppSidebar
-        snapshot={snapshot}
-        activePane={activePane}
-        activeSession={session}
-        onSelectPane={handleSelectPane}
-        onRefresh={snapshot.refresh}
-      />
-      <SidebarInset className="min-h-svh">
-        <header className="flex h-11 shrink-0 items-center gap-2 border-b px-2">
-          <SidebarTrigger />
-          <Separator orientation="vertical" className="mr-1 !h-4" />
-          <Breadcrumb session={session} located={located} activePane={activePane} loaded={loaded} />
-          <div className="ml-auto flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => term.current?.copyMode()}
-              disabled={status?.phase !== 'ready'}
-              className="hover:bg-accent hover:text-accent-foreground rounded-md border px-2 py-1 text-xs font-medium disabled:opacity-50"
-              title="Enter tmux copy mode, where this app's scrollback lives"
-            >
-              Copy mode
-            </button>
-            <ConnectionDot status={status} />
+    // One theme for the app and the terminal at once -- both are CSS custom
+    // properties -- so the provider wraps everything, and the class it writes on
+    // <html> is what `@custom-variant dark` in index.css keys off.
+    <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
+      <SidebarProvider>
+        <AppSidebar
+          snapshot={snapshot}
+          activePane={activePane}
+          activeSession={session}
+          onSelectPane={handleSelectPane}
+          onRefresh={snapshot.refresh}
+          connection={status?.phase ?? null}
+        />
+        <SidebarInset className="min-h-svh">
+          <header className="flex h-11 shrink-0 items-center gap-2 border-b px-2">
+            <SidebarTrigger />
+            <Separator orientation="vertical" className="mr-1 !h-4" />
+            <Breadcrumb session={session} located={located} activePane={activePane} loaded={loaded} />
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPaletteOpen(true)}
+                className="hover:bg-accent hover:text-accent-foreground flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium"
+                title={`Jump to a pane or run a command (${PALETTE_CHORD_LABEL})`}
+              >
+                <Search className="size-3" aria-hidden />
+                <span className="hidden sm:inline">Jump to…</span>
+                <kbd className="text-muted-foreground hidden font-mono text-[10px] md:inline">
+                  {PALETTE_CHORD_LABEL}
+                </kbd>
+              </button>
+              <button
+                type="button"
+                onClick={() => copyMode()}
+                disabled={status?.phase !== 'ready'}
+                className="hover:bg-accent hover:text-accent-foreground rounded-md border px-2 py-1 text-xs font-medium disabled:opacity-50"
+                title="Enter tmux copy mode, where this app's scrollback lives"
+              >
+                Copy mode
+              </button>
+              <ConnectionDot status={status} />
+            </div>
+          </header>
+          <div className="min-h-0 flex-1">
+            {session ? (
+              <Terminal session={session} onStatusChange={setStatus} ref={term} />
+            ) : (
+              <NoSession loaded={loaded} />
+            )}
           </div>
-        </header>
-        <div className="min-h-0 flex-1">
-          {session ? (
-            <Terminal session={session} onStatusChange={setStatus} ref={term} />
-          ) : (
-            <NoSession loaded={loaded} />
-          )}
-        </div>
-      </SidebarInset>
-    </SidebarProvider>
+        </SidebarInset>
+
+        <Palette
+          open={paletteOpen}
+          onOpenChange={setPaletteOpen}
+          groups={groups}
+          activePane={activePane}
+          activeSession={session}
+          onSelectPane={handleSelectPane}
+          onCopyMode={copyMode}
+        />
+      </SidebarProvider>
+    </ThemeProvider>
   )
 }
 

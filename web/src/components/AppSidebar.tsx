@@ -29,6 +29,7 @@
 
 import { Columns2, RefreshCw, SquareTerminal, TriangleAlert } from 'lucide-react'
 
+import { UserMenu } from '@/components/UserMenu'
 import { Badge } from '@/components/ui/badge'
 import {
   Sidebar,
@@ -36,6 +37,7 @@ import {
   SidebarGroup,
   SidebarGroupContent,
   SidebarGroupLabel,
+  SidebarFooter,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuButton,
@@ -47,6 +49,7 @@ import {
   SidebarRail,
 } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
+import type { TerminalPhase } from '@/components/Terminal'
 import { windowTarget } from '@/lib/useSnapshot'
 import type { SnapshotState, WindowNode } from '@/lib/useSnapshot'
 
@@ -65,6 +68,11 @@ export interface AppSidebarProps {
   onSelectPane: (paneId: string, groupKey: string) => void
   /** Poll now: the Retry button on the failed and empty states. */
   onRefresh: () => void
+  /**
+   * The socket's phase, for the footer's second line. Passed down rather than
+   * read here: the terminal owns it, and the sidebar is not on that path.
+   */
+  connection?: TerminalPhase | null
 }
 
 export function AppSidebar({
@@ -73,6 +81,7 @@ export function AppSidebar({
   activeSession,
   onSelectPane,
   onRefresh,
+  connection = null,
 }: AppSidebarProps) {
   const { groups, loaded } = snapshot
 
@@ -139,6 +148,10 @@ export function AppSidebar({
             hasTree={loaded && groups.length > 0}
           />
         </SidebarContent>
+
+        <SidebarFooter>
+          <UserMenu connection={connection} />
+        </SidebarFooter>
 
         <SidebarRail />
       </Sidebar>

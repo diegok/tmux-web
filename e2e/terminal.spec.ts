@@ -95,6 +95,32 @@ test('the sidebar follows real tmux, and clicking a window moves the terminal', 
   ])
 })
 
+test('navigating to a pane leaves the keyboard in it', async ({ page, wterm }) => {
+  // Found by this suite, not by any unit test: <Terminal> took focus once when
+  // its socket first went live and never again, so both ways of navigating left
+  // you on a pane you could not type into until you clicked the terminal. On a
+  // phone that also means no on-screen keyboard, and the palette is the primary
+  // way to navigate there.
+  //
+  // This test deliberately does NOT call focusTerminal(): typing straight after
+  // a click is the whole assertion. capture-pane rather than the DOM, because
+  // the shell echoes what is typed -- the marker has to come from the pane.
+  await enroll(page, wterm, 'laptop')
+
+  wterm.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'second', 'sh')
+  await expect(windowRow(page, 'second')).toBeVisible()
+
+  await windowRow(page, 'second').click()
+  await expect(breadcrumb(page)).toContainText('second')
+
+  await page.keyboard.type("printf 'typed-after-click\\n'\n")
+  await expect
+    .poll(() => wterm.tmux('capture-pane', '-p', '-t', `${BASE_SESSION}:second`), {
+      timeout: 5000,
+    })
+    .toContain('typed-after-click')
+})
+
 test('revoking the device over the admin socket severs the live terminal', async ({
   page,
   wterm,

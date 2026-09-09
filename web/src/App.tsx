@@ -109,6 +109,7 @@ export default function App() {
   useEffect(() => {
     if (!pendingPane || status?.phase !== 'ready' || status.pane === pendingPane) return
     term.current?.select(pendingPane)
+    term.current?.focus()
   }, [pendingPane, status?.phase, status?.pane])
 
   const handleSelectPane = useCallback(
@@ -124,7 +125,15 @@ export default function App() {
       // exactly like a click that worked.
       if (!term.current?.select(paneId)) {
         console.error('sidebar: the terminal refused to select', paneId)
+        return
       }
+      // Navigating means "I want to work in that pane", so the keyboard has to
+      // follow. Both affordances that get here take focus themselves -- a
+      // sidebar button keeps it, and the palette closing leaves it on <body> --
+      // so without this you land on a pane and cannot type into it until you
+      // click the terminal. On a phone that also means no on-screen keyboard,
+      // and the palette is the primary way to navigate there.
+      term.current.focus()
     },
     [session],
   )
@@ -139,7 +148,13 @@ export default function App() {
   // False means the socket is not ready, which the palette reports rather than
   // closing on a command that did nothing. The header button is disabled in
   // that state, so it never gets there.
-  const copyMode = useCallback(() => term.current?.copyMode() ?? false, [])
+  const copyMode = useCallback(() => {
+    const ok = term.current?.copyMode() ?? false
+    // Copy mode is driven from the keyboard, so it is useless without focus --
+    // and the header button steals it on click.
+    if (ok) term.current?.focus()
+    return ok
+  }, [])
 
   return (
     // One theme for the app and the terminal at once -- both are CSS custom

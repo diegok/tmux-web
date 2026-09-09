@@ -1,15 +1,18 @@
 {
+  /* The app config, plus node types: test files run under vitest in node and
+     reach for the filesystem (the wire-contract tests read the Go source), so
+     they cannot live in the browser-only app project. Kept as a referenced
+     project so `tsc -b` -- and therefore `pnpm build` -- still type-checks
+     them. */
   "compilerOptions": {
-    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo",
     "target": "es2023",
     "lib": ["ES2023", "DOM"],
     "module": "esnext",
-    "types": ["vite/client"],
+    "types": ["node", "vite/client"],
     "allowArbitraryExtensions": true,
     "skipLibCheck": true,
 
-    /* Path alias, mirrored in vite.config.ts. TypeScript 6 deprecated
-       baseUrl; paths are resolved relative to this file instead. */
     "paths": {
       "@/*": ["./src/*"]
     },
@@ -28,8 +31,5 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"],
-  /* Test files are their own project (tsconfig.test.json); they need node
-     types this browser project must not have. */
-  "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
+  "include": ["src/**/*.test.ts", "src/**/*.test.tsx"]
 }

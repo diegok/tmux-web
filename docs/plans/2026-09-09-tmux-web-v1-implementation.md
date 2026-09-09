@@ -3323,6 +3323,54 @@ Write tests (vitest, mocking `WebSocket`) asserting:
   control handler.
 - Nothing is buffered across a close — pending writes are dropped, not queued.
 
+**As built.** `class Transport` in `web/src/lib/transport.ts`, plus
+`FRAME_DATA` / `FRAME_CONTROL` / `MAX_DATA_PAYLOAD` and the `ControlMessage`,
+`TransportClose` and `TransportOptions` types. Constructed with
+`{url, onData, onControl?, onOpen?, onClose?, onError?}`; methods `send`,
+`sendControl`, `resize`, `select`, `copyMode`, `close`, and the getters
+`state` ("connecting" | "open" | "closed") and `connected`.
+
+- **A Transport owns one socket for its whole life and never reopens.** "No
+  buffering across a close" is then structural rather than a rule someone has
+  to keep: there is no queue to flush and no second open to flush it at.
+  Reconnecting is Task 20 constructing a new Transport, which is the layer that
+  knows to re-select the remembered pane before re-enabling input.
+- **Every write returns a boolean**, false meaning the bytes were dropped
+  because the socket was not open. That is the whole of the backpressure and
+  disconnect story the caller gets, and it is deliberately not a promise.
+- **`onClose` carries `{code, reason, wasClean}`.** The server closes 1000
+  "session ended" when tmux itself ended, which must *not* be reconnected from;
+  everything else is a fault that should be. Callbacks are suppressed entirely
+  after a caller's own `close()`, so tearing a tab down cannot look like a drop.
+- **`binaryType = "arraybuffer"`.** The default delivers Blobs, which are only
+  readable asynchronously; two Blob reads on a byte stream can settle out of
+  order, and a reordered terminal stream is a corrupted one.
+- **No `bufferedAmount` check.** The only thing that fills that buffer is a
+  server that stopped reading, and the Go side drops the connection instead of
+  blocking — backpressure arrives as a close, not as a stall. Watching it would
+  mean silently discarding keystrokes to defend a buffer a terminal's uplink
+  cannot fill.
+- **Sends over 512KiB are split across frames.** `wsReadLimit` bounds an inbound
+  message at 1MiB and coder/websocket kills the connection past it, so an
+  unchunked paste of a large file would take the terminal down with it. The far
+  end is a PTY, so frame boundaries are invisible there. This is an addition to
+  what this task asked for; flagged because the alternative is a lost terminal.
+- **`select` takes a tmux pane id (`%3`), not a `session:window.pane`
+  target.** `tmux.Client.SelectPane` refuses anything else, on purpose. Task 20
+  should keep the pane id in `sessionStorage`, using the human-readable target
+  only for display.
+- **The wire contract is pinned against the Go source.** `transport.test.ts`
+  reads `internal/ptybridge/frame.go` and `internal/front/ws.go` and asserts the
+  prefix bytes, the `wsControlMessage` json tags, and the handled `type` strings
+  match what this file emits — so a rename on either side fails `pnpm test` with
+  the Go file named, rather than surfacing as a terminal that stops resizing.
+- **Test setup:** `vitest` (node environment, no jsdom — the only DOM API
+  involved is the `WebSocket` constructor, which the tests stub), driven by
+  `web/vitest.config.ts`, which merges the app's vite config so tests keep the
+  `@/` alias. `pnpm test`. Test files moved into their own `tsconfig.test.json`
+  project — they need node types the browser project must not have — so
+  `tsc -b`, and therefore `pnpm build`, still type-checks them.
+
 ```bash
 git commit -m "feat: framed websocket transport without unsafe send buffering"
 ```

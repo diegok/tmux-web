@@ -43,6 +43,14 @@ Nothing in this phase touches HTTP. At the end of it you can enumerate panes and
 go mod init github.com/diegok/tmux-web
 ```
 
+`go mod init` writes the toolchain's full patch version (e.g. `go 1.26.5`),
+which makes the module refuse to build on go1.26.0. Edit `go.mod` down to the
+language version:
+
+```
+go 1.26
+```
+
 **Step 2: Write `.gitignore`**
 
 ```
@@ -79,7 +87,17 @@ test: test-go
 
 test-go:
 	go test ./... -count=1
+
+# No frontend yet. Fail loudly rather than succeed silently: a declared but
+# empty test target reports success in CI while running nothing.
+test-web:
+	@echo "test-web: no frontend yet (see Phase D); wire up web/ tests here" >&2; exit 1
 ```
+
+`test-web` must have a recipe that fails. A `.PHONY` target with no recipe
+prints "Nothing to be done" and exits 0, so CI would report a passing frontend
+test suite before the frontend exists. Phase D replaces the recipe with the
+real command and adds `test-web` to the `test` target's prerequisites.
 
 **Step 5: Verify it builds**
 
@@ -97,7 +115,21 @@ git commit -m "chore: scaffold go module and makefile"
 
 ### Task 2: Isolated tmux test harness
 
-Every later tmux test depends on this. It must never touch the user's real tmux server.
+Every later tmux test depends on this. It must never touch the user's real tmux
+server, and it must not inherit the developer's tmux configuration.
+
+Two hazards, both verified on this machine:
+
+1. **A private socket is not a private configuration.** `tmux -L <name>` starts
+   a fresh server but still reads `~/.tmux.conf`. The developer's config sets
+   `prefix C-a`, `mouse on`, `aggressive-resize on` and `automatic-rename off`.
+   Task 6 asserts `mouse = on` after `AttachArgs` sets it -- inherited, that
+   assertion passes even if `AttachArgs` never touches mouse. `automatic-rename`
+   changes `#{window_name}`, which Tasks 3-5 parse and compare. Passing
+   `-f /dev/null` restores stock defaults (`prefix C-b`, `mouse off`).
+2. **Merged stderr corrupts parsed output.** Tasks 3-5 split tmux output on
+   0x1f and index fields positionally, so a diagnostic line merged into stdout
+   produces a malformed row and fails three files away from its cause.
 
 **Files:**
 - Create: `internal/tmux/testutil/server.go`
@@ -105,10 +137,19 @@ Every later tmux test depends on this. It must never touch the user's real tmux 
 
 **Step 1: Write the failing test**
 
+`TryRun` returns an error instead of failing the test, so tests can assert that
+a tmux command *fails* and so polling helpers (which have no usable `*testing.T`
+inside a closure) can call it. `Run` is the fatal-on-error wrapper. Cleanup can
+only be observed from a parent after the subtest that registered it returns,
+hence the split into two tests.
+
 ```go
 package testutil_test
 
 import (
+	"errors"
+	"io/fs"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -116,7 +157,7 @@ import (
 	"github.com/diegok/tmux-web/internal/tmux/testutil"
 )
 
-func TestServerIsIsolatedAndCleansUp(t *testing.T) {
+func TestServerIsIsolated(t *testing.T) {
 	srv := testutil.NewServer(t)
 	srv.Run(t, "new-session", "-d", "-s", "probe")
 
@@ -130,18 +171,88 @@ func TestServerIsIsolatedAndCleansUp(t *testing.T) {
 		t.Fatalf("refusing to run against socket %q", srv.Socket)
 	}
 
+	// The server must not inherit ~/.tmux.conf: a developer config that already
+	// sets mouse/aggressive-resize/automatic-rename would make later assertions
+	// about those options vacuous. C-b is the tmux default prefix.
+	if got := srv.Run(t, "show", "-g", "-v", "prefix"); got != "C-b" {
+		t.Fatalf("prefix = %q, want %q: server inherited a user config", got, "C-b")
+	}
+
 	// Sanity: the user's real server must not have gained a "probe" session.
 	real, _ := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
 	if strings.Contains(string(real), "probe") {
 		t.Fatal("test leaked a session into the user's real tmux server")
 	}
 }
+
+func TestTryRunReportsFailureWithoutFataling(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "probe")
+
+	out, err := srv.TryRun("has-session", "-t", "missing")
+	if err == nil {
+		t.Fatalf("expected an error for a missing session, got output %q", out)
+	}
+	// Diagnostics belong in the error; the returned value carries stdout only,
+	// so callers that parse it never see a stray stderr line.
+	if out != "" {
+		t.Errorf("returned value = %q, want empty: stderr must not be merged into it", out)
+	}
+	if !strings.Contains(err.Error(), "can't find session") {
+		t.Errorf("error should carry tmux's stderr, got %v", err)
+	}
+}
+
+func TestTryRunReturnsStdoutOnSuccess(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "probe")
+
+	out, err := srv.TryRun("list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		t.Fatalf("list-sessions: %v", err)
+	}
+	if out != "probe" {
+		t.Errorf("out = %q, want %q", out, "probe")
+	}
+}
+
+// Cleanup runs when a test returns, so it can only be observed from a parent
+// once the subtest that registered it has finished.
+func TestServerCleanupKillsServerAndRemovesSocket(t *testing.T) {
+	var socket, path string
+
+	t.Run("inner", func(t *testing.T) {
+		srv := testutil.NewServer(t)
+		socket, path = srv.Socket, srv.SocketPath()
+		srv.Run(t, "new-session", "-d", "-s", "probe")
+
+		// Anchor the path: if SocketPath were wrong, the parent's "it is gone"
+		// assertion below would pass without proving anything.
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("stat %s while the server is running: %v", path, err)
+		}
+	})
+
+	if out, err := exec.Command("tmux", "-L", socket, "-f", "/dev/null",
+		"has-session", "-t", "probe").CombinedOutput(); err == nil {
+		t.Errorf("server on %s survived cleanup: %s", socket, out)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat %s after cleanup: got %v, want not-exist", path, err)
+	}
+}
 ```
 
 **Step 2: Run it to verify it fails**
 
-Run: `go test ./internal/tmux/testutil/ -run TestServerIsIsolated -v`
-Expected: FAIL — package `testutil` does not exist.
+Run: `go test ./internal/tmux/testutil/ -run TestServer -v`
+Expected: FAIL -- package `testutil` does not exist.
+
+Then implement in stages and watch each assertion fail before fixing it: with a
+plain `-L` socket the prefix assertion reports `prefix = "C-a"`; with
+`CombinedOutput` the failure test reports the returned value carrying tmux's
+error text; without the `os.Remove` the cleanup test reports the socket file
+still present after the subtest returned.
 
 **Step 3: Implement the harness**
 
@@ -150,9 +261,13 @@ Expected: FAIL — package `testutil` does not exist.
 package testutil
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -162,47 +277,123 @@ type Server struct {
 	Socket string
 }
 
-// NewServer starts an isolated tmux server and registers its cleanup.
+// NewServer reserves a private tmux socket for a test and registers its
+// cleanup. It does not start the server: tmux does that lazily on the first
+// command run against the socket.
 func NewServer(t *testing.T) *Server {
 	t.Helper()
+
+	// Fail rather than skip: a suite that silently skips every tmux test
+	// because tmux is missing looks green while testing nothing.
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Fatalf("tmux not found in PATH: %v", err)
+	}
 
 	b := make([]byte, 6)
 	if _, err := rand.Read(b); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
-	s := &Server{Socket: "wterm-test-" + hex.EncodeToString(b)}
+	s := &Server{Socket: "wterm-test-" + socketSafe(t.Name()) + "-" + hex.EncodeToString(b)}
 
 	t.Cleanup(func() {
-		_ = exec.Command("tmux", "-L", s.Socket, "kill-server").Run()
+		_, _ = s.TryRun("kill-server")
+		// tmux does not unlink the socket on shutdown, so without this a dead
+		// socket file would accumulate per test.
+		_ = os.Remove(s.SocketPath())
 	})
 	return s
 }
 
-// Args prefixes tmux arguments with this server's socket.
-func (s *Server) Args(args ...string) []string {
-	return append([]string{"-L", s.Socket}, args...)
+// socketSafe reduces a test name to characters that are safe in a socket name,
+// truncated to keep the socket path well inside the unix path length limit.
+func socketSafe(name string) string {
+	const max = 24
+	var b strings.Builder
+	for _, r := range name {
+		if b.Len() >= max {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
 }
 
-// Run executes a tmux command against this server and returns its stdout.
+// SocketPath is the filesystem path of this server's socket. tmux places it in
+// $TMUX_TMPDIR/tmux-<uid>, falling back to /tmp.
+func (s *Server) SocketPath() string {
+	dir := os.Getenv("TMUX_TMPDIR")
+	if dir == "" {
+		dir = "/tmp"
+	}
+	return filepath.Join(dir, fmt.Sprintf("tmux-%d", os.Getuid()), s.Socket)
+}
+
+// Args prefixes tmux arguments with this server's socket. It also passes
+// -f /dev/null: a tmux server started on a private socket still reads
+// ~/.tmux.conf, and inheriting the developer's options would make tests that
+// assert on those same options pass without testing anything.
+func (s *Server) Args(args ...string) []string {
+	out := make([]string, 0, 4+len(args))
+	out = append(out, "-L", s.Socket, "-f", "/dev/null")
+	return append(out, args...)
+}
+
+// TryRun executes a tmux command against this server and returns its stdout
+// and any error. Callers that parse the output need it free of diagnostics, so
+// stderr is kept out of the returned value and reported through the error
+// instead. It takes no *testing.T so it can be used from cleanup and polling
+// helpers, and so tests can assert that a tmux command fails.
+func (s *Server) TryRun(args ...string) (string, error) {
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command("tmux", s.Args(args...)...)
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimRight(stderr.String(), "\n"); msg != "" {
+			return "", fmt.Errorf("tmux %v: %w: %s", args, err, msg)
+		}
+		return "", fmt.Errorf("tmux %v: %w", args, err)
+	}
+	return strings.TrimRight(stdout.String(), "\n"), nil
+}
+
+// Run executes a tmux command against this server and returns its stdout,
+// failing the test if the command does not succeed.
 func (s *Server) Run(t *testing.T, args ...string) string {
 	t.Helper()
-	out, err := exec.Command("tmux", s.Args(args...)...).CombinedOutput()
+	out, err := s.TryRun(args...)
 	if err != nil {
-		t.Fatalf("tmux %v: %v\n%s", args, err, out)
+		t.Fatalf("%v", err)
 	}
-	return strings.TrimRight(string(out), "\n")
+	return out
 }
 ```
 
 **Step 4: Run the test**
 
 Run: `go test ./internal/tmux/testutil/ -v`
-Expected: PASS.
+Expected: PASS (4 tests, one with an `inner` subtest).
 
-**Step 5: Confirm no leaked servers**
+**Step 5: Confirm no leaked servers or sockets**
 
-Run: `tmux -L wterm-test-x kill-server 2>/dev/null; pgrep -af 'tmux -L wterm-test' || echo clean`
-Expected: `clean`.
+A leaked server keeps its socket in `argv`, so it is greppable; a dead socket
+file is a separate leak, since tmux does not unlink the socket on shutdown.
+
+```bash
+pgrep -af -- '[t]mux -L wterm-test' || echo "no leaked servers"
+ls "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/" 2>/dev/null | grep '^wterm-test-' || echo "no leaked sockets"
+```
+
+Expected: `no leaked servers` and `no leaked sockets`.
+
+The bracket in `[t]mux` keeps the pattern from matching the shell that runs it;
+do not `echo` the unbracketed pattern in the same command, or that echo becomes
+a self-match. Verify the check is not vacuous by starting a server on a
+throwaway `wterm-test-` socket first and confirming it is reported.
 
 **Step 6: Commit**
 
@@ -820,11 +1011,15 @@ func TestAttachLifecycle(t *testing.T) {
 	defer func() { _ = f.Close() }()
 
 	waitFor(t, 3*time.Second, func() bool {
-		out, _ := exec.Command("tmux", srv.Args("list-sessions", "-F",
-			"#{session_name} #{session_attached}")...).Output()
-		return strings.Contains(string(out), name+" 1")
+		// Check the error: a failed command yields empty output, and a
+		// Contains check on empty output would make this wait vacuous.
+		out, err := srv.TryRun("list-sessions", "-F", "#{session_name} #{session_attached}")
+		return err == nil && strings.Contains(out, name+" 1")
 	}, "session never came up attached")
 
+	// These assertions are only meaningful because the harness starts tmux
+	// with -f /dev/null: the developer's ~/.tmux.conf already sets mouse on
+	// globally, which would satisfy the mouse check on its own.
 	for _, tc := range []struct{ opt, want string }{
 		{"destroy-unattached", "on"},
 		{"status", "off"},
@@ -841,8 +1036,11 @@ func TestAttachLifecycle(t *testing.T) {
 	_ = f.Close()
 	_ = cmd.Process.Kill()
 	waitFor(t, 3*time.Second, func() bool {
-		out, _ := exec.Command("tmux", srv.Args("list-sessions", "-F", "#{session_name}")...).Output()
-		return !strings.Contains(string(out), name)
+		// The unattached "work" session keeps the server alive, so
+		// list-sessions must keep succeeding here; an error means the harness
+		// broke, not that the session was reaped.
+		out, err := srv.TryRun("list-sessions", "-F", "#{session_name}")
+		return err == nil && !strings.Contains(out, name)
 	}, "session was not reaped on detach")
 }
 

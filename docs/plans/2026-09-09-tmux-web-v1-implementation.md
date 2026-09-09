@@ -2260,7 +2260,11 @@ func TestSelectPaneMovesOnlyThisTabsSession(t *testing.T) {
 // master. Both survive the tmux session's death otherwise: killing the client
 // or the session ends the stream, and would leave these behind.
 func TestCloseReleasesTheClientProcessAndItsPTY(t *testing.T) {
-	requireProc(t)
+	// Only Linux publishes process state this way. The daemon targets Linux;
+	// the bridge itself does not.
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skip("no /proc to read process state from")
+	}
 	srv := testutil.NewServer(t)
 	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
 
@@ -2290,7 +2294,7 @@ func TestCloseIsSafeFromConcurrentCallers(t *testing.T) {
 	name := s.SessionName()
 
 	var wg sync.WaitGroup
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		wg.Add(1)
 		go func() { defer wg.Done(); s.Close() }()
 	}
@@ -2354,13 +2358,20 @@ func sessions(t *testing.T, srv *testutil.Server) string {
 // anything listed here was left behind by the bridge.
 func zombieChildren(t *testing.T) []int {
 	t.Helper()
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		t.Fatalf("read /proc: %v", err)
+	}
 	var zombies []int
-	forEachPID(t, func(pid int) {
-		state, ppid, ok := procStat(pid)
-		if ok && state == "Z" && ppid == os.Getpid() {
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		if state, ppid, ok := procStat(pid); ok && state == "Z" && ppid == os.Getpid() {
 			zombies = append(zombies, pid)
 		}
-	})
+	}
 	return zombies
 }
 
@@ -2381,19 +2392,6 @@ func openPTYs(t *testing.T) int {
 	return n
 }
 
-func forEachPID(t *testing.T, fn func(pid int)) {
-	t.Helper()
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		t.Fatalf("read /proc: %v", err)
-	}
-	for _, e := range entries {
-		if pid, err := strconv.Atoi(e.Name()); err == nil {
-			fn(pid)
-		}
-	}
-}
-
 // procStat reports a process's state and parent pid, or false if it exited
 // between the listing and the read.
 func procStat(pid int) (state string, ppid int, ok bool) {
@@ -2412,15 +2410,6 @@ func procStat(pid int) (state string, ppid int, ok bool) {
 		return "", 0, false
 	}
 	return f[0], parent, true
-}
-
-// requireProc skips tests that read process state from /proc, which only Linux
-// has. The daemon targets Linux; the bridge itself does not.
-func requireProc(t *testing.T) {
-	t.Helper()
-	if _, err := os.Stat("/proc/self/stat"); err != nil {
-		t.Skip("no /proc to read process state from")
-	}
 }
 
 func waitFor(t *testing.T, d time.Duration, cond func() bool, msg string) {

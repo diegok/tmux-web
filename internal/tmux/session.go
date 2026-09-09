@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
+	"strings"
 )
 
 // AppOption is the tmux user option marking a session as app-created.
@@ -42,21 +44,46 @@ func AttachArgs(base, name string) []string {
 // Sweep kills app-created sessions with no attached clients. It runs at startup
 // to collect sessions orphaned by a crash, since destroy-unattached cannot fire
 // if the daemon died mid-attach.
+//
+// The listing and the kills are not atomic: a session reported with zero
+// clients could in principle gain one before its kill lands, closing a live
+// browser tab. That is tolerable only because the sole caller is startup, when
+// no app session is attaching. A periodic sweep would need a different design.
+//
+// A failure that is not "no server" is returned rather than swallowed. Startup
+// logs it and carries on -- an uncollectable orphan must not stop the daemon
+// serving -- but it has to be visible, because the conditions that produce one
+// (an unreadable socket, say) persist across every restart and leak a session
+// each time.
 func (c *Client) Sweep(ctx context.Context) error {
 	out, err := c.Run(ctx, "list-sessions", "-F",
 		"#{session_name}"+Sep+"#{"+AppOption+"}"+Sep+"#{session_attached}")
 	if err != nil {
-		return nil // no server, nothing to sweep
+		if noServer(err.Error()) {
+			return nil // nothing to sweep
+		}
+		return err
 	}
-	for _, line := range splitLines(out) {
-		f := splitSep(line)
+	var errs []error
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Split(line, Sep)
 		if len(f) != 3 {
 			continue
 		}
 		name, app, attached := f[0], f[1], f[2]
-		if app == "1" && attached == "0" {
-			_, _ = c.Run(ctx, "kill-session", "-t", name)
+		if app != "1" || attached != "0" {
+			continue
+		}
+		if _, err := c.Run(ctx, "kill-session", "-t", name); err != nil {
+			// The session going away between the listing and the kill is the
+			// expected race, not a fault. Anything else is worth surfacing.
+			// Matched on message text for the same reason as noServer: tmux
+			// exits 1 for every failure alike.
+			if !strings.Contains(err.Error(), "can't find session") {
+				errs = append(errs, err)
+			}
 		}
 	}
-	return nil
+	// Nil when errs is empty, so the common path returns no error.
+	return errors.Join(errs...)
 }

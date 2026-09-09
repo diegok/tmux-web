@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -79,6 +80,11 @@ func TestSweepSparesAttachedAppSessions(t *testing.T) {
 
 func TestSweepSparesUserSessions(t *testing.T) {
 	srv := testutil.NewServer(t)
+	// An unrelated session, purely to keep the server alive if the sweep kills
+	// everything it should have spared. Without it the last session's death
+	// takes the server with it, and the assertions below fail with "no server
+	// running" -- naming the harness instead of the bug.
+	srv.Run(t, "new-session", "-d", "-s", "keepalive")
 	srv.Run(t, "new-session", "-d", "-s", "_web-notes") // user's own, unmarked
 	srv.Run(t, "new-session", "-d", "-s", "_web-orphan")
 	srv.Run(t, "set", "-t", "_web-orphan", tmux.AppOption, "1")
@@ -101,6 +107,37 @@ func TestSweepSparesUserSessions(t *testing.T) {
 // rather than deferred in the caller, so that a t.Fatal anywhere in the test
 // still collects the client: a surviving `tmux attach` holds the session open
 // and defeats destroy-unattached.
+func TestSweepWithNoServerIsNotAnError(t *testing.T) {
+	// NewServer reserves a socket without starting tmux, so this is the
+	// never-started case: nothing to sweep is not a failure.
+	if err := tmux.NewClient(testutil.NewServer(t).Args()).Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep with no server = %v, want nil", err)
+	}
+}
+
+// A tmux failure that is not "no server" must reach the caller. Startup logs it
+// and carries on, but silently reporting success would hide, for instance, a
+// socket the daemon cannot read -- where every orphan survives and every
+// restart leaks another.
+//
+// The socket path is deliberately over the unix sun_path limit: it fails
+// identically for any uid, whereas the realistic case -- a socket whose
+// directory denies access, which tmux reports as "(Permission denied)" -- does
+// not fail at all for root. This is the one tmux invocation in the package that
+// does not go through testutil.Server, because the harness by construction
+// hands out sockets that work. It is read-only and names an explicit -S path
+// under t.TempDir(), so it cannot reach any real server.
+func TestSweepPropagatesRealErrors(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), strings.Repeat("x", 200))
+	err := tmux.NewClient([]string{"-S", socket, "-f", "/dev/null"}).Sweep(context.Background())
+	if err == nil {
+		t.Fatal("Sweep on an unusable socket = nil, want an error")
+	}
+	if !strings.Contains(err.Error(), "File name too long") {
+		t.Fatalf("Sweep error = %v, want the underlying tmux failure", err)
+	}
+}
+
 func startAttached(t *testing.T, srv *testutil.Server, base string) (string, *os.File, *exec.Cmd) {
 	t.Helper()
 	name := tmux.NewSessionName()

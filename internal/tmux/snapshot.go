@@ -95,9 +95,6 @@ func ParseRows(out string) (rows []Row, dropped int, err error) {
 	return rows, dropped, nil
 }
 
-func splitLines(s string) []string { return strings.Split(s, "\n") }
-func splitSep(s string) []string   { return strings.Split(s, Sep) }
-
 // Dedupe collapses rows to one per pane and puts them in the order the user
 // sees on screen.
 //

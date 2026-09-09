@@ -602,7 +602,7 @@ import (
 
 // Sep is the field separator used in tmux -F format strings. It is a literal
 // 0x1f byte: tmux does not expand "\x1f" inside a format string, and a tab is
-// unsafe because window names and paths may contain one.
+// unsafe because window names may contain one.
 const Sep = "\x1f"
 
 const fieldCount = 8

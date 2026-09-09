@@ -7,3 +7,6 @@
 # recreates the file afterwards.
 /internal/front/dist/*
 !/internal/front/dist/.gitkeep
+/node_modules
+/test-results
+/playwright-report

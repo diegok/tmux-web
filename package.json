@@ -1,0 +1,12 @@
+{
+  "name": "tmux-web-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Root package: the Playwright end-to-end suite only. The app's frontend lives in web/ and has its own package.json.",
+  "scripts": {
+    "e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0"
+  }
+}

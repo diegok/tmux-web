@@ -1,4 +1,4 @@
-.PHONY: build test test-go test-web front dist-keep
+.PHONY: build test test-go test-web test-e2e front dist-keep
 
 # CGO_ENABLED=0 makes this a genuinely static binary. Without it Go links
 # against the build machine's libc for DNS and user lookups, so a binary built
@@ -30,3 +30,12 @@ test-go: dist-keep
 
 test-web:
 	cd web && pnpm install && pnpm test
+
+# The end-to-end suite: a real browser against a real daemon and a real tmux
+# server on a socket of its own. Deliberately not part of `test`: it builds the
+# binary (see e2e/global-setup.ts), starts processes and needs a browser
+# downloaded, none of which belong in the loop a person runs on every save.
+test-e2e:
+	pnpm install
+	pnpm exec playwright install chromium
+	pnpm exec playwright test

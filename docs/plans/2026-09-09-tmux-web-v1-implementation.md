@@ -19,7 +19,7 @@
 1. **Session creation is one command, not four.** `tmux new-session -t <base> -s <name> \; set destroy-unattached on \; ...` with no `-d`. Setting `destroy-unattached on` on a detached session destroys it ~8ms later, before any attach lands. Doing it as a second call after spawning the attach only narrows the race.
 2. **The snapshot is deduplicated in Go, not filtered in tmux.** A `-f` filter drops panes entirely once the user kills the base session while a tab is open.
 3. **App sessions are marked with the `@wterm_web` tmux user option**, never matched by name.
-4. **`pane_current_path` may contain raw newlines.** Path is the last field; short rows are continuations.
+4. **The snapshot does not carry `pane_current_path`.** It is the one field tmux does not sanitize, and putting it last does not contain the damage: a newline in it starts a fresh line whose every field is pane-controlled, forging a row, and a 0x1f in it swallows the next pane's record so a live pane vanishes from the sidebar. `#{q:}` escapes neither byte. Nothing in v1 renders the path; the git panel can query it per pane. Relatedly, sort panes by `#{pane_index}`, never by `pane_id` — after a split-and-kill cycle the ids run `%0 %4 %2 %1` while the layout the user sees runs `0 1 2 3`.
 5. **The frontend must not use `WebSocketTransport`'s built-in reconnect.** It buffers sends while disconnected and flushes on reopen; since our reconnect creates a new tmux session, buffered keystrokes would land in the wrong pane.
 
 **Testing philosophy.** The valuable tests here run against a real tmux server on an isolated socket. Do not mock tmux — the whole risk of this project lives in tmux's actual behavior. Pure parsing logic gets table tests; everything else gets an integration test.
@@ -412,7 +412,9 @@ git commit -m "test: add isolated tmux server harness"
 
 ### Task 3: Snapshot record parsing
 
-Pure function, no tmux. This is where the newline hazard is handled.
+Pure function, no tmux. This is where the untrusted-field hazard is contained — by not carrying the untrusted field. Read "Before you start" item 4 first.
+
+Two properties matter more than the parsing itself. **Lines are independent:** a malformed line is skipped, never merged into a neighbour, so one bad record cannot corrupt a good one. **Loss is counted, not silent:** `dropped` exists so a snapshot quietly shedding panes is observable instead of looking like an empty server.
 
 **Files:**
 - Create: `internal/tmux/snapshot.go`
@@ -423,72 +425,163 @@ Pure function, no tmux. This is where the newline hazard is handled.
 ```go
 package tmux
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-const US = "\x1f"
+// rec builds one snapshot record from its fields, joined by the real separator.
+// Tests use Sep rather than a private copy of the byte so that a change to the
+// separator cannot leave the suite passing against a stale literal.
+func rec(fields ...string) string { return strings.Join(fields, Sep) }
+
+// A valid record, as a named baseline the malformed cases can be varied from.
+// Field order matches Format: group, pane id, pane index, app marker, window
+// index, window name, pane active, command.
+func goodRow(paneID, paneIndex, windowIndex string) string {
+	return rec("work", paneID, paneIndex, "", windowIndex, "api", "1", "claude")
+}
 
 func TestParseRows(t *testing.T) {
 	t.Run("one well formed row", func(t *testing.T) {
-		line := "work" + US + "%3" + US + "" + US + "1" + US + "api" + US + "1" + US + "claude" + US + "/home/d/api"
-		got, err := ParseRows(line)
+		got, dropped, err := ParseRows(rec("work", "%3", "0", "", "1", "api", "1", "claude"))
 		if err != nil {
 			t.Fatal(err)
+		}
+		if dropped != 0 {
+			t.Fatalf("dropped = %d, want 0", dropped)
 		}
 		if len(got) != 1 {
 			t.Fatalf("want 1 row, got %d", len(got))
 		}
 		r := got[0]
-		if r.GroupKey != "work" || r.PaneID != "%3" || r.AppOwned {
+		if r.GroupKey != "work" || r.PaneID != "%3" || r.PaneIndex != 0 || r.AppOwned {
 			t.Fatalf("bad row: %+v", r)
 		}
 		if r.WindowIndex != 1 || r.WindowName != "api" || !r.PaneActive {
 			t.Fatalf("bad row: %+v", r)
 		}
-		if r.Command != "claude" || r.Path != "/home/d/api" {
+		if r.Command != "claude" {
 			t.Fatalf("bad row: %+v", r)
 		}
 	})
 
-	t.Run("app owned row", func(t *testing.T) {
-		line := "work" + US + "%3" + US + "1" + US + "0" + US + "w" + US + "0" + US + "zsh" + US + "/tmp"
-		got, _ := ParseRows(line)
+	// Pins the false side of both booleans: a parser hardcoding either to true
+	// passes every other subtest.
+	t.Run("app owned row with an inactive pane", func(t *testing.T) {
+		got, dropped, err := ParseRows(rec("work", "%3", "2", "1", "0", "w", "0", "zsh"))
+		if err != nil || dropped != 0 || len(got) != 1 {
+			t.Fatalf("ParseRows = %+v, %d, %v", got, dropped, err)
+		}
 		if !got[0].AppOwned {
 			t.Fatal("expected AppOwned")
 		}
+		if got[0].PaneActive {
+			t.Fatal("expected PaneActive false")
+		}
+		if got[0].PaneIndex != 2 {
+			t.Fatalf("PaneIndex = %d, want 2", got[0].PaneIndex)
+		}
 	})
 
-	// tmux sanitizes session and window names but NOT pane_current_path.
-	// A path containing a newline splits the record across output lines.
-	t.Run("path containing a newline is rejoined", func(t *testing.T) {
-		line := "work" + US + "%3" + US + "" + US + "0" + US + "w" + US + "0" + US + "zsh" + US + "/tmp/ev\nil/dir"
-		got, err := ParseRows(line)
+	// Every other subtest parses a single record, which lets a parser that only
+	// ever returns one row, or one that mixes fields between rows, survive.
+	t.Run("several rows are returned in input order", func(t *testing.T) {
+		out := strings.Join([]string{
+			goodRow("%1", "0", "0"),
+			goodRow("%4", "1", "0"),
+			goodRow("%2", "2", "3"),
+		}, "\n")
+		got, dropped, err := ParseRows(out)
+		if err != nil || dropped != 0 {
+			t.Fatalf("dropped = %d, err = %v", dropped, err)
+		}
+		if len(got) != 3 {
+			t.Fatalf("want 3 rows, got %d: %+v", len(got), got)
+		}
+		for i, want := range []struct {
+			paneID             string
+			paneIdx, windowIdx int
+		}{
+			{"%1", 0, 0},
+			{"%4", 1, 0},
+			{"%2", 2, 3},
+		} {
+			if got[i].PaneID != want.paneID || got[i].PaneIndex != want.paneIdx ||
+				got[i].WindowIndex != want.windowIdx {
+				t.Fatalf("row %d = %+v, want %+v", i, got[i], want)
+			}
+		}
+	})
+
+	// A record split across lines used to be rejoined into the previous row's
+	// path. There is no path field any more, so a line that does not parse is
+	// dropped -- it must never merge into, or corrupt, a neighbouring row.
+	t.Run("malformed lines are dropped and counted", func(t *testing.T) {
+		out := strings.Join([]string{
+			goodRow("%1", "0", "0"),
+			"nonsense", // too few fields
+			// Numeric indices, so that only the field count can reject it.
+			rec("work", "%7", "0", "", "0", "w", "1", "zsh", "extra"),
+			rec("work", "%9", "0", "", "notanint", "w", "1", "zsh"), // bad window index
+			rec("work", "%8", "notanint", "", "0", "w", "1", "zsh"), // bad pane index
+			goodRow("%2", "1", "0"),
+		}, "\n")
+		got, dropped, err := ParseRows(out)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(got) != 1 {
-			t.Fatalf("want 1 row, got %d: %+v", len(got), got)
+		if dropped != 4 {
+			t.Fatalf("dropped = %d, want 4", dropped)
 		}
-		if got[0].Path != "/tmp/ev\nil/dir" {
-			t.Fatalf("path not rejoined: %q", got[0].Path)
+		if len(got) != 2 {
+			t.Fatalf("want the 2 good rows, got %d: %+v", len(got), got)
 		}
-	})
-
-	t.Run("empty output yields no rows", func(t *testing.T) {
-		got, err := ParseRows("")
-		if err != nil || got != nil {
-			t.Fatalf("ParseRows(\"\") = %v, %v; want nil, nil", got, err)
+		if got[0].PaneID != "%1" || got[1].PaneID != "%2" {
+			t.Fatalf("wrong rows survived: %+v", got)
 		}
 	})
 
-	t.Run("garbage before any valid row is dropped", func(t *testing.T) {
-		got, err := ParseRows("nonsense")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(got) != 0 {
-			t.Fatalf("want 0 rows, got %+v", got)
+	// tmux output arrives newline-terminated. Client.Run trims it today, but
+	// that contract lives in another file and a control-mode caller would not
+	// go through it.
+	t.Run("a trailing newline does not produce a phantom row", func(t *testing.T) {
+		got, dropped, err := ParseRows(goodRow("%1", "0", "0") + "\n")
+		if err != nil || dropped != 0 || len(got) != 1 {
+			t.Fatalf("ParseRows = %+v, %d, %v; want 1 row, 0 dropped", got, dropped, err)
 		}
 	})
+
+	t.Run("empty output yields no rows and drops nothing", func(t *testing.T) {
+		got, dropped, err := ParseRows("")
+		if err != nil || got != nil || dropped != 0 {
+			t.Fatalf("ParseRows(\"\") = %v, %d, %v; want nil, 0, nil", got, dropped, err)
+		}
+	})
+
+	// The error is always nil today. The return exists because Task 5 calls this
+	// where an error is the natural shape; this pins the current contract so a
+	// caller that ignores it is not silently wrong later.
+	t.Run("error is always nil", func(t *testing.T) {
+		for _, in := range []string{"", "nonsense", goodRow("%1", "0", "0"), "\n\n"} {
+			if _, _, err := ParseRows(in); err != nil {
+				t.Fatalf("ParseRows(%q) returned %v, want nil", in, err)
+			}
+		}
+	})
+}
+
+// Format and fieldCount must agree, or every record is dropped at runtime while
+// the parser's own tests keep passing.
+func TestFormatFieldCount(t *testing.T) {
+	if n := strings.Count(Format, Sep); n != fieldCount-1 {
+		t.Fatalf("Format has %d separators (%d fields), want %d (%d fields)",
+			n, n+1, fieldCount-1, fieldCount)
+	}
+	if strings.Contains(Format, "pane_current_path") {
+		t.Fatal("pane_current_path must not be in the snapshot: an unsanitized " +
+			"field lets one pane's output forge or erase another's record")
+	}
 }
 ```
 
@@ -515,73 +608,102 @@ const Sep = "\x1f"
 const fieldCount = 8
 
 // Row is one pane as reported by tmux, before deduplication.
+//
+// The JSON names are the wire contract with the frontend; without the tags Go
+// would marshal the exported Go names instead.
 type Row struct {
-	GroupKey    string // session_group, falling back to session_name
-	PaneID      string // e.g. "%3", stable for the pane's lifetime
-	AppOwned    bool   // set from the @wterm_web user option
-	WindowIndex int
-	WindowName  string
-	PaneActive  bool
-	Command     string
-	Path        string
+	GroupKey    string `json:"groupKey"`  // session_group, falling back to session_name
+	PaneID      string `json:"paneId"`    // e.g. "%3", stable for the pane's lifetime
+	PaneIndex   int    `json:"paneIndex"` // position within the window, in layout order
+	AppOwned    bool   `json:"appOwned"`  // set from the @wterm_web user option
+	WindowIndex int    `json:"windowIndex"`
+	WindowName  string `json:"windowName"`
+	PaneActive  bool   `json:"paneActive"`
+	Command     string `json:"command"`
 }
 
 // Format is the -F argument producing rows this package can parse.
-// Path is deliberately last: it is the only field tmux does not sanitize, so a
-// raw newline in it can only ever corrupt the tail of a record.
+//
+// pane_current_path is deliberately absent. tmux sanitizes session and window
+// names but not the path, so a pane sitting in a directory whose name contains
+// a 0x1f or a newline can forge a whole extra record or swallow the following
+// pane's -- either way the sidebar shows something other than the truth, and a
+// pane that exists can vanish from it. Being the last field does not bound the
+// damage: a newline simply starts a fresh line whose eight fields are all
+// attacker-controlled. tmux's #{q:} modifier does not escape either byte.
+// Nothing in v1 renders the path; the deferred git panel can query it per pane,
+// where a single-pane result needs no field splitting to interpret.
+//
+// pane_current_command is a theoretical residual: it is not known to be
+// sanitized either, and two attempts to make tmux report a command containing a
+// newline failed, but that is not a proof that it cannot happen.
 const Format = "#{?#{session_group},#{session_group},#{session_name}}" + Sep +
 	"#{pane_id}" + Sep +
+	"#{pane_index}" + Sep +
 	"#{@wterm_web}" + Sep +
 	"#{window_index}" + Sep +
 	"#{window_name}" + Sep +
 	"#{pane_active}" + Sep +
-	"#{pane_current_command}" + Sep +
-	"#{pane_current_path}"
+	"#{pane_current_command}"
 
-// ParseRows parses raw `tmux list-panes` output.
+// ParseRows parses raw `tmux list-panes` output into one Row per line.
 //
-// A line with the wrong field count is treated as the continuation of the
-// previous row's path rather than as a new pane, because pane_current_path may
-// contain newlines. Leading garbage with no preceding row is discarded.
-func ParseRows(out string) ([]Row, error) {
-	var rows []Row
+// Any line that is not a well-formed record -- wrong field count, or a
+// non-numeric index -- is skipped and counted in dropped. Lines are independent:
+// a malformed one never merges into or alters a neighbouring row. dropped is
+// returned rather than logged so the caller can surface a snapshot that is
+// quietly losing panes instead of it passing unnoticed.
+//
+// The error is always nil today. It is part of the signature because Snapshot
+// calls this in a context where an error is the natural shape.
+func ParseRows(out string) (rows []Row, dropped int, err error) {
+	out = strings.TrimSuffix(out, "\n")
+	if out == "" {
+		return nil, 0, nil
+	}
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Split(line, Sep)
 		if len(fields) != fieldCount {
-			if len(rows) > 0 {
-				rows[len(rows)-1].Path += "\n" + line
-			}
+			dropped++
 			continue
 		}
-		widx, err := strconv.Atoi(fields[3])
-		if err != nil {
+		// Distinct names: shadowing the named err return here would be
+		// harmless today only because it is always nil.
+		pidx, perr := strconv.Atoi(fields[2])
+		widx, werr := strconv.Atoi(fields[4])
+		if perr != nil || werr != nil {
+			dropped++
 			continue
 		}
 		rows = append(rows, Row{
 			GroupKey:    fields[0],
 			PaneID:      fields[1],
-			AppOwned:    fields[2] == "1",
+			PaneIndex:   pidx,
+			AppOwned:    fields[3] == "1",
 			WindowIndex: widx,
-			WindowName:  fields[4],
-			PaneActive:  fields[5] == "1",
-			Command:     fields[6],
-			Path:        fields[7],
+			WindowName:  fields[5],
+			PaneActive:  fields[6] == "1",
+			Command:     fields[7],
 		})
 	}
-	return rows, nil
+	return rows, dropped, nil
 }
 ```
 
 **Step 4: Run the tests**
 
-Run: `go test ./internal/tmux/ -run TestParseRows -v`
-Expected: PASS, all five subtests.
+Run: `go test ./internal/tmux/ -v -count=1`
+Expected: PASS — seven `TestParseRows` subtests plus `TestFormatFieldCount`.
+
+Note the unfiltered run: `-run TestParseRows` would silently skip
+`TestFormatFieldCount`, which is the one test that catches `Format` and
+`fieldCount` disagreeing.
 
 **Step 5: Commit**
 
 ```bash
 git add internal/tmux/snapshot.go internal/tmux/snapshot_test.go
-git commit -m "feat: parse tmux pane rows with newline-safe paths"
+git commit -m "feat: parse tmux pane rows into a typed snapshot"
 ```
 
 ---

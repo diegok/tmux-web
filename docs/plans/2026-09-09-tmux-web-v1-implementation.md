@@ -719,9 +719,17 @@ design doc's "Sidebar state" section first.
 - Test: `internal/tmux/snapshot_test.go`
 
 Unlike Task 3's, the code blocks below are *fragments appended to* files Task 3
-created, not whole-file listings. Task 3's blocks are complete files and are
-kept byte-identical to what ships; once this task lands they become strict
-prefixes of those files instead.
+created, not whole-file listings. That changes how to verify plan-against-code,
+so use the right check for each file:
+
+- `snapshot_test.go` -- Task 3's block stays a strict **prefix**; Task 4 only
+  appends.
+- `snapshot.go` -- Task 3's block is **not** a prefix, because Task 4 edits the
+  import block in the middle of the file. It is byte-equal to the shipped file
+  minus exactly two Task 4 edits: `sort` added to the imports, and `Dedupe`
+  appended. Reconstruct rather than compare prefixes.
+- Task 4's own three fragments (test, import, `Dedupe`) must each be
+  byte-**present** in the shipped files.
 
 **Step 1: Write the failing test**
 

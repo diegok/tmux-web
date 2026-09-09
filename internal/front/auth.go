@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -201,7 +202,7 @@ func (a *Auth) protect(next http.Handler, originRequired bool) http.Handler {
 		c, err := r.Cookie(DeviceCookieName)
 		if err != nil {
 			// No cookie, or a malformed one. Both are "not signed in".
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeUnauthorized(w, r)
 			return
 		}
 		// Lookup compares digests in constant time and knows nothing of revoked
@@ -209,7 +210,7 @@ func (a *Auth) protect(next http.Handler, originRequired bool) http.Handler {
 		// matching. Severing its live sockets is the registry's job.
 		d, ok := a.store.Lookup(c.Value)
 		if !ok {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			writeUnauthorized(w, r)
 			return
 		}
 
@@ -374,4 +375,35 @@ func AllowedOrigins(host string, dev bool, devPort int) ([]string, error) {
 		"http://127.0.0.1" + port,
 		"http://[::1]" + port,
 	}, nil
+}
+
+// writeUnauthorized refuses a request, telling a person how to fix it.
+//
+// This matters more than a 401 body usually would: with no passwords and no
+// sign-in form, an unenrolled browser hitting "/" has no way to discover that
+// the answer is a command on the box. A bare "unauthorized" is the very first
+// thing a new owner sees, and it points nowhere.
+//
+// The hint names the command and nothing else. It deliberately does not say
+// whether any device is enrolled, whether this one was revoked, or what the
+// socket path is: the reader is unauthenticated, and none of that helps them
+// while all of it describes the system to someone who should not be here.
+func writeUnauthorized(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if strings.HasPrefix(r.URL.Path, "/api/") || isSocketUpgrade(r) {
+		// Machine callers get the terse form; the SPA renders its own message.
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusUnauthorized)
+	_, _ = io.WriteString(w, "This browser is not enrolled.\n\n"+
+		"Run this on the machine wterm-web is running on, then open the link it prints:\n\n"+
+		"    wterm-web enroll --name \"this browser\"\n")
+}
+
+// isSocketUpgrade reports whether this is a WebSocket handshake, which wants a
+// status code rather than prose.
+func isSocketUpgrade(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
 }

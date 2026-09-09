@@ -153,6 +153,12 @@ This is the same accepted-limitation class as window sizing, and for the same
 reason — it only bites when co-viewing one window. Like sizing, it must not be
 described as solved.
 
+Three things now sit in this family: window size, copy-mode, and the active
+pane. All three are properties of the *window*, which grouped sessions share by
+design; only the current window itself is per-session. That is the real
+boundary of what this model isolates, and it is worth stating once plainly
+rather than rediscovering it one feature at a time.
+
 A header button and a palette action both offer "enter copy mode" explicitly,
 since a full-screen agent TUI may itself want mouse reporting.
 
@@ -209,7 +215,32 @@ The snapshot renders directly to the sidebar tree, so the client keeps no model
 of tmux that could drift.
 
 Sidebar clicks issue `select-window` / `select-pane` against the tab's own
-grouped session, so navigation never disturbs other clients.
+grouped session. **Only half of that is isolated**, and the plan's original
+target form was wrong on top of it.
+
+The current *window* is per-session, so switching windows really does leave
+other clients alone. The active *pane* is a property of the window, which
+grouped sessions share, so `select-pane` is visible to every member of the
+group including the user's own attached session. Verified: a tab selecting
+`%1` moves the base session's active pane too. tmux offers no way to scope it,
+and it is the same behavior two attached clients already have, but the UI
+should not promise otherwise.
+
+The target form also has to be exact. `select-window -t <session>:<paneID>`
+fails outright (`can't find window: %3`) -- a window target takes a name, index
+or `@id`, never a pane id. A bare `select-window -t %3` succeeds but picks the
+session itself, and with grouped sessions that choice is arbitrary: in testing
+it moved a different tab's session. The correct sequence resolves the pane's
+window first:
+
+```sh
+tmux list-panes -t %3 -F '#{window_id}'      # -> @7
+tmux select-window -t '=<session>:@7'
+tmux select-pane -t %3
+```
+
+`=` matters because tmux falls back to prefix matching and resolves an empty
+target to whatever is current, both exiting 0.
 
 Cost of polling: a forked tmux process every 1.5s, and up to 1.5s of lag before a
 newly spawned agent appears. If that lag is annoying in practice, the upgrade is

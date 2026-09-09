@@ -1,0 +1,461 @@
+package front
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"math"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/coder/websocket"
+	"github.com/diegok/tmux-web/internal/ptybridge"
+	"github.com/diegok/tmux-web/internal/tmux"
+)
+
+// Keepalive defaults. Pinging is not a nicety here: on a half-open connection
+// -- a closed laptop lid, a NAT that dropped the mapping -- the `tmux attach`
+// process stays alive and attached, so destroy-unattached never fires, the
+// session is never collected, and the user's next reconnect adds a second
+// throwaway session beside the leaked one. On a flaky link those accumulate.
+// A ping is the only thing that distinguishes a quiet terminal from a dead peer.
+const (
+	wsPingInterval = 20 * time.Second
+	wsPingTimeout  = 10 * time.Second
+)
+
+// wsReadLimit bounds one inbound message. Keystrokes are a few bytes, but a
+// paste arrives as a single message, and coder/websocket's 32KB default would
+// tear down a terminal for pasting a moderately large blob of text. A megabyte
+// is far past anything a person pastes and still nothing next to the PTY buffer
+// it feeds.
+const wsReadLimit = 1 << 20
+
+// The size the attach starts at. A browser terminal has no dimensions until it
+// has laid out, so the first thing the frontend sends is a resize; this is only
+// what tmux draws in the meantime, and 80x24 is the conventional answer.
+const (
+	wsInitialCols = 80
+	wsInitialRows = 24
+)
+
+// wsTmuxTimeout bounds each tmux command run on behalf of a socket. These run
+// on the read goroutine, so a wedged tmux server would otherwise stall the
+// tab's keystrokes indefinitely rather than for a few seconds.
+const wsTmuxTimeout = 5 * time.Second
+
+// TerminalConfig configures the WebSocket terminal endpoint.
+type TerminalConfig struct {
+	// TmuxArgs selects the tmux server, e.g. {"-L", "sock"}; nil is the
+	// user's default server.
+	TmuxArgs []string
+
+	// AllowedOrigin is the one origin permitted to open a terminal, as
+	// scheme://host[:port]. Anything else -- including a request with no
+	// Origin at all -- is refused. Empty refuses everything.
+	AllowedOrigin string
+
+	// PingInterval and PingTimeout override the keepalive timings. Zero means
+	// the defaults above; they exist so tests can observe a keepalive without
+	// waiting twenty seconds for one.
+	PingInterval time.Duration
+	PingTimeout  time.Duration
+}
+
+// TerminalHandler serves one browser tab's terminal over a WebSocket: a
+// throwaway tmux session grouped onto a real one, attached under a PTY, with
+// the PTY's bytes framed onto the socket in both directions.
+type TerminalHandler struct {
+	cfg TerminalConfig
+
+	// origin is AllowedOrigin reduced to scheme://host, or "" if it could not
+	// be read as an origin at all. Compared by equality, never by suffix.
+	origin string
+
+	tm *tmux.Client
+}
+
+// NewTerminalHandler builds the handler. It cannot fail: an AllowedOrigin that
+// is unset or unreadable leaves the handler refusing every connection, which is
+// the safe direction and is logged. Returning an error instead would push a
+// decision onto every caller for a case that is already fail-closed.
+func NewTerminalHandler(cfg TerminalConfig) *TerminalHandler {
+	origin := wsNormalizeOrigin(cfg.AllowedOrigin)
+	if origin == "" {
+		slog.Warn("terminal handler has no usable allowed origin; it will refuse every connection",
+			"allowed_origin", cfg.AllowedOrigin)
+	}
+	return &TerminalHandler{cfg: cfg, origin: origin, tm: tmux.NewClient(cfg.TmuxArgs)}
+}
+
+func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Origin is the CSRF boundary for this endpoint, and it is checked before
+	// anything else happens. Browsers attach cookies to cross-origin WebSocket
+	// handshakes, so without this any page the user visits could open a socket
+	// onto their shell. SameSite does not help: it is computed on the
+	// registrable domain, so a service later published on test.example.com is
+	// same-site with tmux.example.com and its cookies ride along.
+	if !h.allowsOrigin(r) {
+		http.Error(w, "forbidden origin", http.StatusForbidden)
+		return
+	}
+
+	base := r.URL.Query().Get("session")
+	if base == "" {
+		// Not a default: tmux resolves an empty target to "whatever is
+		// current" and exits 0, so an absent parameter would silently attach
+		// the tab to an arbitrary session. There is no session the daemon
+		// could pick that would be right, and the frontend always knows which
+		// one it wants.
+		http.Error(w, "missing session parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Checked before the upgrade so that "there is no such session" arrives as
+	// an HTTP status the browser can act on, rather than as a socket that opens
+	// and dies a moment later with the reason painted into the terminal. "="
+	// pins an exact match: tmux target matching otherwise falls back to a
+	// prefix, so ?session=wor would attach to "work".
+	ctx, cancel := context.WithTimeout(r.Context(), wsTmuxTimeout)
+	_, err := h.tm.Run(ctx, "has-session", "-t", "="+base)
+	cancel()
+	if err != nil {
+		slog.Info("terminal refused: no such tmux session", "session", base, "err", err)
+		http.Error(w, "no such session", http.StatusNotFound)
+		return
+	}
+
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		// The library's own origin check is turned off because allowsOrigin
+		// above has already run and is strictly stricter. Layering the two
+		// would be worse than it looks: coder/websocket authorizes any request
+		// whose Origin host matches the Host header, and treats a request with
+		// no Origin at all as authorized, so it is not the boundary this
+		// endpoint needs -- and standing behind allowsOrigin it would mask a
+		// bug in it. With it off, every origin rule this handler has is one its
+		// own tests can reach; a suffix comparison slipped into allowsOrigin
+		// fails TestWebSocketRejectsForeignOrigins instead of being quietly
+		// caught by the library.
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		return // Accept has already written the response
+	}
+	h.serve(r.Context(), conn, base)
+}
+
+// allowsOrigin reports whether the request came from the one configured origin.
+//
+// Exact match on scheme, host and port. Never a suffix match: comparing
+// suffixes is what lets test.example.com pass as tmux.example.com, which is the
+// precise attack this endpoint has to survive. Never a host-only match either:
+// a downgraded scheme is a different origin and is the one an attacker on the
+// network can serve.
+//
+// A request with no Origin header is refused. Browsers always send one on a
+// WebSocket handshake, so the only clients this turns away are non-browser ones
+// -- which have no business here, and for which coder/websocket's own check
+// returns "authorized".
+func (h *TerminalHandler) allowsOrigin(r *http.Request) bool {
+	if h.origin == "" {
+		return false // unconfigured means closed, not open
+	}
+	// Exactly one header. Two Origin headers is not something a browser
+	// produces; it is a sign of a proxy or a smuggling attempt, and picking one
+	// of them is a guess.
+	got := r.Header.Values("Origin")
+	if len(got) != 1 {
+		return false
+	}
+	return wsNormalizeOrigin(got[0]) == h.origin
+}
+
+// wsNormalizeOrigin reduces an origin to lowercase scheme://host, or "" if the
+// string is not one. Both sides of the comparison go through it so that a
+// configured "https://Tmux.Example.com" matches a browser's lowercase header.
+//
+// Anything carrying more than an origin -- userinfo, a query, a fragment, a
+// path beyond "/" -- yields "". A header like https://tmux.example.com@evil.com
+// is safe either way, since url.Parse reads the host as evil.com, but refusing
+// to interpret a malformed origin at all is one less thing to reason about.
+func wsNormalizeOrigin(s string) string {
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil ||
+		u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return ""
+	}
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
+}
+
+// wsExit is how one loop tells the handler why the connection is over, and
+// whether the peer is still there to be told about it.
+type wsExit struct {
+	status   websocket.StatusCode
+	reason   string
+	graceful bool
+}
+
+// serve runs the connection until one of its three loops ends, then tears the
+// other two, the tmux client and the socket down together.
+func (h *TerminalHandler) serve(ctx context.Context, conn *websocket.Conn, base string) {
+	conn.SetReadLimit(wsReadLimit)
+
+	// context.Background, not the request context, and deliberately so. The
+	// session's lifetime is owned by Close; ptybridge.Open documents that it
+	// does not wire its context to the process, and handing it one that is
+	// cancelled when this handler returns would invite exactly that bug back.
+	sess, err := ptybridge.Open(context.Background(), ptybridge.Config{
+		TmuxArgs: h.cfg.TmuxArgs,
+		Base:     base,
+		Cols:     wsInitialCols,
+		Rows:     wsInitialRows,
+	})
+	if err != nil {
+		slog.Error("terminal: cannot start tmux client", "session", base, "err", err)
+		_ = conn.Close(websocket.StatusInternalError, "cannot start tmux client")
+		return
+	}
+
+	// One cancellation ends all three loops: it aborts a parked Read, Write or
+	// Ping -- coder/websocket closes the connection on a context expiry -- and
+	// it is the other arm of the write loop's select.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Buffered for all three, so a loop that loses the race to report still
+	// returns instead of parking on the send forever.
+	done := make(chan wsExit, 3)
+	var wg sync.WaitGroup
+	wg.Add(3)
+	go func() { defer wg.Done(); done <- h.readLoop(ctx, conn, sess) }()
+	go func() { defer wg.Done(); done <- wsWriteLoop(ctx, conn, sess.Output()) }()
+	go func() { defer wg.Done(); done <- h.pingLoop(ctx, conn) }()
+
+	exit := <-done
+
+	// The close frame goes out before the cancellation, and it has to: cancel
+	// aborts the parked Read, and aborting a read closes the connection, so a
+	// frame written afterwards would never leave. Writing it first also means
+	// the still-parked reader is what consumes the peer's reply, which is what
+	// keeps this from waiting out the library's five-second handshake timeout.
+	if exit.graceful {
+		_ = conn.Close(exit.status, exit.reason)
+	}
+
+	cancel()
+	// Nothing this handler started outlives it. Without the wait, a client that
+	// vanished would leave three parked goroutines and, through the session
+	// they hold, a tmux client per abandoned tab.
+	wg.Wait()
+	sess.Close()
+	_ = conn.CloseNow()
+}
+
+// readLoop carries the browser's keystrokes and control messages. It is the
+// only caller of conn.Read, which is the one method on a Conn that is not safe
+// to call concurrently.
+func (h *TerminalHandler) readLoop(ctx context.Context, conn *websocket.Conn, sess *ptybridge.Session) wsExit {
+	for {
+		typ, msg, err := conn.Read(ctx)
+		if err != nil {
+			// The peer closed, vanished, or we are shutting down. There is
+			// nobody left to send a status to.
+			return wsExit{}
+		}
+		// Binary only. Text frames would force UTF-8 validation on a stream
+		// that is not text -- a browser hands them over as strings that have
+		// already had invalid bytes replaced, which corrupts escape sequences
+		// irrecoverably.
+		if typ != websocket.MessageBinary {
+			return wsExit{websocket.StatusUnsupportedData, "binary frames only", true}
+		}
+		kind, payload, err := ptybridge.Decode(msg)
+		if err != nil {
+			return wsExit{websocket.StatusUnsupportedData, "malformed frame", true}
+		}
+		switch kind {
+		case ptybridge.FrameData:
+			if _, err := sess.Write(payload); err != nil {
+				return wsExit{} // the PTY is gone; the write loop is ending too
+			}
+		case ptybridge.FrameControl:
+			if exit, fatal := h.control(ctx, sess, payload); fatal {
+				return exit
+			}
+		}
+	}
+}
+
+// wsControlMessage is the JSON inside a control frame. The field names are a
+// cross-language contract: the browser transport encodes this independently, so
+// renaming one silently breaks the frontend.
+//
+// Cols and Rows are int rather than uint16 so that an absurd value is a
+// semantic problem this handler can ignore, not a decoding error that would
+// tear the socket down. A ResizeObserver firing before layout is a plausible
+// source of nonsense dimensions, and losing a terminal over one would be
+// absurd.
+type wsControlMessage struct {
+	Type string `json:"type"`
+	Cols int    `json:"cols"`
+	Rows int    `json:"rows"`
+	Pane string `json:"pane"`
+}
+
+// control applies one control message.
+//
+// The split between fatal and not is deliberate. A payload that is not this
+// protocol at all -- unparseable JSON -- means the two ends disagree about the
+// wire format, there is nothing to recover to, and ignoring it would leave a
+// tab whose resizes quietly stop working with nothing in the log. That closes
+// the socket, loudly, and reconnecting costs the user nothing because tmux
+// redraws on attach.
+//
+// A well-formed message this daemon cannot carry out is the opposite case. The
+// sidebar is up to 1.5s stale, so selecting a pane that has just died is an
+// ordinary race rather than a broken client, and destroying a working terminal
+// over it would be hostile. Those are logged and the socket carries on.
+func (h *TerminalHandler) control(ctx context.Context, sess *ptybridge.Session, payload []byte) (wsExit, bool) {
+	var m wsControlMessage
+	if err := json.Unmarshal(payload, &m); err != nil {
+		return wsExit{websocket.StatusUnsupportedData, "malformed control message", true}, true
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, wsTmuxTimeout)
+	defer cancel()
+
+	switch m.Type {
+	case "resize":
+		// A pty winsize is two uint16s, and a zero one is not a terminal.
+		//
+		// Both bounds and both axes have to be checked. An earlier version read
+		// `m.Cols < 0 && m.Cols > math.MaxUint16`, which no value satisfies, so
+		// the guard never fired: cols:-1 reached uint16(-1) == 65535 and
+		// resized the pty to 65535x65535, which wedges the client.
+		if m.Cols <= 0 || m.Rows <= 0 || m.Cols > math.MaxUint16 || m.Rows > math.MaxUint16 {
+			slog.Warn("terminal: ignoring out-of-range resize", "cols", m.Cols, "rows", m.Rows)
+			break
+		}
+		if err := sess.Resize(uint16(m.Cols), uint16(m.Rows)); err != nil {
+			slog.Warn("terminal: resize failed", "err", err)
+		}
+	case "select":
+		// Navigates this tab's own session only, so clicking a pane here moves
+		// neither the other tabs nor the terminal the user is sitting at.
+		if err := sess.SelectPane(ctx, m.Pane); err != nil {
+			slog.Warn("terminal: select pane failed", "pane", m.Pane, "err", err)
+		}
+	case "copy-mode":
+		if err := h.copyMode(ctx, sess, m.Pane); err != nil {
+			slog.Warn("terminal: copy-mode failed", "pane", m.Pane, "err", err)
+		}
+	default:
+		slog.Warn("terminal: ignoring unknown control message", "type", m.Type)
+	}
+	return wsExit{}, false
+}
+
+// copyMode puts a pane into tmux's copy-mode, which is where this app's
+// scrollback lives.
+//
+// An empty pane means "the pane this tab is looking at": the palette offers
+// "enter copy mode" before anything has been clicked, and the tab's own session
+// is the one thing that always answers that question.
+//
+// A non-empty pane must actually be a pane id. `tmux copy-mode -t work` exits 0
+// and puts the *user's* current pane into copy-mode, so a frontend that sent a
+// session name where a pane id belongs would freeze the terminal they are
+// sitting in front of, from a machine they are not. tmux.Client.SelectPane
+// guards the same way for the same reason.
+func (h *TerminalHandler) copyMode(ctx context.Context, sess *ptybridge.Session, pane string) error {
+	// The trailing ":" is what makes this a session target; a bare -t is read
+	// as a pane target, and "=name" is not a pane.
+	target := "=" + sess.SessionName() + ":"
+	if pane != "" {
+		if !wsIsPaneID(pane) {
+			return fmt.Errorf("%q is not a tmux pane id", pane)
+		}
+		target = pane
+	}
+	_, err := h.tm.Run(ctx, "copy-mode", "-t", target)
+	return err
+}
+
+// wsIsPaneID reports whether s is a tmux pane id, e.g. "%3".
+func wsIsPaneID(s string) bool {
+	if len(s) < 2 || s[0] != '%' {
+		return false
+	}
+	for _, r := range s[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// wsWriteLoop carries PTY output to the browser, one message per PTY read.
+//
+// Nothing is buffered here on purpose. The bridge's output channel is already
+// bounded and closes the session rather than blocking when it fills, which is
+// what stops a wedged browser tab from stalling a tmux client that shares the
+// server with the user's own local session. Adding a queue in front of this
+// write would defeat that: the backpressure has to reach the bridge.
+//
+// There is no per-write deadline either. A write that cannot make progress is a
+// peer that is not draining, and the ping loop is what notices that -- its own
+// control frame queues behind this one and times out. Two overlapping timeouts
+// would only make it harder to say which one collected a connection.
+func wsWriteLoop(ctx context.Context, conn *websocket.Conn, out <-chan []byte) wsExit {
+	for {
+		select {
+		case <-ctx.Done():
+			return wsExit{}
+		case b, ok := <-out:
+			if !ok {
+				// The session ended: the user typed exit, the base session was
+				// killed, or the bridge closed itself. Say so, so the browser
+				// can tell this from a network fault it should reconnect after.
+				return wsExit{websocket.StatusNormalClosure, "session ended", true}
+			}
+			if err := conn.Write(ctx, websocket.MessageBinary, ptybridge.EncodeData(b)); err != nil {
+				return wsExit{}
+			}
+		}
+	}
+}
+
+// pingLoop is the only thing that can tell a quiet terminal from a dead peer.
+// See wsPingInterval for why that distinction is load-bearing rather than
+// hygienic.
+func (h *TerminalHandler) pingLoop(ctx context.Context, conn *websocket.Conn) wsExit {
+	interval, timeout := h.cfg.PingInterval, h.cfg.PingTimeout
+	if interval <= 0 {
+		interval = wsPingInterval
+	}
+	if timeout <= 0 {
+		timeout = wsPingTimeout
+	}
+
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return wsExit{}
+		case <-t.C:
+			pctx, cancel := context.WithTimeout(ctx, timeout)
+			err := conn.Ping(pctx)
+			cancel()
+			if err != nil {
+				// Not graceful: a close handshake with a peer that just failed
+				// to answer a ping would only wait out its own timeout.
+				return wsExit{}
+			}
+		}
+	}
+}

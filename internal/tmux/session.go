@@ -74,7 +74,16 @@ func (c *Client) Sweep(ctx context.Context) error {
 		if app != "1" || attached != "0" {
 			continue
 		}
-		if _, err := c.Run(ctx, "kill-session", "-t", name); err != nil {
+		// "=" makes the target an exact match. Sweep always passes a name it
+		// just read, so a bare name is correct today -- but tmux target
+		// matching falls back to a prefix, and `kill-session -t _web-` will
+		// silently kill _web-abcd and exit 0. Pinning exactness here means a
+		// future caller passing a partial name gets an error instead of
+		// destroying a user's session, which is the failure @wterm_web exists
+		// to prevent. No test pins this: Sweep never passes a partial name, and
+		// tmux prefers an exact match over a longer prefix, so "=" and a bare
+		// name behave identically for every input reachable today.
+		if _, err := c.Run(ctx, "kill-session", "-t", "="+name); err != nil {
 			// The session going away between the listing and the kill is the
 			// expected race, not a fault. Anything else is worth surfacing.
 			// Matched on message text for the same reason as noServer: tmux

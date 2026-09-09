@@ -1567,6 +1567,19 @@ func (p *Poller) Latest() []Row {
 }
 ```
 
+**Decide before implementing: the third tmux message.**
+
+`noServer` (Task 5) matches two of tmux's three failure texts. The third,
+`server exited unexpectedly`, appears for a few milliseconds while a server is
+shutting down. Task 5 leaves it a hard error, which is correct for a one-shot
+command but wrong for a poller: when the user closes their last tmux session,
+one poll can land in that window and raise an error banner that the next poll
+silently clears. Either fold that message into `noServer`, or have the poller
+keep its previous snapshot on error rather than replacing it with a failure.
+The second is better -- a transient tmux hiccup should never blank a sidebar
+that was correct 1.5s ago -- but it changes `Poller`'s contract, so decide it
+here rather than discovering it in the UI.
+
 **Step 4: Add navigation helpers to `client.go`**
 
 ```go

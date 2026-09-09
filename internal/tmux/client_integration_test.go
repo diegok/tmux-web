@@ -3,6 +3,8 @@ package tmux_test
 import (
 	"context"
 	"os"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -113,4 +115,150 @@ func TestSnapshotWithNoServerAfterExitIsNotAnError(t *testing.T) {
 	if err != nil || rows != nil {
 		t.Fatalf("Snapshot on an exited server = %v, %v; want nil, nil", rows, err)
 	}
+}
+
+// Two browser tabs are two sessions grouped onto the same base, and they share
+// its window list. Clicking a pane in one tab must move that tab and nothing
+// else: not the other tab, and above all not the user's own session, which is
+// attached to a terminal they are looking at.
+func TestSelectPaneMovesOnlyTheGivenSession(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+	srv.Run(t, "new-window", "-t", "work")
+	srv.Run(t, "new-window", "-t", "work")
+	srv.Run(t, "split-window", "-t", "=work:2")
+	srv.Run(t, "new-session", "-d", "-t", "work", "-s", "_web-a")
+	srv.Run(t, "new-session", "-d", "-t", "work", "-s", "_web-b")
+
+	// Park every session on window 0 and the split window on its first pane,
+	// so any movement below is the one this test asked for.
+	for _, s := range []string{"work", "_web-a", "_web-b"} {
+		srv.Run(t, "select-window", "-t", "="+s+":0")
+	}
+	srv.Run(t, "select-pane", "-t", "=work:2.0")
+	target := paneAt(t, srv, "=work:2", 1)
+
+	if err := tmux.NewClient(srv.Args()).SelectPane(context.Background(), "_web-a", target); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := currentWindow(t, srv, "_web-a"); got != "2" {
+		t.Errorf("_web-a is on window %q, want 2 -- the click did not move the tab that made it", got)
+	}
+	if got := currentWindow(t, srv, "_web-b"); got != "0" {
+		t.Errorf("_web-b is on window %q, want 0 -- the click moved another tab", got)
+	}
+	if got := currentWindow(t, srv, "work"); got != "0" {
+		t.Errorf("work is on window %q, want 0 -- the click moved the user's own session", got)
+	}
+	if got := activePane(t, srv, "=work:2"); got != target {
+		t.Errorf("active pane in the window is %q, want %q -- select-window ran but select-pane did not", got, target)
+	}
+}
+
+// tmux resolves an empty or absent target to "whatever is current" and exits 0,
+// so a pane id the frontend failed to fill in would silently navigate the tab
+// to an arbitrary pane. It has to be an error instead.
+func TestSelectPaneRejectsBadPaneIDs(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+	srv.Run(t, "new-window", "-t", "work")
+	srv.Run(t, "new-session", "-d", "-t", "work", "-s", "_web-a")
+	srv.Run(t, "select-window", "-t", "=_web-a:0")
+
+	c := tmux.NewClient(srv.Args())
+	for _, bad := range []string{"", "%", "0", "work:1", "%999"} {
+		if err := c.SelectPane(context.Background(), "_web-a", bad); err == nil {
+			t.Errorf("SelectPane(%q) = nil, want an error", bad)
+		}
+		if got := currentWindow(t, srv, "_web-a"); got != "0" {
+			t.Fatalf("SelectPane(%q) moved the session to window %q", bad, got)
+		}
+	}
+}
+
+// A session argument that does not name exactly one session is refused. tmux
+// resolves both of these without complaint -- an empty target means "whatever
+// is current", and a partial name prefix-matches -- so either would silently
+// navigate a session the caller never named, possibly the user's own.
+func TestSelectPaneRefusesSessionsItWasNotGiven(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+	srv.Run(t, "new-window", "-t", "=work")
+	srv.Run(t, "new-session", "-d", "-t", "work", "-s", "_web-abcd")
+	srv.Run(t, "select-window", "-t", "=_web-abcd:0")
+	srv.Run(t, "select-window", "-t", "=work:0")
+	target := paneAt(t, srv, "=work:1", 0)
+
+	c := tmux.NewClient(srv.Args())
+	for _, bad := range []string{"", "_web-"} {
+		if err := c.SelectPane(context.Background(), bad, target); err == nil {
+			t.Errorf("SelectPane(session=%q) = nil, want an error", bad)
+		}
+		for _, s := range []string{"_web-abcd", "work"} {
+			if got := currentWindow(t, srv, s); got != "0" {
+				t.Fatalf("SelectPane(session=%q) moved %s to window %q", bad, s, got)
+			}
+		}
+	}
+}
+
+func TestKillSession(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "keepalive")
+	srv.Run(t, "new-session", "-d", "-s", "_web-abcd")
+
+	c := tmux.NewClient(srv.Args())
+	if err := c.KillSession(context.Background(), "_web-abcd"); err != nil {
+		t.Fatal(err)
+	}
+	if out := srv.Run(t, "list-sessions", "-F", "#{session_name}"); strings.Contains(out, "_web-abcd") {
+		t.Fatalf("KillSession left the session alive: %q", out)
+	}
+}
+
+// tmux target matching falls back to a prefix and does not report ambiguity, so
+// a partial name would kill some other session and exit 0.
+func TestKillSessionRefusesAPartialName(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "keepalive")
+	srv.Run(t, "new-session", "-d", "-s", "_web-abcd")
+
+	if err := tmux.NewClient(srv.Args()).KillSession(context.Background(), "_web-"); err == nil {
+		t.Error("KillSession with a partial name = nil, want an error")
+	}
+	if out := srv.Run(t, "list-sessions", "-F", "#{session_name}"); !strings.Contains(out, "_web-abcd") {
+		t.Fatalf("KillSession with a partial name killed a session it does not name: %q", out)
+	}
+}
+
+// currentWindow is the index of the window the session is on. Grouped sessions
+// share a window list but not a current window, which is the whole point of
+// selecting against the tab's own session.
+func currentWindow(t *testing.T, srv *testutil.Server, session string) string {
+	t.Helper()
+	out := srv.Run(t, "list-windows", "-t", "="+session, "-F", "#{?window_active,#{window_index},}")
+	return strings.Join(strings.Fields(out), "")
+}
+
+// activePane is the pane id of the active pane in a window. It is a property of
+// the window, so every session in the group sees the same one.
+func activePane(t *testing.T, srv *testutil.Server, window string) string {
+	t.Helper()
+	out := srv.Run(t, "list-panes", "-t", window, "-F", "#{?pane_active,#{pane_id},}")
+	return strings.Join(strings.Fields(out), "")
+}
+
+// paneAt is the pane id at a position in a window. Tests address panes by
+// position because pane ids are assigned server-wide and are not predictable.
+func paneAt(t *testing.T, srv *testutil.Server, window string, index int) string {
+	t.Helper()
+	out := srv.Run(t, "list-panes", "-t", window, "-F", "#{pane_index}"+tmux.Sep+"#{pane_id}")
+	for _, line := range strings.Split(out, "\n") {
+		if f := strings.Split(line, tmux.Sep); len(f) == 2 && f[0] == strconv.Itoa(index) {
+			return f[1]
+		}
+	}
+	t.Fatalf("no pane %d in %s: %q", index, window, out)
+	return ""
 }

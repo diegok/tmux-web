@@ -91,3 +91,76 @@ func noServer(msg string) bool {
 		(strings.Contains(msg, "error connecting to") &&
 			strings.Contains(msg, "No such file or directory"))
 }
+
+// SelectPane points one session at a pane: the browser tab's own grouped
+// session, so clicking a pane in one tab moves neither the other tabs nor the
+// terminal the user is sitting in front of.
+//
+// The plan specified `select-window -t <session>:<paneID>`, and tmux 3.7b
+// rejects it -- "can't find window: %3". A window target parses <session>:<win>
+// and looks <win> up as a name, index or @id; a pane id is not one of those.
+// The bare form `select-window -t %3` does work, but it picks the session
+// itself, and with grouped sessions that choice is arbitrary: with two tabs
+// open on one base, it moved the wrong one. Hence the extra call to resolve the
+// pane's window id, which can then be qualified with the session that must
+// move. "=" pins the session name to an exact match, as in Sweep.
+//
+// list-panes does the resolving rather than display-message, which is the
+// obvious command and is unusable here: given a target it cannot find, it
+// prints an empty expansion and exits 0, and `display-message -t work:9`
+// happily answers about a different window. list-panes errors on all of those.
+// It reports the window id once per pane in the window; the lines are identical
+// and the first is taken.
+//
+// Only the current window is per-session. The active pane belongs to the
+// window, which grouped sessions share, so that half is visible to every member
+// of the group. tmux offers no way to scope it, and it matches what the user
+// sees when they select a pane in one of two attached clients.
+func (c *Client) SelectPane(ctx context.Context, session, paneID string) error {
+	// tmux resolves an empty target to "whatever is current" and exits 0, so an
+	// unset pane id would quietly navigate the tab somewhere arbitrary instead
+	// of failing. The ids come from the frontend, where "no selection yet" is
+	// one bug away from being the empty string.
+	if !isPaneID(paneID) {
+		return fmt.Errorf("select pane: %q is not a tmux pane id", paneID)
+	}
+	if session == "" {
+		return fmt.Errorf("select pane %s: no session given", paneID)
+	}
+	out, err := c.Run(ctx, "list-panes", "-t", paneID, "-F", "#{window_id}")
+	if err != nil {
+		return err
+	}
+	window, _, _ := strings.Cut(out, "\n")
+	if _, err := c.Run(ctx, "select-window", "-t", "="+session+":"+window); err != nil {
+		return err
+	}
+	_, err = c.Run(ctx, "select-pane", "-t", paneID)
+	return err
+}
+
+// isPaneID reports whether s is a tmux pane id, e.g. "%3".
+func isPaneID(s string) bool {
+	if len(s) < 2 || s[0] != '%' {
+		return false
+	}
+	for _, r := range s[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// KillSession removes a throwaway session explicitly. destroy-unattached is the
+// crash net; this is the normal teardown path.
+//
+// "=" pins the target to an exact match, for the reason spelled out in Sweep:
+// tmux falls back to prefix matching without reporting the ambiguity, so
+// `kill-session -t _web-` would kill an unrelated _web-abcd and exit 0. Unlike
+// Sweep, this takes a name from its caller rather than from tmux, so the guard
+// is reachable and tested.
+func (c *Client) KillSession(ctx context.Context, name string) error {
+	_, err := c.Run(ctx, "kill-session", "-t", "="+name)
+	return err
+}

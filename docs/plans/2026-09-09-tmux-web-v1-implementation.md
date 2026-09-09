@@ -2039,17 +2039,35 @@ git commit -m "feat: websocket frame codec for data and control"
 
 **Step 1: Write the failing integration test**
 
+Two tests state the contract -- input reaches tmux and output comes back, and
+closing the bridge takes its session with it. The rest are what mutation testing
+demanded: an implementation that leaves the session merely detached, drops
+`Resize` on the floor, inherits the daemon's `TERM`, blocks or drops bytes when
+the client stops reading, never closes `Output()`, moves the base session
+instead of the tab's own, or leaks the child process and its PTY all passed the
+first two.
+
+The tmux target syntax is fussy and mostly undocumented by example. `set-option`
+and `send-keys` resolve a bare `-t` as a *pane* target, so a session needs the
+trailing `":"` -- `-t "=work"` fails outright. `display-message` reports the
+current window per session, which `list-windows` does not: its `window_active`
+answers for the window's own session, so in a session group it reports the same
+window for every member.
+
 ```go
 package ptybridge_test
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/diegok/tmux-web/internal/ptybridge"
-	"github.com/diegok/tmux-web/internal/tmux"
 	"github.com/diegok/tmux-web/internal/tmux/testutil"
 )
 
@@ -2057,19 +2075,8 @@ func TestSessionEchoesTypedInput(t *testing.T) {
 	srv := testutil.NewServer(t)
 	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
 
-	s, err := ptybridge.Open(context.Background(), ptybridge.Config{
-		TmuxArgs: srv.Args(),
-		Base:     "work",
-		Cols:     80,
-		Rows:     24,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
+	s := open(t, srv, ptybridge.Config{TmuxArgs: srv.Args(), Base: "work", Cols: 80, Rows: 24})
 
-	// Give tmux time to paint, then type.
-	time.Sleep(500 * time.Millisecond)
 	if _, err := s.Write([]byte("echo hello-bridge\r")); err != nil {
 		t.Fatal(err)
 	}
@@ -2080,7 +2087,7 @@ func TestSessionEchoesTypedInput(t *testing.T) {
 		select {
 		case b, ok := <-s.Output():
 			if !ok {
-				t.Fatal("output closed early")
+				t.Fatalf("output closed early; got %q", buf.String())
 			}
 			buf.Write(b)
 			if strings.Contains(buf.String(), "hello-bridge") {
@@ -2096,31 +2103,356 @@ func TestSessionKillsItsTmuxSessionOnClose(t *testing.T) {
 	srv := testutil.NewServer(t)
 	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
 
-	s, err := ptybridge.Open(context.Background(), ptybridge.Config{
-		TmuxArgs: srv.Args(), Base: "work", Cols: 80, Rows: 24,
-	})
+	s := open(t, srv, ptybridge.Config{TmuxArgs: srv.Args(), Base: "work", Cols: 80, Rows: 24})
+	name := s.SessionName()
+	s.Close()
+
+	waitFor(t, 3*time.Second, func() bool {
+		return !strings.Contains(sessions(t, srv), name)
+	}, "throwaway session outlived the bridge")
+}
+
+// Close must kill the session itself, not merely leave it unattached for
+// destroy-unattached to collect. With the crash net turned off for this session
+// -- the same state a session reaches if the option was never applied, e.g. a
+// tmux that rejected it -- the explicit kill is the only thing that reaps it.
+func TestCloseKillsTheSessionDestroyUnattachedWouldNotCollect(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+
+	s := open(t, srv, ptybridge.Config{TmuxArgs: srv.Args(), Base: "work", Cols: 80, Rows: 24})
+	name := s.SessionName()
+	// "=name:" is a window target: set-option resolves a bare -t as a pane
+	// target, and `-t =name` fails outright with "no such session".
+	srv.Run(t, "set-option", "-t", "="+name+":", "destroy-unattached", "off")
+
+	s.Close()
+
+	waitFor(t, 3*time.Second, func() bool {
+		return !strings.Contains(sessions(t, srv), name)
+	}, "session survived Close: it was only detached, never killed")
+}
+
+// A reader parked on Output() is the websocket handler's write loop. It must
+// learn that the session ended by seeing the channel close, not by hanging.
+func TestCloseEndsTheOutputStream(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+
+	s := open(t, srv, ptybridge.Config{TmuxArgs: srv.Args(), Base: "work", Cols: 80, Rows: 24})
+
+	closed := make(chan struct{})
+	go func() {
+		defer close(closed)
+		for range s.Output() {
+		}
+	}()
+
+	s.Close()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Output() never closed after Close; a reader would hang forever")
+	}
+}
+
+// A browser tab that stops reading must cost the tab, not the tmux server.
+// Blocking the pump would stall a client sharing the server with the user's own
+// session, and dropping bytes would corrupt the terminal, so the session dies.
+func TestSlowClientClosesTheSessionInsteadOfBlocking(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+
+	// Deliberately never read Output(): this is the wedged tab.
+	s := open(t, srv, ptybridge.Config{TmuxArgs: srv.Args(), Base: "work", Cols: 80, Rows: 24})
+	name := s.SessionName()
+
+	// A session target needs the trailing ":" to be read as one: tmux
+	// resolves a bare -t as a pane target, and "=work" is not a pane.
+	srv.Run(t, "send-keys", "-t", "=work:", "seq 1 2000000", "Enter")
+
+	waitFor(t, 20*time.Second, func() bool {
+		return !strings.Contains(sessions(t, srv), name)
+	}, "flooded session was never closed: the pump blocked or dropped bytes")
+
+	// The overflow path goes through Close, so the stream ends too.
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case _, ok := <-s.Output():
+			if !ok {
+				return
+			}
+		case <-deadline:
+			t.Fatal("Output() never closed after the overflow")
+		}
+	}
+}
+
+func TestConfiguredSizeAndResizeReachTheTmuxClient(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+
+	s := open(t, srv, ptybridge.Config{TmuxArgs: srv.Args(), Base: "work", Cols: 90, Rows: 31})
+	name := s.SessionName()
+
+	if got := client(t, srv, name, "#{client_width}x#{client_height}"); got != "90x31" {
+		t.Fatalf("client size = %s, want 90x31", got)
+	}
+
+	if err := s.Resize(100, 37); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		return client(t, srv, name, "#{client_width}x#{client_height}") == "100x37"
+	}, "Resize never reached the tmux client")
+}
+
+// wterm emulates xterm-256color, so the attach must run with that TERM
+// regardless of the daemon's own environment. (tmux advertises tmux-256color
+// to programs inside the session; that is separate.)
+func TestAttachRunsWithTheTerminalWtermEmulates(t *testing.T) {
+	t.Setenv("TERM", "screen")
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+
+	s := open(t, srv, ptybridge.Config{TmuxArgs: srv.Args(), Base: "work", Cols: 80, Rows: 24})
+
+	if got := client(t, srv, s.SessionName(), "#{client_termname}"); got != "xterm-256color" {
+		t.Fatalf("client TERM = %s, want xterm-256color", got)
+	}
+}
+
+// Clicking a pane in one tab must move that tab only -- not the other tabs, and
+// not the terminal the user is sitting in front of.
+func TestSelectPaneMovesOnlyThisTabsSession(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+	srv.Run(t, "new-window", "-t", "=work", "-d")
+	panes := strings.Split(srv.Run(t, "list-panes", "-s", "-t", "=work", "-F", "#{pane_id}"), "\n")
+	if len(panes) != 2 {
+		t.Fatalf("want two panes to choose between, got %q", panes)
+	}
+	other := panes[1]
+
+	s := open(t, srv, ptybridge.Config{TmuxArgs: srv.Args(), Base: "work", Cols: 80, Rows: 24})
+	// The current window is per-session even inside a group, and
+	// display-message reports it -- unlike list-windows, whose window_active
+	// answers for the window's own session. A target it cannot resolve makes
+	// it print an empty line and exit 0, hence the trailing ":".
+	before := currentWindow(t, srv, "work")
+
+	if err := s.SelectPane(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+
+	moved := currentWindow(t, srv, s.SessionName())
+	if moved == before {
+		t.Fatalf("tab's session did not move: still on window %s", moved)
+	}
+	if now := currentWindow(t, srv, "work"); now != before {
+		t.Fatalf("the user's own session moved from window %s to %s", before, now)
+	}
+}
+
+// A daemon serving tabs for weeks must not accumulate one zombie and one open
+// PTY per closed tab, so Close reaps the child it killed and releases the
+// master. Both survive the tmux session's death otherwise: killing the client
+// or the session ends the stream, and would leave these behind.
+func TestCloseReleasesTheClientProcessAndItsPTY(t *testing.T) {
+	requireProc(t)
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+
+	before := openPTYs(t)
+	s := open(t, srv, ptybridge.Config{TmuxArgs: srv.Args(), Base: "work", Cols: 80, Rows: 24})
+	if got := openPTYs(t); got != before+1 {
+		t.Fatalf("open PTY masters = %d, want %d: the harness is not measuring what it thinks", got, before+1)
+	}
+
+	s.Close()
+
+	waitFor(t, 5*time.Second, func() bool {
+		return len(zombieChildren(t)) == 0
+	}, "Close left the killed tmux client unreaped")
+	if got := openPTYs(t); got != before {
+		t.Fatalf("open PTY masters = %d after Close, want %d: Close leaked the PTY", got, before)
+	}
+}
+
+// Close arrives from two directions -- the websocket handler when the socket
+// goes away, and the pump on overflow -- and they can land together.
+func TestCloseIsSafeFromConcurrentCallers(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+
+	s := open(t, srv, ptybridge.Config{TmuxArgs: srv.Args(), Base: "work", Cols: 80, Rows: 24})
+	name := s.SessionName()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); s.Close() }()
+	}
+	wg.Wait()
+
+	for range s.Output() { // drains, then ends when the pump closes it
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		return !strings.Contains(sessions(t, srv), name)
+	}, "session outlived a concurrent Close")
+}
+
+// open starts a bridge session and waits until tmux reports its client, so that
+// tests assert on a session that exists rather than racing its startup. Cleanup
+// is registered rather than deferred by the caller: a surviving `tmux attach`
+// holds its session open and defeats destroy-unattached, so it must be
+// collected even when the test fails early.
+func open(t *testing.T, srv *testutil.Server, cfg ptybridge.Config) *ptybridge.Session {
+	t.Helper()
+	s, err := ptybridge.Open(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := s.SessionName()
-	time.Sleep(500 * time.Millisecond)
-	s.Close()
+	t.Cleanup(s.Close)
+	waitFor(t, 5*time.Second, func() bool {
+		out, err := srv.TryRun("list-sessions", "-F", "#{session_name} #{session_attached}")
+		return err == nil && strings.Contains(out, s.SessionName()+" 1")
+	}, "bridge session never came up attached")
+	return s
+}
 
-	deadline := time.Now().Add(3 * time.Second)
+// currentWindow is the window one session is looking at.
+func currentWindow(t *testing.T, srv *testutil.Server, session string) string {
+	t.Helper()
+	out := srv.Run(t, "display-message", "-p", "-t", "="+session+":", "#{window_id}")
+	if out == "" {
+		t.Fatalf("no current window for session %s", session)
+	}
+	return out
+}
+
+// client reports a formatted field of the one client attached to name.
+func client(t *testing.T, srv *testutil.Server, name, format string) string {
+	t.Helper()
+	return srv.Run(t, "list-clients", "-t", "="+name, "-F", format)
+}
+
+func sessions(t *testing.T, srv *testutil.Server) string {
+	t.Helper()
+	// The unattached "work" session keeps the server alive, so a failure here
+	// is never transient: polling through it would report the wrong cause.
+	out, err := srv.TryRun("list-sessions", "-F", "#{session_name}")
+	if err != nil {
+		t.Fatalf("list-sessions: %v", err)
+	}
+	return out
+}
+
+// zombieChildren returns the pids of this test binary's unreaped children. Every
+// other subprocess a test starts goes through exec.Cmd.Run, which waits, so
+// anything listed here was left behind by the bridge.
+func zombieChildren(t *testing.T) []int {
+	t.Helper()
+	var zombies []int
+	forEachPID(t, func(pid int) {
+		state, ppid, ok := procStat(pid)
+		if ok && state == "Z" && ppid == os.Getpid() {
+			zombies = append(zombies, pid)
+		}
+	})
+	return zombies
+}
+
+// openPTYs counts this process's open PTY masters, one of which is held per
+// live bridge session.
+func openPTYs(t *testing.T) int {
+	t.Helper()
+	entries, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		t.Fatalf("read /proc/self/fd: %v", err)
+	}
+	n := 0
+	for _, e := range entries {
+		if target, err := os.Readlink("/proc/self/fd/" + e.Name()); err == nil && target == "/dev/ptmx" {
+			n++
+		}
+	}
+	return n
+}
+
+func forEachPID(t *testing.T, fn func(pid int)) {
+	t.Helper()
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		t.Fatalf("read /proc: %v", err)
+	}
+	for _, e := range entries {
+		if pid, err := strconv.Atoi(e.Name()); err == nil {
+			fn(pid)
+		}
+	}
+}
+
+// procStat reports a process's state and parent pid, or false if it exited
+// between the listing and the read.
+func procStat(pid int) (state string, ppid int, ok bool) {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return "", 0, false
+	}
+	// The comm field is parenthesized and may contain spaces, so the fields
+	// after it are counted from the last ')': state, then ppid.
+	f := strings.Fields(string(b[strings.LastIndexByte(string(b), ')')+1:]))
+	if len(f) < 2 {
+		return "", 0, false
+	}
+	parent, err := strconv.Atoi(f[1])
+	if err != nil {
+		return "", 0, false
+	}
+	return f[0], parent, true
+}
+
+// requireProc skips tests that read process state from /proc, which only Linux
+// has. The daemon targets Linux; the bridge itself does not.
+func requireProc(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skip("no /proc to read process state from")
+	}
+}
+
+func waitFor(t *testing.T, d time.Duration, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
-		out := srv.Run(t, "list-sessions", "-F", "#{session_name}")
-		if !strings.Contains(out, name) {
+		if cond() {
 			return
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
 	}
-	t.Fatal("throwaway session outlived the bridge")
+	t.Fatal(msg)
 }
 ```
 
 **Step 2: Run it, expect FAIL**
 
+Run: `go test ./internal/ptybridge/ -count=1`
+Expected: FAIL -- `ptybridge.Open` and `ptybridge.Session` undefined.
+
 **Step 3: Implement `session.go`**
+
+Two additions to the sketch this task started from, both found by mutation
+testing:
+
+- `cmd.Wait()`. Killing the child without reaping it leaves a zombie per closed
+  tab for the daemon's lifetime, and dropping `pty.Close()` leaks the master fd
+  the same way. Both survive the tmux session's death: killing the client or its
+  session ends the stream and would leave these behind.
+- A timeout on the teardown tmux call. `Close` runs on the pump goroutine on the
+  overflow path and `out` is not closed until it returns, so a wedged tmux
+  server must not be able to park teardown with a reader still waiting.
 
 ```go
 package ptybridge
@@ -2130,13 +2462,23 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 
 	"github.com/creack/pty"
 	"github.com/diegok/tmux-web/internal/tmux"
 )
 
-// outputBuffer bounds how much PTY output may queue for a slow client.
+// outputBuffer bounds how much PTY output may queue for a slow client, in
+// reads rather than bytes. 256 reads of at most 32KB is roughly 8MB of slack --
+// far more than a redraw burst, and small enough that a tab which stopped
+// reading is noticed rather than buffered indefinitely.
 const outputBuffer = 256
+
+// killTimeout bounds the teardown tmux call. Close runs on the pump goroutine
+// on the overflow path, and the output channel is not closed until Close
+// returns, so a wedged tmux server must not be able to park teardown forever
+// with a reader still waiting to learn the session ended.
+const killTimeout = 5 * time.Second
 
 type Config struct {
 	TmuxArgs []string // server selection, e.g. {"-L", "sock"}; nil for default
@@ -2145,7 +2487,8 @@ type Config struct {
 	Rows     uint16
 }
 
-// Session is one browser tab's tmux client.
+// Session is one browser tab's tmux client: a throwaway session grouped onto a
+// real one, attached under a PTY.
 type Session struct {
 	name string
 	cmd  *exec.Cmd
@@ -2156,13 +2499,23 @@ type Session struct {
 	closeOnce sync.Once
 }
 
+// Open starts the attach and begins pumping its output.
+//
+// ctx is not wired to the process lifetime: the session outlives whatever
+// request opened it and is ended by Close, not by a cancelled context. It is
+// taken so the signature stays honest as an I/O-performing constructor and so
+// callers pass one habitually.
 func Open(ctx context.Context, cfg Config) (*Session, error) {
 	name := tmux.NewSessionName()
 	args := append(append([]string{}, cfg.TmuxArgs...), tmux.AttachArgs(cfg.Base, name)...)
 
 	cmd := exec.Command("tmux", args...)
-	// TERM must match what wterm emulates. tmux advertises tmux-256color to
-	// programs inside it, which is expected and separate from this.
+	// TERM must match what wterm emulates, whatever the daemon inherited --
+	// it is started from a login session, a service manager or a cron-like
+	// context, and tmux refuses to attach under some of those (TERM=dumb
+	// fails with "terminal does not support clear"). tmux advertises
+	// tmux-256color to programs inside the session, which is expected and
+	// separate from this.
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: cfg.Cols, Rows: cfg.Rows})
@@ -2181,16 +2534,23 @@ func Open(ctx context.Context, cfg Config) (*Session, error) {
 	return s, nil
 }
 
+// SessionName is the name of this tab's throwaway tmux session.
 func (s *Session) SessionName() string { return s.name }
+
+// Output yields PTY reads until the session ends, then closes. A closed channel
+// is the only end-of-session signal: readers must handle it rather than block.
 func (s *Session) Output() <-chan []byte { return s.out }
 
-// pump reads the PTY into the output channel.
+// pump reads the PTY into the output channel. It is the only writer to out and
+// closes it on the way out, so a reader always observes the end of the session.
 //
 // If the channel is full the session is closed rather than blocking. Blocking
 // here would stall a tmux client that shares the server with the user's local
-// session, so a wedged browser tab could freeze the real terminal. Dropping
-// bytes is equally unacceptable: a truncated escape sequence corrupts the
-// terminal permanently. Closing is safe because tmux redraws on reattach.
+// session, so a wedged browser tab could freeze the real terminal they are
+// working in. Dropping bytes is equally unacceptable: a truncated escape
+// sequence corrupts the terminal permanently, and unlike a dropped frame it
+// never heals. Closing is safe because tmux redraws the whole screen on
+// reattach, so the tab reconnects and loses nothing.
 func (s *Session) pump() {
 	defer close(s.out)
 	buf := make([]byte, 32*1024)
@@ -2207,13 +2567,17 @@ func (s *Session) pump() {
 			}
 		}
 		if err != nil {
+			// Includes the expected ending: Close closes the PTY, which
+			// unblocks this read with EIO or "file already closed".
 			return
 		}
 	}
 }
 
+// Write sends keystrokes to the tmux client.
 func (s *Session) Write(b []byte) (int, error) { return s.pty.Write(b) }
 
+// Resize tells the tmux client the browser terminal changed size.
 func (s *Session) Resize(cols, rows uint16) error {
 	return pty.Setsize(s.pty, &pty.Winsize{Cols: cols, Rows: rows})
 }
@@ -2223,21 +2587,52 @@ func (s *Session) SelectPane(ctx context.Context, paneID string) error {
 	return s.tm.SelectPane(ctx, s.name, paneID)
 }
 
+// Close ends the session. It is safe to call more than once and from several
+// goroutines: the websocket handler calls it when the socket goes away, and the
+// pump calls it on overflow.
+//
+// The order is local-then-remote. Closing the PTY cannot fail or block, and it
+// is what unblocks a pump parked in Read, so the reader learns the session
+// ended without waiting on tmux. Reaping the client keeps a long-lived daemon
+// from collecting one zombie and one open PTY per closed tab.
+//
+// No test pins the kill between them, and none can: closing the master hangs
+// the client up, and the kernel delivers that even to a process stopped by a
+// signal, so tmux exits on its own in every state reachable from here. It stays
+// because Wait has no other guarantee of returning -- teardown runs on the pump
+// goroutine, and a client that somehow outlived the hangup would park it there
+// with a reader still waiting on Output().
+//
+// kill-session then usually loses a race it is not meant to win: the client is
+// already gone, so destroy-unattached has collected the session and tmux
+// answers "can't find session". The error is discarded for exactly that reason.
+// It still has to be sent, because destroy-unattached is the crash net and may
+// not be in force -- the session was created and configured in one command, and
+// a `set` that failed would leave a session nothing else ever reaps.
 func (s *Session) Close() {
 	s.closeOnce.Do(func() {
 		_ = s.pty.Close()
 		if s.cmd.Process != nil {
 			_ = s.cmd.Process.Kill()
+			// Wait after the PTY is closed and the client killed, never
+			// before: waiting first parks teardown until the client exits by
+			// itself, and at that point nothing has told it to.
+			_ = s.cmd.Wait()
 		}
-		_ = s.tm.KillSession(context.Background(), s.name)
+		ctx, cancel := context.WithTimeout(context.Background(), killTimeout)
+		defer cancel()
+		_ = s.tm.KillSession(ctx, s.name)
 	})
 }
 ```
 
 **Step 4: Run the tests**
 
-Run: `go test ./internal/ptybridge/ -v -count=1`
-Expected: PASS.
+Run: `go test ./internal/ptybridge/ -race -count=5`
+Expected: PASS. This is the first concurrent code in the repo, so `-race` is not
+optional here: `Close` arrives from the websocket handler and from the pump, and
+without `sync.Once` the two `cmd.Wait()` calls race on `Cmd.ProcessState` -- a
+mutant that no non-race run of the suite detects.
 
 **Step 5: Commit**
 
@@ -2462,6 +2857,56 @@ Tests to write first:
 Implementation: 32 bytes from `crypto/rand`, base64url, held in memory with an
 expiry (10 minutes). Enrollment tokens do not need to survive a restart — losing
 them just means running `enroll` again.
+
+**As built.** `NewEnroller(store)`, `Mint(name) (token, error)`,
+`Redeem(token, userAgent) (deviceToken, error)`, with `EnrollTTL`,
+`MaxRedeemFailures`, `RedeemFailureWindow` and three sentinels —
+`ErrInvalidEnrollToken`, `ErrEnrollTokenExpired`, `ErrTooManyRedeemAttempts` —
+exported for the CLI and the HTTP layer. The name is fixed at mint time
+(`enroll --name laptop`); the user agent is only knowable at redemption, so
+`Redeem` supplies it.
+
+Decisions the tests pin:
+
+- **A token is consumed only by a redemption that enrolled a device.** If the
+  store cannot persist, the link stays live: the owner is standing at a browser
+  whose page failed, and the fix should be a reload, not another ssh session.
+  `Redeem` holds its mutex across the whole check-and-enroll, so two concurrent
+  redemptions of one link still produce exactly one device.
+- **Expiry is checked at redemption, not just swept.** Minting drops aged-out
+  entries so a long-lived daemon does not accumulate them, but that is
+  housekeeping: a token whose entry is still in the slice must not be redeemable
+  merely because nothing has minted since.
+- **`subtle.ConstantTimeCompare` *is* load-bearing here**, unlike in
+  `Store.Lookup`. The value on both sides is the live token, not a digest of it,
+  so bytes leaked by an early exit are bytes of the credential. The scan runs to
+  the end rather than breaking on a match, for the same reason.
+
+**The rate limit is global, and it never refuses a valid token** — a deliberate
+departure from "N failures from one source". There is no honest source identity
+behind a reverse proxy (`X-Forwarded-For` is whatever the client wrote unless
+the proxy is known to rewrite it), so bucketing by one would only let an
+attacker choose which bucket to fill. And guessing is not the threat: 256 bits
+inside a ten-minute window is not brute-forceable, so the entropy, the TTL and
+single use are the defence and the limiter must not be described as one.
+
+Failing closed would therefore trade nothing real for something real: any
+stranger who learns the URL could hold `/enroll` shut with garbage and keep the
+owner from enrolling — an outage on the one path that recovers from having no
+devices at all. So the limiter is checked *after* the comparison. What it buys
+is that a flood becomes one distinguishable error the HTTP layer can answer with
+429 and an operator can see in a log. Its window lapses, so a lockout cannot
+outlive the flood.
+
+Two mutants survive honestly. Breaking out of the comparison loop early is a
+timing difference no test can observe — the comment carries it. Swapping
+`ConstantTimeCompare` for `==`, or `crypto/rand` for `math/rand`, is likewise
+invisible to behaviour (`math/rand` is randomly seeded, so tokens still differ),
+so a single source-reading test guards both as a lint and says so.
+
+The TTL is measured against an injected clock, replaced only through
+`export_test.go`: a ten-minute expiry is not something a test can wait out, and
+the production path should not carry a knob whose only caller is a test.
 
 ```bash
 git commit -m "feat: single-use enrollment tokens"

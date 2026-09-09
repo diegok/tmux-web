@@ -50,6 +50,13 @@ func TestParseRows(t *testing.T) {
 		}
 	})
 
+	t.Run("empty output yields no rows", func(t *testing.T) {
+		got, err := ParseRows("")
+		if err != nil || got != nil {
+			t.Fatalf("ParseRows(\"\") = %v, %v; want nil, nil", got, err)
+		}
+	})
+
 	t.Run("garbage before any valid row is dropped", func(t *testing.T) {
 		got, err := ParseRows("nonsense")
 		if err != nil {

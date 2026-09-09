@@ -43,15 +43,12 @@ const Format = "#{?#{session_group},#{session_group},#{session_name}}" + Sep +
 // contain newlines. Leading garbage with no preceding row is discarded.
 func ParseRows(out string) ([]Row, error) {
 	var rows []Row
-	for i, line := range strings.Split(out, "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Split(line, Sep)
 		if len(fields) != fieldCount {
 			if len(rows) > 0 {
 				rows[len(rows)-1].Path += "\n" + line
 			}
-			continue
-		}
-		if i == 0 && line == "" {
 			continue
 		}
 		widx, err := strconv.Atoi(fields[3])

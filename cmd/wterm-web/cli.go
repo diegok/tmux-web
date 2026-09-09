@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
+	"os/signal"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -18,6 +21,7 @@ import (
 	"unicode"
 
 	"github.com/diegok/tmux-web/internal/auth"
+	"github.com/diegok/tmux-web/internal/front"
 )
 
 // The CLI is the half of the auth chain that runs as a person. Everything but
@@ -87,10 +91,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 // -- subcommands ------------------------------------------------------------
 
-// serveConfig is what `serve` parses out of its command line. The server
-// itself is Task 17; this type and serveRun are the seam it fills in, and they
-// exist now so the flag names the manual verification steps use are pinned by
-// a test rather than invented twice.
+// serveConfig is what `serve` parses out of its command line. It stays a
+// separate type from front.Config: the command line is a user interface with
+// its own defaults and its own error messages, and the daemon takes several
+// things -- a state path, tmux arguments, a poll interval -- that no flag
+// exposes.
 type serveConfig struct {
 	Host   string
 	Dev    bool
@@ -98,11 +103,33 @@ type serveConfig struct {
 	Socket string
 }
 
-// serveRun is replaced by Task 17 with the real daemon, and swapped by tests.
-// A variable rather than a direct call because `serve` has a command line to
-// get right before there is a server to start.
-var serveRun = func(cfg serveConfig, stdout, stderr io.Writer) error {
-	return errors.New("serve is not implemented yet (Task 17: HTTP mux, enrollment page, and TLS)")
+// serveRun starts the daemon. A variable rather than a direct call so a test
+// can drive the command line without binding a port or asking a CA for a
+// certificate.
+var serveRun = runDaemon
+
+// runDaemon is `serve`: logging to stderr, a signal handler, and the front
+// server.
+//
+// Ctrl-C and SIGTERM stop it. There is nothing to flush on the way out -- tmux
+// holds the terminal state and the device file is fsynced on every write -- so
+// the shutdown exists to close listeners and let systemd see a clean exit
+// rather than to save anything.
+func runDaemon(cfg serveConfig, stdout, stderr io.Writer) error {
+	// The daemon is the only subcommand that logs: the others print an answer
+	// and exit. Wiring the default logger here rather than in main keeps a
+	// stray slog call in a CLI path from writing over that answer.
+	slog.SetDefault(slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	return front.Serve(ctx, front.Config{
+		Host:        cfg.Host,
+		Dev:         cfg.Dev,
+		Port:        cfg.Port,
+		AdminSocket: cfg.Socket,
+	})
 }
 
 func cmdServe(args []string, stdout, stderr io.Writer) int {

@@ -3274,6 +3274,112 @@ startup continues -- failing to collect orphans must not stop the daemon
 serving. It returns nil when there is no tmux server at all, so the ordinary
 cold-start case logs nothing.
 
+**What this task settled**
+
+- **The daemon is `front.Serve(ctx, front.Config{...})`, and the CLI's `serve`
+  is a thin adapter over it.** `newDaemon` builds everything before the network
+  is touched -- allowlist, store, registry, poller, handler -- so the wiring
+  decisions below are reachable from a test without binding a port. Startup
+  order is load-bearing: allowlist (fails closed, and everything takes it),
+  store (fatal), sweep (logged), first poll (synchronous), admin socket (fatal),
+  serve.
+- **`OpenStore` failing is fatal and the message says not to touch the file.**
+  Starting empty would sign out every enrolled device without saying so, and the
+  first enrolment afterwards would overwrite the only copy an operator could
+  still have recovered.
+- **`Sweep` runs before the poller and its error is logged, never returned.** An
+  uncollectable orphan leaks one tmux session; refusing to start leaves the
+  owner with no way in at all, and the conditions that produce a sweep error
+  persist across restarts, so a fatal sweep is a permanently unstartable daemon.
+  It returns nil when there is no server, so a cold start logs nothing.
+- **`GET /api/snapshot` serves the cached poll, and a failed poll never blanks
+  the sidebar.** Rows plus `"stale":true` and the error; a 503 only when there
+  has never been a good snapshot, which is the one case where an empty array
+  would be a lie rather than an answer. No tmux server at all is *not* a
+  failure -- `Snapshot` reports it as an empty result with no error -- so a cold
+  machine answers 200 with `"panes":[]`. `panes` is always an array, never
+  `null`.
+- **`DELETE /api/devices/{id}` calls `registry.CloseDevice` after the store
+  removal, and so does the admin socket.** `AdminMux` cannot do it itself --
+  `internal/auth` knows nothing about live connections -- so the front layer
+  wraps it in `SeverRevokedDevices`, which sweeps only on a 204. Revoking from
+  the CLI is the important case: "I lost my laptop, ssh in and cut it off" is
+  exactly when the browser cannot be used to do it.
+- **`/ws` registers its connection in the registry, keyed by device, with the
+  cancellation of the request context as the closer.** That is what the
+  terminal's read, write and ping loops run on, so cancelling it ends the socket
+  and the tmux attach with it. `Add` reporting `ok=false` refuses the handshake
+  rather than opening a shell and immediately tearing it down.
+- **Nothing serializes `auth.Device`.** The API has its own `deviceJSON`, as the
+  admin socket has its own `deviceView`: `Device` carries `TokenHash`, and a
+  handler that marshalled the store's type would publish credential material the
+  first time someone added a field.
+- **`POST /api/enroll` requires an exact `Origin` like every other mutating
+  route.** It takes no cookie -- a browser being enrolled has none -- so the
+  token is the whole credential and the enroller holds every control that
+  matters. Keeping the origin rule uniform means there is no exemption to reason
+  about; a browser always sends the header, so the enroll page pays nothing.
+  `ErrTooManyRedeemAttempts` becomes a 429 with `Retry-After`, which is the
+  point of the limiter: a flood becomes one distinguishable status.
+- **`/enroll` is a Go-rendered page, not an SPA route.** It is the only page
+  that must work with no device cookie, it is what the end-to-end test drives,
+  and it is the one page holding a bearer token in its URL -- so it carries a
+  per-request CSP nonce under `default-src 'none'`, drops the fragment from
+  history before the POST, and needs no bundle to load.
+- **The SPA fallback answers unknown paths with `index.html`, and `/api/` and
+  `/assets/` 404 honestly.** A fallback that swallowed `/api/nope` would make a
+  frontend parse the shell as JSON; one that swallowed a missing bundle would
+  make the browser report a syntax error in a file that is not there. The
+  catch-all is registered as `"/"` with a `getOnly` wrapper rather than
+  `"GET /"`, because `ServeMux` refuses to hold `"GET /"` alongside `"/api/"` --
+  neither is more specific -- and panics at registration.
+- **`go:embed all:dist` plus a tracked `dist/.gitkeep`.** `dist` is build output
+  and stays out of git, but `//go:embed dist` is a *compile* error when the
+  pattern matches nothing, so a fresh clone could not `go build` until someone
+  installed pnpm. The `all:` prefix is what makes a dotfile count. Vite empties
+  the directory on every build, so `make front` puts `.gitkeep` back. A binary
+  built without the frontend serves a placeholder page saying `make front` and
+  keeps the API working.
+- **`--dev` replaces the origin allowlist rather than adding to it, and the
+  terminal socket is fed from `Auth.Origins()`.** `TerminalConfig` grew an
+  `AllowedOrigins []string` for this: dev mode has three loopback origins and a
+  single-valued field would have made `--dev` work or not depending on whether
+  the developer typed `localhost` or `127.0.0.1`. The enrollment link's base URL
+  is derived from the same switch, so a link always names an origin the daemon
+  will accept.
+- **TLS is `certmagic.HTTPS([]string{cfg.Host}, mux)` -- one name, HTTP-01.**
+  certmagic's own doc warns it is unsuitable for "very long-lived connections"
+  because of the timeouts on its `http.Server`; that warning does not reach the
+  terminal, because `net/http` clears the connection's deadlines when the
+  WebSocket handler hijacks it (`conn.hijackLocked` calls
+  `SetDeadline(time.Time{})`). The keepalive ping remains the only thing that
+  collects a dead peer. `certmagic.HTTPS` owns its listeners and offers no
+  shutdown, so the process exiting is what closes them -- nothing here holds
+  state a graceful stop would protect.
+
+Twenty-eight mutants, all killed. The ones worth naming: `/api/snapshot`,
+`/api/devices`, `DELETE /api/devices/{id}` and `/` each left unprotected; `/ws`
+behind `Protect` instead of `ProtectSocket`, so the one `GET` that opens a shell
+could take the navigation exemption; the terminal socket matching origins by
+suffix; `--dev` origins added to production rather than replacing it; the
+revocation not calling `CloseDevice`, and the terminal registering a closer that
+severs nothing; a revoked device connected anyway; `auth.Device` serialized
+straight to the browser; the enrollment link's token moved from the fragment
+into the query; the device cookie not set on redemption and not cleared on
+sign-out; `/api/enroll` without its origin check; the SPA fallback swallowing
+unknown `/api/` routes and missing assets; the asset directory rendered as a
+listing; a failed poll blanking the sidebar, and a stale-but-good snapshot
+answered with a 503; the sweep failure swallowed; the security headers dropped.
+
+Two of them are worth recording as method rather than as results. Removing
+`st.IsDir()` and removing the registry call both left a variable unused, so they
+failed to *compile* -- which scores as "killed" and proves nothing; both were
+rewritten into mutants that compile and change behavior. And one genuinely
+survived: dropping `history.replaceState` from the enroll page, which leaves a
+single-use token in the address bar, was invisible to a Go test suite with no
+DOM. A test now pins the call in the page source, and the end-to-end test is
+what will exercise it for real.
+
 ```bash
 git commit -m "feat: http server, enrollment flow, and single-name tls"
 ```

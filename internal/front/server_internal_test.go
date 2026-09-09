@@ -1,0 +1,238 @@
+package front
+
+// These tests are inside the package because what they check is the wiring
+// rather than the API: which allowlist the terminal socket ends up with, what
+// the startup sweep does with a failure, and which origin an enrollment link
+// names. All three are decisions Serve makes before it touches the network, and
+// a test that had to start a daemon on a real port to see them is a test that
+// would be written once and then skipped.
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+)
+
+// captureLogs redirects the default logger for the duration of a test.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+type fakeSweeper struct {
+	err      error
+	called   bool
+	deadline bool
+}
+
+func (f *fakeSweeper) Sweep(ctx context.Context) error {
+	f.called = true
+	_, f.deadline = ctx.Deadline()
+	return f.err
+}
+
+// An uncollectable orphan leaks one tmux session. Refusing to start leaves the
+// owner with no way in at all -- and the conditions that produce a sweep error,
+// an unreadable socket for instance, persist across restarts, so a fatal sweep
+// would be a permanently unstartable daemon.
+func TestASweepFailureIsLoggedAndStartupCarriesOn(t *testing.T) {
+	logs := captureLogs(t)
+	s := &fakeSweeper{err: errors.New("connect: permission denied")}
+
+	sweepOrphans(context.Background(), s)
+
+	if !s.called {
+		t.Fatal("the sweep did not run")
+	}
+	if got := logs.String(); !strings.Contains(got, "permission denied") {
+		t.Fatalf("the sweep failure was swallowed: %q", got)
+	}
+}
+
+// A cold start has no tmux server, Sweep reports that as nil, and a daemon that
+// logged a warning every time it started on a fresh machine would train its
+// owner to ignore the log.
+func TestAColdStartSweepLogsNothing(t *testing.T) {
+	logs := captureLogs(t)
+	sweepOrphans(context.Background(), &fakeSweeper{})
+	if got := logs.String(); got != "" {
+		t.Fatalf("a successful sweep logged %q", got)
+	}
+}
+
+// The sweep runs before the daemon serves anything, so a tmux server that never
+// answers must not hold the daemon down.
+func TestTheSweepCannotHoldStartupOpenForever(t *testing.T) {
+	s := &fakeSweeper{}
+	sweepOrphans(context.Background(), s)
+	if !s.deadline {
+		t.Fatal("the startup sweep was given no deadline")
+	}
+}
+
+// -- the dev switch ---------------------------------------------------------
+
+func devDaemon(t *testing.T, dev bool) (*daemon, string) {
+	t.Helper()
+	d, err := newDaemon(Config{
+		Host:      "tmux.example.com",
+		Dev:       dev,
+		Port:      7000,
+		StatePath: filepath.Join(t.TempDir(), "devices.json"),
+	})
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	token, err := d.store.AddDevice("laptop", "Go test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d, token
+}
+
+func request(t *testing.T, d *daemon, method, target, token, origin string) int {
+	t.Helper()
+	r := httptest.NewRequest(method, target, strings.NewReader(`{"name":"x"}`))
+	r.Header.Set("Content-Type", "application/json")
+	r.AddCookie(&http.Cookie{Name: DeviceCookieName, Value: token})
+	if origin != "" {
+		r.Header.Set("Origin", origin)
+	}
+	rec := httptest.NewRecorder()
+	d.handler.ServeHTTP(rec, r)
+	return rec.Code
+}
+
+// AllowedOrigins replaces the production origin in dev mode rather than adding
+// to it, and this is the test that the daemon's wiring actually passes cfg.Dev
+// through rather than deriving the allowlist from the host alone. Adding
+// instead of replacing would mean a production daemon accepting requests from a
+// page on the developer's laptop, which is a hole rather than a dev switch.
+func TestTheDevSwitchReplacesTheProductionOriginRatherThanJoiningIt(t *testing.T) {
+	dev, token := devDaemon(t, true)
+	if code := request(t, dev, "POST", "/api/devices", token, "https://tmux.example.com"); code != http.StatusForbidden {
+		t.Errorf("a --dev daemon accepted the production origin: %d", code)
+	}
+	for _, o := range []string{"http://localhost:7000", "http://127.0.0.1:7000", "http://[::1]:7000"} {
+		if code := request(t, dev, "POST", "/api/devices", token, o); code != http.StatusOK {
+			t.Errorf("a --dev daemon refused %s: %d", o, code)
+		}
+	}
+
+	prod, token := devDaemon(t, false)
+	if code := request(t, prod, "POST", "/api/devices", token, "http://localhost:7000"); code != http.StatusForbidden {
+		t.Errorf("a production daemon accepted a loopback origin: %d", code)
+	}
+	if code := request(t, prod, "POST", "/api/devices", token, "https://tmux.example.com"); code != http.StatusOK {
+		t.Errorf("a production daemon refused its own origin: %d", code)
+	}
+}
+
+// The terminal socket checks the handshake itself, inside the upgrade, and it
+// has to ask the same question of the same allowlist -- a second copy of the
+// rule is a second thing to keep in step with --dev, and the failure mode is a
+// dev machine where the sidebar works and the terminal does not.
+//
+// 400 is the pass here: it is what the socket answers once the origin check is
+// behind it and the session parameter is missing, and it means no tmux was
+// forked to get the answer.
+func TestTheTerminalSocketSharesTheOriginAllowlist(t *testing.T) {
+	dev, token := devDaemon(t, true)
+	for _, o := range []string{"http://localhost:7000", "http://127.0.0.1:7000", "http://[::1]:7000"} {
+		if code := request(t, dev, "GET", "/ws", token, o); code != http.StatusBadRequest {
+			t.Errorf("the terminal socket refused %s: %d", o, code)
+		}
+	}
+	if code := request(t, dev, "GET", "/ws", token, "https://tmux.example.com"); code != http.StatusForbidden {
+		t.Errorf("the terminal socket accepted the production origin in dev: %d", code)
+	}
+
+	prod, token := devDaemon(t, false)
+	if code := request(t, prod, "GET", "/ws", token, "https://tmux.example.com"); code != http.StatusBadRequest {
+		t.Errorf("the terminal socket refused its own origin: %d", code)
+	}
+	if code := request(t, prod, "GET", "/ws", token, "http://127.0.0.1:7000"); code != http.StatusForbidden {
+		t.Errorf("the terminal socket accepted a loopback origin in production: %d", code)
+	}
+}
+
+// An enrollment link that names an origin the daemon does not allow is a link
+// that cannot be redeemed: the page loads, the POST is refused, and the token
+// is spent on nothing. The two must be derived together.
+func TestEnrollmentLinksNameAnOriginTheDaemonAccepts(t *testing.T) {
+	for _, dev := range []bool{false, true} {
+		cfg := Config{Host: "tmux.example.com", Dev: dev, Port: 7000}
+		origins, err := AllowedOrigins(cfg.Host, cfg.Dev, cfg.Port)
+		if err != nil {
+			t.Fatal(err)
+		}
+		base := baseURL(cfg)
+		if !slices.Contains(origins, base) {
+			t.Errorf("dev=%v: enrollment links name %s, which is not in %v", dev, base, origins)
+		}
+	}
+}
+
+// -- the admin wrapper ------------------------------------------------------
+
+func TestOnlyADeviceRevocationTriggersTheSweep(t *testing.T) {
+	cases := []struct {
+		method, path string
+		id           string
+		want         bool
+	}{
+		{"DELETE", "/devices/dev-1", "dev-1", true},
+		{"DELETE", "/devices/dev-1/", "dev-1", true},
+		{"DELETE", "/devices/", "", false},
+		{"DELETE", "/devices", "", false},
+		{"DELETE", "/devices/dev-1/extra", "", false},
+		{"GET", "/devices/dev-1", "", false},
+		{"POST", "/enroll", "", false},
+	}
+	for _, c := range cases {
+		r := httptest.NewRequest(c.method, c.path, nil)
+		id, ok := revokedDeviceID(r)
+		if ok != c.want || (ok && id != c.id) {
+			t.Errorf("revokedDeviceID(%s %s) = %q, %v; want %q, %v", c.method, c.path, id, ok, c.id, c.want)
+		}
+	}
+}
+
+// -- assorted ---------------------------------------------------------------
+
+func TestAssetNameRefusesToEscapeTheEmbeddedTree(t *testing.T) {
+	for _, p := range []string{"/", "/../go.mod", "/assets/../../secret", "//", "/."} {
+		name, ok := assetName(p)
+		if ok && (strings.Contains(name, "..") || name == "") {
+			t.Errorf("assetName(%q) = %q, %v", p, name, ok)
+		}
+	}
+	if name, ok := assetName("/assets/index-abc.js"); !ok || name != "assets/index-abc.js" {
+		t.Errorf("assetName(/assets/index-abc.js) = %q, %v", name, ok)
+	}
+}
+
+func TestPollIntervalDefaults(t *testing.T) {
+	d, err := newDaemon(Config{Host: "tmux.example.com", StatePath: filepath.Join(t.TempDir(), "d.json")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.poller == nil {
+		t.Fatal("no poller")
+	}
+	if DefaultPollInterval != 1500*time.Millisecond {
+		t.Fatalf("DefaultPollInterval = %v; the sidebar polls at 1.5s and the design costs it at one fork per interval", DefaultPollInterval)
+	}
+}

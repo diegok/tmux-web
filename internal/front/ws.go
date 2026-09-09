@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -59,6 +60,23 @@ type TerminalConfig struct {
 	// Origin at all -- is refused. Empty refuses everything.
 	AllowedOrigin string
 
+	// AllowedOrigins is the same thing for a deployment that has more than one
+	// origin, and is the field the server wires up: it is fed from
+	// Auth.Origins() so the handshake asks the same question of the same
+	// allowlist the cookie middleware uses, instead of keeping a second copy of
+	// the rule that could drift from it.
+	//
+	// Production has exactly one entry, https://<host>. Dev mode has three --
+	// http://localhost:port, http://127.0.0.1:port and http://[::1]:port --
+	// because those are three distinct origins to a browser and which one
+	// appears depends on what the developer typed. A single-valued field would
+	// have made --dev work or not depending on that, which is the kind of
+	// difference between dev and production that hides a real bug.
+	//
+	// The effective allowlist is this field plus AllowedOrigin; each entry is
+	// matched exactly.
+	AllowedOrigins []string
+
 	// PingInterval and PingTimeout override the keepalive timings. Zero means
 	// the defaults above; they exist so tests can observe a keepalive without
 	// waiting twenty seconds for one.
@@ -72,9 +90,10 @@ type TerminalConfig struct {
 type TerminalHandler struct {
 	cfg TerminalConfig
 
-	// origin is AllowedOrigin reduced to scheme://host, or "" if it could not
-	// be read as an origin at all. Compared by equality, never by suffix.
-	origin string
+	// origins is the configured allowlist reduced to scheme://host entries,
+	// with anything unreadable as an origin dropped. Compared by equality,
+	// never by suffix.
+	origins []string
 
 	tm *tmux.Client
 }
@@ -84,12 +103,17 @@ type TerminalHandler struct {
 // the safe direction and is logged. Returning an error instead would push a
 // decision onto every caller for a case that is already fail-closed.
 func NewTerminalHandler(cfg TerminalConfig) *TerminalHandler {
-	origin := wsNormalizeOrigin(cfg.AllowedOrigin)
-	if origin == "" {
-		slog.Warn("terminal handler has no usable allowed origin; it will refuse every connection",
-			"allowed_origin", cfg.AllowedOrigin)
+	var origins []string
+	for _, o := range append([]string{cfg.AllowedOrigin}, cfg.AllowedOrigins...) {
+		if n := wsNormalizeOrigin(o); n != "" && !slices.Contains(origins, n) {
+			origins = append(origins, n)
+		}
 	}
-	return &TerminalHandler{cfg: cfg, origin: origin, tm: tmux.NewClient(cfg.TmuxArgs)}
+	if len(origins) == 0 {
+		slog.Warn("terminal handler has no usable allowed origin; it will refuse every connection",
+			"allowed_origin", cfg.AllowedOrigin, "allowed_origins", cfg.AllowedOrigins)
+	}
+	return &TerminalHandler{cfg: cfg, origins: origins, tm: tmux.NewClient(cfg.TmuxArgs)}
 }
 
 func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -161,7 +185,7 @@ func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // -- which have no business here, and for which coder/websocket's own check
 // returns "authorized".
 func (h *TerminalHandler) allowsOrigin(r *http.Request) bool {
-	if h.origin == "" {
+	if len(h.origins) == 0 {
 		return false // unconfigured means closed, not open
 	}
 	// Exactly one header. Two Origin headers is not something a browser
@@ -171,7 +195,7 @@ func (h *TerminalHandler) allowsOrigin(r *http.Request) bool {
 	if len(got) != 1 {
 		return false
 	}
-	return wsNormalizeOrigin(got[0]) == h.origin
+	return slices.Contains(h.origins, wsNormalizeOrigin(got[0]))
 }
 
 // wsNormalizeOrigin reduces an origin to lowercase scheme://host, or "" if the

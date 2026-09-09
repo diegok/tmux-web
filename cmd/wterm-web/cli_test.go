@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -579,10 +581,28 @@ func TestServeRequiresAHost(t *testing.T) {
 	}
 }
 
-func TestServeReportsThatItIsNotBuiltYet(t *testing.T) {
+// A daemon that could not start is a failed operation, not a usage error: exit
+// 1, with the reason on stderr. The most likely reason by far is a device store
+// that will not parse, which is deliberately fatal -- starting empty would sign
+// out every enrolled device.
+func TestServeReportsWhyTheDaemonCouldNotStart(t *testing.T) {
+	restore := stubServe(t, func(serveConfig, io.Writer, io.Writer) error {
+		return errors.New("the device store is corrupt")
+	})
+	defer restore()
+
 	r := runCLI("serve", "--host", "tmux.example.com")
 	r.wantCode(t, 1)
-	r.wantStderrContains(t, "not implemented")
+	r.wantStderrContains(t, "the device store is corrupt")
+}
+
+// The seam is wired to the real daemon rather than to a placeholder. Nothing
+// here starts it -- that would bind ports and ask a CA for a certificate --
+// so this checks the wiring by identity.
+func TestServeRunsTheRealDaemon(t *testing.T) {
+	if reflect.ValueOf(serveRun).Pointer() != reflect.ValueOf(runDaemon).Pointer() {
+		t.Fatal("serve is not wired to the daemon")
+	}
 }
 
 func stubServe(t *testing.T, fn func(serveConfig, io.Writer, io.Writer) error) func() {

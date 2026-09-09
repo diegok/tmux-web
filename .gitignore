@@ -1,4 +1,9 @@
 /wterm-web
 /web/node_modules
 /web/dist
-/internal/front/dist
+# dist is Vite's output and stays out of git -- except for .gitkeep, which is
+# what lets `//go:embed all:dist` compile on a clone where the frontend has
+# never been built. `pnpm build` empties the directory, so `make front`
+# recreates the file afterwards.
+/internal/front/dist/*
+!/internal/front/dist/.gitkeep

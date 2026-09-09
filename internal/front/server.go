@@ -13,6 +13,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"os/user"
 	"path"
 	"strconv"
 	"strings"
@@ -112,6 +114,29 @@ type server struct {
 	assets    fs.FS
 	baseURL   string
 	spaBuilt  bool
+
+	// Identity for the sidebar footer, resolved once: neither the uid the
+	// daemon runs as nor the hostname changes while it is running.
+	osUser   string
+	hostname string
+}
+
+// localIdentity is the "diegok@devbox" the sidebar footer shows. It is
+// functional rather than decorative: there is exactly one user -- the uid the
+// daemon runs as -- so the only question it answers is which box this tab is
+// driving, which starts to matter as soon as there is more than one.
+//
+// Both halves degrade to a placeholder rather than failing the daemon; a
+// missing hostname is not a reason to refuse to serve a terminal.
+func localIdentity() (osUser, hostname string) {
+	osUser, hostname = "unknown", "unknown"
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		osUser = u.Username
+	}
+	if h, err := os.Hostname(); err == nil && h != "" {
+		hostname = h
+	}
+	return osUser, hostname
 }
 
 // NewHandler builds the browser-facing route table.
@@ -165,6 +190,7 @@ func NewHandler(cfg HandlerConfig) (http.Handler, error) {
 		baseURL:   strings.TrimRight(cfg.BaseURL, "/"),
 		spaBuilt:  spaAvailable(assets),
 	}
+	s.osUser, s.hostname = localIdentity()
 	if !s.spaBuilt {
 		// Once, at startup, rather than on every request: a daemon serving the
 		// placeholder is running from a binary built without `make front`, and
@@ -178,6 +204,7 @@ func NewHandler(cfg HandlerConfig) (http.Handler, error) {
 	mux.Handle("POST /api/enroll", http.HandlerFunc(s.redeem))
 
 	mux.Handle("GET /api/snapshot", cfg.Auth.Protect(http.HandlerFunc(s.snapshot)))
+	mux.Handle("GET /api/user", cfg.Auth.Protect(http.HandlerFunc(s.identity)))
 	mux.Handle("GET /api/devices", cfg.Auth.Protect(http.HandlerFunc(s.listDevices)))
 	mux.Handle("POST /api/devices", cfg.Auth.Protect(http.HandlerFunc(s.mintDevice)))
 	mux.Handle("DELETE /api/devices/{id}", cfg.Auth.Protect(http.HandlerFunc(s.revokeDevice)))
@@ -511,6 +538,20 @@ type deviceJSON struct {
 	// Current marks the device making this request, so the UI can label it and
 	// warn before signing itself out.
 	Current bool `json:"current,omitempty"`
+}
+
+// identity serves the sidebar footer: which box, and which enrolled device is
+// reading. The device half comes from the request rather than the store, so it
+// is always the caller's own.
+func (s *server) identity(w http.ResponseWriter, r *http.Request) {
+	me, _ := DeviceFrom(r.Context())
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":     s.osUser,
+		"host":     s.hostname,
+		"device":   me.Name,
+		"deviceId": me.ID,
+	})
 }
 
 func (s *server) listDevices(w http.ResponseWriter, r *http.Request) {

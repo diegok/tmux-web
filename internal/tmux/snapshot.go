@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -92,4 +93,64 @@ func ParseRows(out string) (rows []Row, dropped int, err error) {
 		})
 	}
 	return rows, dropped, nil
+}
+
+// Dedupe collapses rows to one per pane and puts them in the order the user
+// sees on screen.
+//
+// Grouped sessions share a window list, so `list-panes -a` reports every pane
+// once per member of the group: with two browser tabs open on one base session,
+// three copies of every pane. A tmux -f filter cannot do this job. Excluding
+// app-owned sessions looks equivalent until the user kills the base session
+// while a tab is open: the group survives with only app-owned members, so a
+// filtered snapshot comes back empty while the agents are still running and
+// still visible in the attached tab. Preferring a non-app row keeps the label
+// honest; keeping an app-owned row when it is the only one keeps those agents
+// in the sidebar.
+//
+// Panes are keyed by PaneID alone. Pane ids are unique per server, so GroupKey
+// adds no discrimination -- only a failure mode, if session_group is ever empty
+// for one member of a group and the same pane keys twice.
+//
+// The returned slice is freshly allocated and never aliases rows. Task 7's
+// Poller hands it to concurrent HTTP readers without copying, which is only
+// safe because of that. An empty result is nil rather than an empty slice, to
+// match Snapshot's no-server path.
+func Dedupe(rows []Row) []Row {
+	best := make(map[string]Row, len(rows))
+	for _, r := range rows {
+		if cur, ok := best[r.PaneID]; !ok || (cur.AppOwned && !r.AppOwned) {
+			best[r.PaneID] = r
+		}
+	}
+	if len(best) == 0 {
+		return nil
+	}
+	out := make([]Row, 0, len(best))
+	for _, r := range best {
+		out = append(out, r)
+	}
+	// Order by what the user sees. PaneIndex, not PaneID: after a split-and-kill
+	// cycle the ids run %0 %4 %2 %1 while the layout runs 0 1 2 3, so sorting by
+	// id -- lexicographically or numerically -- disagrees with the screen.
+	//
+	// sort.Slice is explicitly NOT stable and map iteration order is randomised,
+	// so this comparator has to be a total order or the output varies run to
+	// run. (GroupKey, WindowIndex, PaneIndex) is already one over a correctly
+	// deduped set, since pane indices are unique within a window; PaneID is a
+	// final tiebreak so that a snapshot violating that assumption degrades to a
+	// wrong-but-stable order rather than a sidebar that reshuffles every poll.
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].GroupKey != out[j].GroupKey {
+			return out[i].GroupKey < out[j].GroupKey
+		}
+		if out[i].WindowIndex != out[j].WindowIndex {
+			return out[i].WindowIndex < out[j].WindowIndex
+		}
+		if out[i].PaneIndex != out[j].PaneIndex {
+			return out[i].PaneIndex < out[j].PaneIndex
+		}
+		return out[i].PaneID < out[j].PaneID
+	})
+	return out
 }

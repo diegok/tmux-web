@@ -158,3 +158,129 @@ func TestFormatFieldCount(t *testing.T) {
 			"field lets one pane's output forge or erase another's record")
 	}
 }
+
+func TestDedupe(t *testing.T) {
+	// The app-owned copies carry different display fields, so this asserts
+	// which row's payload survived -- not merely how many rows did. Each pane
+	// appears with the app copy on either side of the real one, so both
+	// directions of the preference are exercised.
+	t.Run("grouped sessions collapse to one row per pane", func(t *testing.T) {
+		rows := []Row{
+			{PaneID: "%0", GroupKey: "work", PaneIndex: 0, WindowName: "api", Command: "zsh", AppOwned: false},
+			{PaneID: "%0", GroupKey: "work", PaneIndex: 0, WindowName: "stale", Command: "stale", AppOwned: true},
+			{PaneID: "%1", GroupKey: "work", PaneIndex: 1, WindowName: "stale", Command: "stale", AppOwned: true},
+			{PaneID: "%1", GroupKey: "work", PaneIndex: 1, WindowName: "api", Command: "vim", AppOwned: false},
+		}
+		got := Dedupe(rows)
+		if len(got) != 2 {
+			t.Fatalf("want 2 panes, got %d: %+v", len(got), got)
+		}
+		for _, r := range got {
+			if r.AppOwned {
+				t.Fatalf("should prefer the non-app row: %+v", r)
+			}
+			if r.WindowName != "api" || r.Command == "stale" {
+				t.Fatalf("kept the app row's payload: %+v", r)
+			}
+		}
+	})
+
+	// The regression that motivated dedupe over a tmux filter. Kill the base
+	// session while two tabs are open and the group survives with only
+	// app-owned members -- so every pane still arrives duplicated, and every
+	// copy is AppOwned. There is nothing to prefer, and a filter returns
+	// nothing at all while the agents are still running.
+	//
+	// The fixture must contain duplicates. Two distinct panes with one row each
+	// prove only that Dedupe does not filter, which no plausible implementation
+	// gets wrong.
+	t.Run("duplicated app owned rows collapse but survive", func(t *testing.T) {
+		rows := []Row{
+			{PaneID: "%0", GroupKey: "work", PaneIndex: 0, Command: "claude", AppOwned: true},
+			{PaneID: "%1", GroupKey: "work", PaneIndex: 1, Command: "npm", AppOwned: true},
+			{PaneID: "%0", GroupKey: "work", PaneIndex: 0, Command: "claude", AppOwned: true},
+			{PaneID: "%1", GroupKey: "work", PaneIndex: 1, Command: "npm", AppOwned: true},
+		}
+		got := Dedupe(rows)
+		if len(got) != 2 {
+			t.Fatalf("app-owned panes must survive and collapse, got %d: %+v", len(got), got)
+		}
+		for _, r := range got {
+			if !r.AppOwned {
+				t.Fatalf("nothing here to prefer: %+v", r)
+			}
+		}
+	})
+
+	// Every field contradicts the others, so an implementation that sorts by
+	// PaneID alone -- or that keeps PaneID as the tiebreak within a window --
+	// produces a different answer from the correct one. A fixture whose pane
+	// ids happen to already be in the intended order tests nothing.
+	t.Run("output is ordered by group, then window, then pane index", func(t *testing.T) {
+		rows := []Row{
+			{PaneID: "%1", GroupKey: "b", WindowIndex: 0, PaneIndex: 0},
+			{PaneID: "%9", GroupKey: "a", WindowIndex: 2, PaneIndex: 0},
+			{PaneID: "%4", GroupKey: "a", WindowIndex: 0, PaneIndex: 1},
+			{PaneID: "%7", GroupKey: "a", WindowIndex: 0, PaneIndex: 0},
+		}
+		got := Dedupe(rows)
+		want := []string{"%7", "%4", "%9", "%1"}
+		if len(got) != len(want) {
+			t.Fatalf("want %d rows, got %+v", len(want), got)
+		}
+		for i, w := range want {
+			if got[i].PaneID != w {
+				t.Fatalf("order = %+v, want %v", got, want)
+			}
+		}
+	})
+
+	// sort.Slice is explicitly not a stable sort and map iteration order is
+	// randomised, so determinism has to be proven rather than assumed. Without
+	// a total order, one window with four panes produced four different
+	// orderings across 200 runs -- a sidebar that reshuffles every 1.5s poll.
+	//
+	// The fixture is the verified real case: after a split-and-kill cycle the
+	// pane ids run %0 %4 %2 %1 while pane_index runs 0 1 2 3, so this also pins
+	// that layout order wins over id order.
+	t.Run("repeated calls return the same order", func(t *testing.T) {
+		rows := []Row{
+			{PaneID: "%0", GroupKey: "w", WindowIndex: 0, PaneIndex: 0},
+			{PaneID: "%4", GroupKey: "w", WindowIndex: 0, PaneIndex: 1},
+			{PaneID: "%2", GroupKey: "w", WindowIndex: 0, PaneIndex: 2},
+			{PaneID: "%1", GroupKey: "w", WindowIndex: 0, PaneIndex: 3},
+		}
+		want := []string{"%0", "%4", "%2", "%1"}
+		for run := 0; run < 200; run++ {
+			got := Dedupe(rows)
+			for i, w := range want {
+				if got[i].PaneID != w {
+					t.Fatalf("run %d: order = %+v, want %v", run, got, want)
+				}
+			}
+		}
+	})
+
+	// Snapshot returns nil when no server is running. If Dedupe returned an
+	// empty slice here the API would emit [] in one case and null in the other,
+	// and Task 21's sidebar would map over null.
+	t.Run("an empty result is nil, not an empty slice", func(t *testing.T) {
+		if got := Dedupe(nil); got != nil {
+			t.Fatalf("Dedupe(nil) = %+v, want nil", got)
+		}
+		if got := Dedupe([]Row{}); got != nil {
+			t.Fatalf("Dedupe([]Row{}) = %+v, want nil", got)
+		}
+	})
+
+	// Task 7's Poller hands this slice to concurrent HTTP readers without
+	// copying it, which is only safe if it never aliases the poll's input.
+	t.Run("the result does not alias the input", func(t *testing.T) {
+		rows := []Row{{PaneID: "%0", GroupKey: "w", Command: "zsh"}}
+		got := Dedupe(rows)
+		got[0].Command = "mutated"
+		if rows[0].Command != "zsh" {
+			t.Fatal("Dedupe returned rows aliasing its input")
+		}
+	})
+}

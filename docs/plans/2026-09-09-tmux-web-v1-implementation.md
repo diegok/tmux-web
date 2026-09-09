@@ -124,9 +124,15 @@ Two hazards, both verified on this machine:
    a fresh server but still reads `~/.tmux.conf`. The developer's config sets
    `prefix C-a`, `mouse on`, `aggressive-resize on` and `automatic-rename off`.
    Task 6 asserts `mouse = on` after `AttachArgs` sets it -- inherited, that
-   assertion passes even if `AttachArgs` never touches mouse. `automatic-rename`
-   changes `#{window_name}`, which Tasks 3-5 parse and compare. Passing
+   assertion passes even if `AttachArgs` never touches mouse. Passing
    `-f /dev/null` restores stock defaults (`prefix C-b`, `mouse off`).
+
+   Note which direction this cuts for window names. The developer's config sets
+   `automatic-rename off`, so `-f /dev/null` turns it back **on** and makes
+   `#{window_name}` *more* volatile in tests, not less: a window created without
+   `-n` is named after its running command and follows it. Hermeticity is still
+   right -- the suite must not vary with one machine's dotfiles -- but any test
+   asserting a window name must create the window with `-n` to freeze it.
 2. **Merged stderr corrupts parsed output.** Tasks 3-5 split tmux output on
    0x1f and index fields positionally, so a diagnostic line merged into stdout
    produces a malformed row and fails three files away from its cause.
@@ -851,12 +857,30 @@ func (c *Client) Snapshot(ctx context.Context) ([]Row, error) {
 }
 ```
 
-**Step 4: Run the tests**
+**Step 4: Pin the no-server contract**
+
+`Snapshot` treats "no server running" as an empty UI, not an error, and it
+detects that by substring-matching an error message. tmux writes that text to
+**stderr** with exit 1, and `Run` folds non-empty stderr into the error -- so
+this behavior spans two files and rests on a string match with nothing holding
+it in place. A fresh `NewServer` has no running server by construction, which
+makes the test four lines:
+
+```go
+func TestSnapshotWithNoServerIsNotAnError(t *testing.T) {
+	rows, err := tmux.NewClient(testutil.NewServer(t).Args()).Snapshot(context.Background())
+	if err != nil || rows != nil {
+		t.Fatalf("Snapshot on a dead server = %v, %v; want nil, nil", rows, err)
+	}
+}
+```
+
+**Step 5: Run the tests**
 
 Run: `go test ./internal/tmux/ -v`
 Expected: PASS.
 
-**Step 5: Commit**
+**Step 6: Commit**
 
 ```bash
 git add internal/tmux
@@ -1049,11 +1073,16 @@ func TestAttachLifecycle(t *testing.T) {
 	_ = f.Close()
 	_ = cmd.Process.Kill()
 	waitFor(t, 3*time.Second, func() bool {
-		// The unattached "work" session keeps the server alive, so
-		// list-sessions must keep succeeding here; an error means the harness
-		// broke, not that the session was reaped.
+		// The unattached "work" session keeps the server alive, so an error
+		// here is never transient: it means the harness broke. Polling through
+		// it and then reporting "not reaped" would name the wrong cause.
+		// t.Fatalf is safe in this closure because waitFor calls cond() on the
+		// test goroutine.
 		out, err := srv.TryRun("list-sessions", "-F", "#{session_name}")
-		return err == nil && !strings.Contains(out, name)
+		if err != nil {
+			t.Fatalf("list-sessions while waiting for reap: %v", err)
+		}
+		return !strings.Contains(out, name)
 	}, "session was not reaped on detach")
 }
 

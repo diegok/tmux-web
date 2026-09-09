@@ -1611,11 +1611,18 @@ git commit -m "feat: one-shot tmux session create-attach-configure"
 ### Task 7: Navigation and cached snapshot polling
 
 **Files:**
-- Modify: `internal/tmux/client.go`
+- Modify: `internal/tmux/client.go`, `internal/tmux/client_integration_test.go`
 - Create: `internal/tmux/poller.go`
-- Test: `internal/tmux/poller_test.go`
+- Test: `internal/tmux/poller_test.go`, `internal/tmux/poller_integration_test.go`
 
-**Step 1: Write the failing test**
+**Step 1: Write the failing tests**
+
+The poller's own tests are pure -- `NewPollerFunc` takes a function, so they need
+no tmux -- but `NewPoller` then has nothing pinning its wiring, and a poller that
+never reaches tmux would serve an empty sidebar forever. That one test
+(`TestNewPollerCachesRealSnapshots`) runs against a real server and also proves
+the cache advances on its own: it opens a window after `Start` and waits for the
+pane to appear.
 
 ```go
 func TestPollerSharesOnePollAcrossReaders(t *testing.T) {
@@ -1637,8 +1644,67 @@ func TestPollerSharesOnePollAcrossReaders(t *testing.T) {
 	wg.Wait()
 
 	if n := atomic.LoadInt32(&calls); n > 2 {
-		t.Fatalf("want at most 2 polls, got %d — readers are each forking tmux", n)
+		t.Fatalf("want at most 2 polls, got %d -- readers are each forking tmux", n)
 	}
+}
+```
+
+Four more pure tests, each of which a mutant survives without:
+`TestPollerPollsOnceBeforeStartReturns` (the first tab must not wait an interval
+for its sidebar), `TestPollerRefreshesOnTheTicker`,
+`TestPollerStopsOnContextCancel`, and the one that pins the decision below:
+
+```go
+// A transient tmux failure -- "server exited unexpectedly" is emitted for a few
+// milliseconds while a server shuts down -- must not blank a sidebar that was
+// correct an interval ago. The error is still visible so a persistent failure
+// can be surfaced rather than served as a snapshot that is stale forever.
+func TestPollerKeepsLastGoodSnapshotOnError(t *testing.T) {
+	boom := errors.New("server exited unexpectedly")
+
+	var mu sync.Mutex
+	mode := "ok"
+	p := tmux.NewPollerFunc(time.Millisecond, func(context.Context) ([]tmux.Row, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch mode {
+		case "ok":
+			return []tmux.Row{{PaneID: "%7"}}, nil
+		case "fail":
+			return nil, boom
+		default:
+			return []tmux.Row{{PaneID: "%9"}}, nil
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.Start(ctx)
+
+	if rows := p.Latest(); len(rows) != 1 || rows[0].PaneID != "%7" {
+		t.Fatalf("Latest() = %+v before any failure, want the first good snapshot", rows)
+	}
+
+	mu.Lock()
+	mode = "fail"
+	mu.Unlock()
+	waitFor(t, 3*time.Second, func() bool { return p.Err() != nil }, "a failed poll never surfaced an error")
+
+	if rows := p.Latest(); len(rows) != 1 || rows[0].PaneID != "%7" {
+		t.Fatalf("Latest() = %+v after a failed poll, want the last good snapshot kept", rows)
+	}
+	if err := p.Err(); !errors.Is(err, boom) {
+		t.Fatalf("Err() = %v, want the failure that the poll returned", err)
+	}
+
+	// Recovery: a later success must both replace the rows and clear the error,
+	// or the UI keeps an error banner up forever.
+	mu.Lock()
+	mode = "recovered"
+	mu.Unlock()
+	waitFor(t, 3*time.Second, func() bool {
+		rows := p.Latest()
+		return p.Err() == nil && len(rows) == 1 && rows[0].PaneID == "%9"
+	}, "the poller never recovered after a transient failure")
 }
 ```
 
@@ -1677,6 +1743,8 @@ func NewPoller(interval time.Duration, c *Client) *Poller {
 	return NewPollerFunc(interval, c.Snapshot)
 }
 
+// Start polls once synchronously -- so the first tab to connect does not see an
+// empty sidebar -- then keeps polling until ctx is cancelled.
 func (p *Poller) Start(ctx context.Context) {
 	p.refresh(ctx)
 	go func() {
@@ -1693,59 +1761,165 @@ func (p *Poller) Start(ctx context.Context) {
 	}()
 }
 
+// refresh replaces the cached snapshot, but only when the poll succeeded.
+//
+// A failed poll updates err and leaves the rows alone. tmux prints "server
+// exited unexpectedly" for a few milliseconds while a server shuts down, and
+// noServer deliberately does not match it -- so without this, one poll landing
+// in that window would blank the sidebar and the next would silently fix it.
+// Keeping the last good snapshot covers that and any other transient fault
+// without having to enumerate tmux's error strings, which is exactly the
+// fragile thing noServer already has to do.
+//
+// The stale snapshot is not served silently: err stays set until a poll
+// succeeds, so a caller can tell a momentary hiccup from a server that has been
+// unreachable for a minute.
 func (p *Poller) refresh(ctx context.Context) {
 	rows, err := p.fn(ctx)
 	p.mu.Lock()
-	p.latest, p.err = rows, err
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+	p.err = err
+	if err != nil {
+		return
+	}
+	p.latest = rows
 }
 
-// Latest returns the most recent snapshot without forking tmux.
+// Latest returns the most recent successful snapshot without forking tmux.
+//
+// The slice is shared with every other reader and must not be modified.
+// Snapshot's rows come from Dedupe, which allocates a fresh slice per call and
+// never aliases its input, so a refresh replaces this value rather than writing
+// through it.
 func (p *Poller) Latest() []Row {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.latest
 }
+
+// Err reports how the most recent poll ended: nil if it succeeded, otherwise
+// the failure, in which case Latest is serving the snapshot from before it.
+//
+// Latest and Err take the lock separately, so a caller reading both across a
+// refresh can pair rows with the other poll's error. That is deliberate -- the
+// pair only ever straddles one interval, and neither value is ever wrong on its
+// own -- and a combined accessor can be added when a caller needs one.
+func (p *Poller) Err() error {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.err
+}
 ```
 
-**Decide before implementing: the third tmux message.**
+**Decided: a failed poll keeps the last good snapshot.**
 
 `noServer` (Task 5) matches two of tmux's three failure texts. The third,
 `server exited unexpectedly`, appears for a few milliseconds while a server is
 shutting down. Task 5 leaves it a hard error, which is correct for a one-shot
 command but wrong for a poller: when the user closes their last tmux session,
 one poll can land in that window and raise an error banner that the next poll
-silently clears. Either fold that message into `noServer`, or have the poller
-keep its previous snapshot on error rather than replacing it with a failure.
-The second is better -- a transient tmux hiccup should never blank a sidebar
-that was correct 1.5s ago -- but it changes `Poller`'s contract, so decide it
-here rather than discovering it in the UI.
+silently clears.
+
+The fix is in the poller, not in `noServer`: `refresh` updates `err` on every
+poll but only replaces `latest` on a successful one. A transient tmux fault
+never blanks a sidebar that was correct 1.5s ago, and it costs no further
+guessing at tmux's error strings -- which is the fragile part of `noServer` and
+the part Task 5 got wrong the first time. `Err()` exists so a persistent failure
+is still visible: serving a stale snapshot forever without saying so is its own
+bug, and Task 17's `/api/snapshot` handler is the caller that will surface it.
 
 **Step 4: Add navigation helpers to `client.go`**
 
 ```go
-// SelectPane points a session at a pane. Issued against the browser tab's own
-// grouped session so it never disturbs other clients.
+// SelectPane points one session at a pane: the browser tab's own grouped
+// session, so clicking a pane in one tab moves neither the other tabs nor the
+// terminal the user is sitting in front of.
+//
+// The plan specified `select-window -t <session>:<paneID>`, and tmux 3.7b
+// rejects it -- "can't find window: %3". A window target parses <session>:<win>
+// and looks <win> up as a name, index or @id; a pane id is not one of those.
+// The bare form `select-window -t %3` does work, but it picks the session
+// itself, and with grouped sessions that choice is arbitrary: with two tabs
+// open on one base, it moved the wrong one. Hence the extra call to resolve the
+// pane's window id, which can then be qualified with the session that must
+// move. "=" pins the session name to an exact match, as in Sweep.
+//
+// list-panes does the resolving rather than display-message, which is the
+// obvious command and is unusable here: given a target it cannot find, it
+// prints an empty expansion and exits 0, and `display-message -t work:9`
+// happily answers about a different window. list-panes errors on all of those.
+// It reports the window id once per pane in the window; the lines are identical
+// and the first is taken.
+//
+// Only the current window is per-session. The active pane belongs to the
+// window, which grouped sessions share, so that half is visible to every member
+// of the group. tmux offers no way to scope it, and it matches what the user
+// sees when they select a pane in one of two attached clients.
 func (c *Client) SelectPane(ctx context.Context, session, paneID string) error {
-	if _, err := c.Run(ctx, "select-window", "-t", session+":"+paneID); err != nil {
+	// tmux resolves an empty target to "whatever is current" and exits 0, so an
+	// unset pane id would quietly navigate the tab somewhere arbitrary instead
+	// of failing. The ids come from the frontend, where "no selection yet" is
+	// one bug away from being the empty string.
+	if !isPaneID(paneID) {
+		return fmt.Errorf("select pane: %q is not a tmux pane id", paneID)
+	}
+	if session == "" {
+		return fmt.Errorf("select pane %s: no session given", paneID)
+	}
+	out, err := c.Run(ctx, "list-panes", "-t", paneID, "-F", "#{window_id}")
+	if err != nil {
 		return err
 	}
-	_, err := c.Run(ctx, "select-pane", "-t", paneID)
+	window, _, _ := strings.Cut(out, "\n")
+	if _, err := c.Run(ctx, "select-window", "-t", "="+session+":"+window); err != nil {
+		return err
+	}
+	_, err = c.Run(ctx, "select-pane", "-t", paneID)
 	return err
+}
+
+// isPaneID reports whether s is a tmux pane id, e.g. "%3".
+func isPaneID(s string) bool {
+	if len(s) < 2 || s[0] != '%' {
+		return false
+	}
+	for _, r := range s[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // KillSession removes a throwaway session explicitly. destroy-unattached is the
 // crash net; this is the normal teardown path.
+//
+// "=" pins the target to an exact match, for the reason spelled out in Sweep:
+// tmux falls back to prefix matching without reporting the ambiguity, so
+// `kill-session -t _web-` would kill an unrelated _web-abcd and exit 0. Unlike
+// Sweep, this takes a name from its caller rather than from tmux, so the guard
+// is reachable and tested.
 func (c *Client) KillSession(ctx context.Context, name string) error {
-	_, err := c.Run(ctx, "kill-session", "-t", name)
+	_, err := c.Run(ctx, "kill-session", "-t", "="+name)
 	return err
 }
 ```
 
+The `select-window -t <session>:<paneID>` form this plan carried until now does
+not work: tmux 3.7b answers `can't find window: %3`. It was checked against a
+real server before shipping, which is the only reason it did not reach the UI.
+`TestSelectPaneMovesOnlyTheGivenSession` pins the corrected sequence with two
+grouped sessions plus the base one, and fails on the old code.
+
+`KillSession` gained the same `=` exact-match prefix as `Sweep`, and here it is
+tested rather than merely argued: `Sweep` only ever passes a name it read back
+from tmux, but `KillSession` takes one from its caller, so a partial name is a
+reachable input and `kill-session -t _web-` would silently kill `_web-abcd`.
+
 **Step 5: Run all tmux tests**
 
-Run: `go test ./internal/tmux/... -v -count=1`
-Expected: PASS.
+Run: `go test ./internal/tmux/... -v -count=1 -race`
+Expected: PASS. `-race` because `Latest` hands one slice to concurrent readers.
 
 **Step 6: Commit**
 

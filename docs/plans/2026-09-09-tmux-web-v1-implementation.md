@@ -2404,6 +2404,38 @@ func TestStoreConcurrentWritesDoNotLoseUpdates(t *testing.T) {
 by write-to-temp + `os.Rename`. Store `sha256` of the token. Fields: `ID`,
 `Name`, `TokenHash`, `UserAgent`, `CreatedAt`, `LastSeen`.
 
+**As built.** `OpenStore(path)`, `AddDevice(name, ua) (token, error)`,
+`Devices()`, `Lookup(token) (Device, bool)`, `Touch(id, t)`, `Revoke(id)`, plus
+`DefaultPath()` for `$XDG_STATE_HOME/wterm-web/devices.json` (a relative
+`XDG_STATE_HOME` is ignored, per the basedir spec). `Lookup` and `Touch` are
+here rather than in task 15 because the store is what holds the hash, and
+because `LastSeen` is otherwise a field nothing can ever update. They are split
+so the request path does not write a file per request.
+
+Decisions the tests pin, each of which a mutant would otherwise get away with:
+
+- **A corrupt or unreadable state file fails `OpenStore`**; a missing or
+  zero-length one is an empty store. Starting empty over a file that is merely
+  unparseable would sign out every enrolled device without saying so, and the
+  next enrolment would overwrite the only copy an operator could still recover.
+  The daemon should report that error and exit, not proceed (task 17).
+- **A failed persist rolls back the in-memory change**, so a revoke that could
+  not be written does not cut a device off until the next restart brings it
+  back.
+- **`Revoke` on an unknown id is `ErrNoSuchDevice`**, not a silent success:
+  `revoke <id>` is the response to a lost laptop.
+- **`Devices()` is sorted oldest-first**, not map order, so the CLI listing does
+  not reshuffle between runs.
+- Atomicity is pinned twice: a concurrent reader that must never parse a partial
+  file, plus an `os.SameFile` check that the store file is *replaced* rather
+  than rewritten in place. The reader test alone catches a truncating write only
+  about a third of the time.
+
+`crypto/subtle.ConstantTimeCompare` is used in `Lookup`, but it is **not**
+load-bearing and should not be described as the defence: the values compared are
+SHA-256 digests, not the token, so a timing leak would reveal digest bytes that
+are useless without a preimage.
+
 **Step 5: Commit**
 
 ```bash

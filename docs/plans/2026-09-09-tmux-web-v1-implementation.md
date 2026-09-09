@@ -1097,7 +1097,7 @@ func (c *Client) Snapshot(ctx context.Context) ([]Row, error) {
 	if err != nil {
 		// No server running is not an error condition for the UI. tmux reports
 		// this on stderr, which Run folds into the error message.
-		if strings.Contains(err.Error(), "no server running") {
+		if noServer(err.Error()) {
 			return nil, nil
 		}
 		return nil, err
@@ -1115,16 +1115,44 @@ func (c *Client) Snapshot(ctx context.Context) ([]Row, error) {
 	}
 	return Dedupe(rows), nil
 }
+
+// noServer reports whether a tmux failure means "there is no server on this
+// socket" rather than a real fault.
+//
+// tmux 3.7b says this two different ways, depending on what is left of the
+// socket. Once the server has exited but its socket file survives, connect
+// fails with ECONNREFUSED and tmux prints "no server running on <path>". When
+// the file was never created -- a machine where tmux has not been started since
+// boot, and the state of every fresh test server -- connect fails with ENOENT
+// and tmux prints "error connecting to <path> (No such file or directory)".
+// Both mean the same thing to the sidebar: no panes.
+//
+// The ENOENT text is matched alongside the prefix rather than the prefix alone,
+// because "error connecting to" also covers failures the operator must see --
+// a permission error on a socket owned by another user, say, which as an empty
+// sidebar would be indistinguishable from a machine with no tmux running.
+//
+// Matching on message text is fragile: tmux exits 1 for this and for genuine
+// errors alike, so there is nothing else to match on. TestSnapshotWithNoServer*
+// pin both strings against a real tmux.
+func noServer(msg string) bool {
+	return strings.Contains(msg, "no server running") ||
+		(strings.Contains(msg, "error connecting to") &&
+			strings.Contains(msg, "No such file or directory"))
+}
 ```
 
 **Step 4: Pin the no-server contract**
 
-`Snapshot` treats "no server running" as an empty UI, not an error, and it
-detects that by substring-matching an error message. tmux writes that text to
-**stderr** with exit 1, and `Run` folds non-empty stderr into the error -- so
-this behavior spans two files and rests on a string match with nothing holding
-it in place. A fresh `NewServer` has no running server by construction, which
-makes the test four lines:
+`Snapshot` treats a missing server as an empty UI, not an error, and it detects
+that by substring-matching an error message. tmux writes that text to **stderr**
+with exit 1, and `Run` folds non-empty stderr into the error -- so this behavior
+spans two files and rests on a string match with nothing holding it in place.
+
+Both strings need pinning, because tmux words the same condition two ways and
+an earlier revision of this task matched only one of them. A fresh `NewServer`
+has never created its socket, so tmux fails to connect with ENOENT and says
+"error connecting to <path> (No such file or directory)":
 
 ```go
 func TestSnapshotWithNoServerIsNotAnError(t *testing.T) {
@@ -1134,6 +1162,50 @@ func TestSnapshotWithNoServerIsNotAnError(t *testing.T) {
 	}
 }
 ```
+
+The other half is the one a long-running deployment actually hits: the user
+quits their last session, the server exits, and its socket file stays behind.
+Connect then fails with ECONNREFUSED and tmux says "no server running on
+<path>" instead. `kill-server` returns before the server has finished exiting,
+and a command landing in that window fails with a third message, "server exited
+unexpectedly", so poll until it settles rather than asserting on the transient:
+
+```go
+// The socket file outlives the server, and tmux then words the same condition
+// differently -- "no server running on <path>" instead of the connect error a
+// never-started socket gives. Without this the ECONNREFUSED half of noServer is
+// unexercised, which is the half a long-running deployment actually hits: the
+// user quits their last session while the sidebar is polling.
+func TestSnapshotWithNoServerAfterExitIsNotAnError(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work")
+	srv.Run(t, "kill-server")
+	if _, err := os.Stat(srv.SocketPath()); err != nil {
+		t.Fatalf("socket file must outlive the server, else this duplicates the ENOENT test: %v", err)
+	}
+
+	// kill-server returns before the server has finished exiting, and a command
+	// that lands in that window fails with "server exited unexpectedly". Poll
+	// until it settles rather than asserting on the transient.
+	c := tmux.NewClient(srv.Args())
+	var err error
+	var rows []tmux.Row
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		rows, err = c.Snapshot(context.Background())
+		if err == nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err != nil || rows != nil {
+		t.Fatalf("Snapshot on an exited server = %v, %v; want nil, nil", rows, err)
+	}
+}
+```
+
+Both tests need `os` and `time` in the import block alongside `context` and
+`testing`.
 
 **Step 5: Run the tests**
 

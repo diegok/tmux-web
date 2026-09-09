@@ -473,6 +473,13 @@ func TestParseRows(t *testing.T) {
 		}
 	})
 
+	t.Run("empty output yields no rows", func(t *testing.T) {
+		got, err := ParseRows("")
+		if err != nil || got != nil {
+			t.Fatalf("ParseRows(\"\") = %v, %v; want nil, nil", got, err)
+		}
+	})
+
 	t.Run("garbage before any valid row is dropped", func(t *testing.T) {
 		got, err := ParseRows("nonsense")
 		if err != nil {
@@ -538,15 +545,12 @@ const Format = "#{?#{session_group},#{session_group},#{session_name}}" + Sep +
 // contain newlines. Leading garbage with no preceding row is discarded.
 func ParseRows(out string) ([]Row, error) {
 	var rows []Row
-	for i, line := range strings.Split(out, "\n") {
+	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Split(line, Sep)
 		if len(fields) != fieldCount {
 			if len(rows) > 0 {
 				rows[len(rows)-1].Path += "\n" + line
 			}
-			continue
-		}
-		if i == 0 && line == "" {
 			continue
 		}
 		widx, err := strconv.Atoi(fields[3])
@@ -571,7 +575,7 @@ func ParseRows(out string) ([]Row, error) {
 **Step 4: Run the tests**
 
 Run: `go test ./internal/tmux/ -run TestParseRows -v`
-Expected: PASS, all four subtests.
+Expected: PASS, all five subtests.
 
 **Step 5: Commit**
 

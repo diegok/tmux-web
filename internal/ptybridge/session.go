@@ -2,6 +2,7 @@ package ptybridge
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"os/exec"
 	"sync"
@@ -49,6 +50,14 @@ type Session struct {
 // taken so the signature stays honest as an I/O-performing constructor and so
 // callers pass one habitually.
 func Open(ctx context.Context, cfg Config) (*Session, error) {
+	// Idempotent, and cheap: one `show` per attach, and a `set` only the very
+	// first time. Done here rather than only at daemon startup because the tmux
+	// server may not have existed then -- the user can start one at any point.
+	// A failure costs clickable links, not the terminal, so it is logged.
+	if err := tmux.NewClient(cfg.TmuxArgs).EnableHyperlinks(ctx); err != nil {
+		slog.Warn("ptybridge: could not enable tmux hyperlinks", "err", err)
+	}
+
 	name := tmux.NewSessionName()
 	args := append(append([]string{}, cfg.TmuxArgs...), tmux.AttachArgs(cfg.Base, name)...)
 
@@ -59,7 +68,19 @@ func Open(ctx context.Context, cfg Config) (*Session, error) {
 	// fails with "terminal does not support clear"). tmux advertises
 	// tmux-256color to programs inside the session, which is expected and
 	// separate from this.
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	//
+	// TermName rather than xterm-256color so tmux will send OSC 8 hyperlinks
+	// here without also sending them to the user's own terminal; see terminfo.go.
+	// If the entry cannot be written, fall back rather than refuse to open a
+	// terminal: losing clickable links is worth far less than losing the shell.
+	env := append(os.Environ(), "TERM="+tmux.TermName)
+	if dir, err := TerminfoDir(); err == nil {
+		env = append(env, "TERMINFO_DIRS="+dir+":")
+	} else {
+		slog.Warn("ptybridge: no terminfo for "+tmux.TermName+", links will not be clickable", "err", err)
+		env = append(env[:len(env)-1], "TERM=xterm-256color")
+	}
+	cmd.Env = env
 
 	f, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: cfg.Cols, Rows: cfg.Rows})
 	if err != nil {

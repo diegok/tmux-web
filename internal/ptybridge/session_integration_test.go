@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/diegok/tmux-web/internal/ptybridge"
+	"github.com/diegok/tmux-web/internal/tmux"
 	"github.com/diegok/tmux-web/internal/tmux/testutil"
 )
 
@@ -161,8 +162,32 @@ func TestAttachRunsWithTheTerminalWtermEmulates(t *testing.T) {
 
 	s := open(t, srv, ptybridge.Config{TmuxArgs: srv.Args(), Base: "work", Cols: 80, Rows: 24})
 
-	if got := client(t, srv, s.SessionName(), "#{client_termname}"); got != "xterm-256color" {
-		t.Fatalf("client TERM = %s, want xterm-256color", got)
+	if got := client(t, srv, s.SessionName(), "#{client_termname}"); got != tmux.TermName {
+		t.Fatalf("client TERM = %s, want %s", got, tmux.TermName)
+	}
+
+	// The TERM is not cosmetic: it is what scopes tmux's hyperlink support to
+	// this client. If the embedded terminfo entry were missing, tmux would
+	// refuse to attach at all rather than silently drop the feature.
+	if got := client(t, srv, s.SessionName(), "#{client_termfeatures}"); !strings.Contains(got, "hyperlinks") {
+		t.Fatalf("client features = %q, want hyperlinks: OSC 8 links will be stripped", got)
+	}
+}
+
+// A local terminal sharing the server must not start receiving OSC 8 because
+// the browser asked for it. This is the whole reason for a separate TERM.
+func TestEnablingHyperlinksDoesNotAffectOtherClients(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+
+	s := open(t, srv, ptybridge.Config{TmuxArgs: srv.Args(), Base: "work", Cols: 80, Rows: 24})
+	_ = s
+
+	out := srv.Run(t, "show", "-s", "terminal-features")
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "hyperlinks") && !strings.Contains(line, tmux.TermName) {
+			t.Fatalf("hyperlinks enabled beyond the web client: %q", line)
+		}
 	}
 }
 

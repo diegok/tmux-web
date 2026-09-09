@@ -1,0 +1,4 @@
+wterm-256color|wterm web terminal (xterm-256color plus OSC 8 hyperlinks),
+	use=xterm-256color,
+	Hls=\E]8;;%p1%s\E\\,
+	Hlr=\E]8;;\E\\,

@@ -96,3 +96,46 @@ func (c *Client) Sweep(ctx context.Context) error {
 	// Nil when errs is empty, so the common path returns no error.
 	return errors.Join(errs...)
 }
+
+// TermName is the TERM the browser's tmux client runs under, and the key that
+// scopes hyperlink support to it.
+//
+// Deliberately not xterm-256color. tmux only sends OSC 8 hyperlinks to a client
+// whose terminal advertises the "hyperlinks" feature, and that feature is
+// matched by TERM name against a *server-wide* option -- so sharing a TERM with
+// the user's own local clients would turn hyperlinks on for their terminal too.
+// A name only this client uses keeps the change scoped to the browser.
+const TermName = "wterm-256color"
+
+// hyperlinkFeature is the terminal-features entry that lets OSC 8 through.
+const hyperlinkFeature = TermName + ":hyperlinks"
+
+// EnableHyperlinks tells the tmux server that TermName clients can render OSC 8
+// links, so a URL emitted by gh, delta or eza arrives at the browser as a real
+// anchor instead of being stripped.
+//
+// Without it tmux sends zero OSC 8 sequences to the web client: the link is in
+// the grid (capture-pane -e shows it) and dropped on the way out. Measured.
+//
+// Appended, never assigned: a bare `set -s` would replace the server's whole
+// terminal-features list, discarding the entries tmux ships for xterm, screen
+// and rxvt. And appended only once -- `set -sa` does not deduplicate, so
+// calling this per attach would grow the list by one entry per browser tab.
+func (c *Client) EnableHyperlinks(ctx context.Context) error {
+	out, err := c.Run(ctx, "show", "-s", "terminal-features")
+	if err != nil {
+		if noServer(err.Error()) {
+			// Nothing to configure yet. Open calls this again once a server
+			// exists, so a cold start still gets links on its first attach.
+			return nil
+		}
+		return err
+	}
+	if strings.Contains(out, hyperlinkFeature) {
+		return nil
+	}
+	// The leading comma is what makes this an append to the option's own list
+	// rather than a new array entry that happens to parse.
+	_, err = c.Run(ctx, "set", "-sa", "terminal-features", ","+hyperlinkFeature)
+	return err
+}

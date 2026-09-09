@@ -47,6 +47,7 @@ import { Terminal as WTermView, useTerminal } from '@wterm/react'
 import { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import type { Ref } from 'react'
 
+import { installLinkOpener } from '@/lib/links'
 import { Transport } from '@/lib/transport'
 import type { TransportClose } from '@/lib/transport'
 
@@ -513,6 +514,16 @@ export function Terminal({ session, url, className, onStatusChange, ref }: Termi
   // the effect below runs. Kept here so a size measured first is not lost.
   const size = useRef<{ cols: number; rows: number } | null>(null)
 
+  // Ctrl/Cmd/Shift+click opens a link. Installed on the wrapper rather than on
+  // wterm's own element so it survives wterm re-rendering rows, and in the
+  // capture phase so it settles the click before wterm turns it into a tmux
+  // mouse report. A plain click is untouched and still reaches tmux.
+  const hostRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const el = hostRef.current
+    return el ? installLinkOpener(el) : undefined
+  }, [])
+
   const socketUrl = url ?? terminalUrl(session)
 
   // One socket per (session, url). Note that React's StrictMode runs this
@@ -577,7 +588,10 @@ export function Terminal({ session, url, className, onStatusChange, ref }: Termi
   }, [live, focus])
 
   return (
-    <div className={`relative h-full w-full overflow-hidden ${className ?? ''}`}>
+    <div
+      ref={hostRef}
+      className={`relative h-full w-full overflow-hidden ${className ?? ''}`}
+    >
       <WTermView
         ref={termRef}
         autoResize

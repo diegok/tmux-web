@@ -204,11 +204,22 @@ forever and later name-addressed calls would fail. So the row carries
 `#{session_id}` for addressing and the live `session_name` of the preferred
 non-app member for display, and every session operation is addressed by `$id`.
 
+**Windows have ids too, and the same argument applies.** Revision 1 listed no
+window id here while addressing windows by `@N` throughout the section below —
+so the row carried `#{window_index}` and nothing else, and a window index is a
+position, not an address: tmux renumbers indices on `move-window` and reuses
+them after a kill. `ValidateWindowID` refuses anything but `@N`, so a snapshot
+without the id leaves `PATCH /api/windows/{id}` and `DELETE /api/windows/{id}`
+implemented on the server and unreachable from the browser — nothing on the wire
+names a window. The sidebar is expected to omit the menu entries it cannot
+serve, which is why the gap reads as a missing feature rather than a broken one.
+
 With that fixed, `Row` gains:
 
 ```go
 SessionID  string `json:"sessionId"`  // $N, stable; what operations target
 SessionName string `json:"sessionName"` // live name for display, not the group's
+WindowID   string `json:"windowId"`   // @N, stable; what window operations target
 Title      string `json:"title"`      // sanitised by tmux, truncated to 256B
 Label      string `json:"label"`      // @wterm_label, user-set; "" if unset
 AgentState string `json:"agentState"` // "" | working | blocked | idle
@@ -311,11 +322,11 @@ POST   /api/sessions            create  {name, path?}
 POST   /api/windows             create  {session, name?, fromPane?}
 POST   /api/panes               split   {pane, direction: right|down}
 PATCH  /api/sessions/{id}       rename  {name}          // id is $N
-PATCH  /api/windows/{id}        rename  {name}
+PATCH  /api/windows/{id}        rename  {name}           // id is @N
 PATCH  /api/panes/{id}          label   {label}          // "" clears
 POST   /api/panes/{id}/zoom     toggle
 DELETE /api/sessions/{id}       kill    {confirm: true}  // id is $N
-DELETE /api/windows/{id}        kill    {confirm: true}
+DELETE /api/windows/{id}        kill    {confirm: true}  // id is @N
 DELETE /api/panes/{id}          kill    {confirm: true}
 ```
 

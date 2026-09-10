@@ -132,17 +132,17 @@ git commit -m "feat: recognise which pane commands are coding agents"
 **Files:**
 - Modify: `internal/tmux/snapshot.go` (`Format`, `fieldCount`, `Row`, `ParseRows`)
 - Modify: `internal/tmux/snapshot_test.go` — **every existing fixture moves from
-  8 fields to 12**; there is no way to add fields without touching them all
+  8 fields to 13**; there is no way to add fields without touching them all
 - Modify: `internal/tmux/client.go` (`ServerStart`), `internal/tmux/poller.go`
   (read it per refresh) and their tests — "read once per poll" cannot be
   satisfied without the poller
 - Modify: `internal/front/server.go` (`snapshotResponse`, and the
   `SnapshotSource` interface the poller satisfies)
 
-Four new fields, all free in the existing `list-panes` call, plus the tmux server
+Five new fields, all free in the existing `list-panes` call, plus the tmux server
 generation on the response envelope.
 
-**There is exactly one authoritative field list. It has 12 fields.** An earlier
+**There is exactly one authoritative field list. It has 13 fields.** An earlier
 draft of this task printed two different lists and described a third in prose;
 if you find yourself reconciling versions, you are reading a stale copy.
 
@@ -155,15 +155,24 @@ if you find yourself reconciling versions, you are reading a stale copy.
 | 5 | `#{pane_index}` | `PaneIndex` |
 | 6 | `#{@wterm_web}` | `AppOwned` |
 | 7 | `#{@wterm_label}` | `Label` |
-| 8 | `#{window_index}` | `WindowIndex` |
-| 9 | `#{window_name}` | `WindowName` |
-| 10 | `#{pane_active}` | `PaneActive` |
-| 11 | `#{pane_current_command}` | `Command` |
-| 12 | `#{pane_title}` | `Title` |
+| 8 | `#{window_id}` | `WindowID` |
+| 9 | `#{window_index}` | `WindowIndex` |
+| 10 | `#{window_name}` | `WindowName` |
+| 11 | `#{pane_active}` | `PaneActive` |
+| 12 | `#{pane_current_command}` | `Command` |
+| 13 | `#{pane_title}` | `Title` |
 
-`fieldCount` is **12**. Field 1 stays the group key and field 3 is the live
+`fieldCount` is **13**. Field 1 stays the group key and field 3 is the live
 session name: they are separate fields *because they differ after a rename*, and
 that difference is the entire point of carrying session identity.
+
+Field 8 is there for the same reason as field 2, and revision 1 of this task
+missed it exactly as it missed the session id. **A window index is a position,
+not an address**: tmux renumbers indices on `move-window` and reuses them after
+a kill, and Phase B addresses windows by `@N` throughout — `ValidateWindowID`
+refuses anything else. Without this field `PATCH /api/windows/{id}` and
+`DELETE /api/windows/{id}` exist on the server and are unreachable from the
+browser, because nothing on the wire names a window.
 
 **Step 1: Write the failing tests**
 
@@ -176,7 +185,7 @@ t.Run("carries session identity, label and title", func(t *testing.T) {
 	// tmux keeps the pre-rename name in session_group, so a fixture where they
 	// match would pass against an implementation that reads the group key --
 	// which is exactly the bug this field exists to fix.
-	line := rec("work3", "$3", "api", "%1", "0", "", "reviewer", "1", "win", "1", "claude", "✳ writing tests")
+	line := rec("work3", "$3", "api", "%1", "0", "", "reviewer", "@7", "1", "win", "1", "claude", "✳ writing tests")
 	got, dropped, err := ParseRows(line)
 	if err != nil || dropped != 0 || len(got) != 1 {
 		t.Fatalf("got %+v dropped=%d err=%v", got, dropped, err)
@@ -201,7 +210,7 @@ t.Run("a huge title is truncated on a rune boundary", func(t *testing.T) {
 	// slice genuinely splits one -- and it is the character Claude Code puts at
 	// the head of every title.
 	huge := strings.Repeat("✳", 4000)
-	line := rec("w", "$0", "w", "%1", "0", "", "", "1", "win", "1", "claude", huge)
+	line := rec("w", "$0", "w", "%1", "0", "", "", "@1", "1", "win", "1", "claude", huge)
 	got, _, _ := ParseRows(line)
 	if len(got[0].Title) > MaxTitle {
 		t.Fatalf("title kept %d bytes, want <= %d", len(got[0].Title), MaxTitle)
@@ -218,7 +227,7 @@ t.Run("a huge title is truncated on a rune boundary", func(t *testing.T) {
 // tmux sanitises titles but NOT user option values, so a label is the one
 // new field that can carry a separator or a newline.
 t.Run("a label containing control bytes cannot remove a pane", func(t *testing.T) {
-	line := rec("w", "$0", "w", "%1", "0", "", "EV"+Sep+"IL", "1", "win", "1", "claude", "t")
+	line := rec("w", "$0", "w", "%1", "0", "", "EV"+Sep+"IL", "@1", "1", "win", "1", "claude", "t")
 	got, dropped, _ := ParseRows(line)
 	if dropped == 0 {
 		t.Fatal("a malformed record must be counted")
@@ -235,11 +244,12 @@ t.Run("a label containing control bytes cannot remove a pane", func(t *testing.T
 
 **Step 3: Implement**
 
-Set `fieldCount = 12`, write `Format` from the table above, add to `Row`:
+Set `fieldCount = 13`, write `Format` from the table above, add to `Row`:
 
 ```go
 SessionID   string `json:"sessionId"`   // $N; what management operations target
 SessionName string `json:"sessionName"` // live name, for display
+WindowID    string `json:"windowId"`    // @N; what window operations target
 Label       string `json:"label"`       // @wterm_label; user-set, may be ""
 Title       string `json:"title"`       // tmux-sanitised, truncated
 ```
@@ -665,7 +675,7 @@ go on trust.
 `web/src/lib/useSnapshot.ts`** — two dependencies the first draft of this task
 missed, both of them correctness rather than plumbing:
 
-- `SnapshotRow` must mirror Task 2's four new wire fields. The contract test in
+- `SnapshotRow` must mirror Task 2's five new wire fields. The contract test in
   `useSnapshot.test.ts` parses the Go `Row` struct and compares its json tags
   against the TypeScript keys, so it goes red the moment the Go side moves.
 - `rowsEqual` must compare the title. It decides whether the previous tree

@@ -110,6 +110,68 @@ func TestSnapshotCarriesLiveSessionIdentityAfterRename(t *testing.T) {
 	}
 }
 
+// The window id, against a real tmux, because no fixture can prove it: a
+// mistyped #{window_id} expands to the empty string rather than erroring, so
+// the parser's unit tests -- which are fed a hand-written record -- stay green
+// against a format string that reports nothing. Only a live server can tell the
+// two apart.
+//
+// It is also the field the window endpoints are built on. ValidateWindowID is
+// the gate PATCH/DELETE /api/windows/{id} put in front of tmux, so what the
+// snapshot reports has to be something that gate accepts, or the browser can
+// see a window it cannot address.
+func TestSnapshotCarriesAddressableWindowIDs(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+	srv.Run(t, "new-window", "-t", "work", "-n", "api")
+	// Two panes in the second window: panes of one window must report one id,
+	// which a parser reading the pane id into this field would fail.
+	srv.Run(t, "split-window", "-t", "work:api")
+
+	panes, err := tmux.NewClient(srv.Args()).Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(panes) != 3 {
+		t.Fatalf("want 3 panes (one window x1, one window x2), got %d: %+v", len(panes), panes)
+	}
+
+	byWindow := map[string][]tmux.Row{}
+	for _, p := range panes {
+		if err := tmux.ValidateWindowID(p.WindowID); err != nil {
+			t.Errorf("pane %s reports WindowID %q: %v -- the snapshot must not "+
+				"name a window the endpoints reject", p.PaneID, p.WindowID, err)
+		}
+		byWindow[p.WindowID] = append(byWindow[p.WindowID], p)
+	}
+	if len(byWindow) != 2 {
+		t.Fatalf("want 2 distinct window ids, got %d: %+v", len(byWindow), byWindow)
+	}
+	for id, rows := range byWindow {
+		for _, r := range rows {
+			if r.WindowIndex != rows[0].WindowIndex {
+				t.Errorf("window %s reported with indices %d and %d", id, rows[0].WindowIndex, r.WindowIndex)
+			}
+		}
+	}
+
+	// The id addresses the window, and it is not the index in disguise: rename
+	// the window through its id and tmux must find it.
+	var target string
+	for _, p := range panes {
+		if p.WindowName == "api" {
+			target = p.WindowID
+		}
+	}
+	if target == "" {
+		t.Fatal("no pane reported the window named api")
+	}
+	srv.Run(t, "rename-window", "-t", target, "renamed")
+	if got := srv.Run(t, "display-message", "-p", "-t", target, "#{window_name}"); got != "renamed" {
+		t.Errorf("the window id did not address the window: #{window_name} = %q", got)
+	}
+}
+
 // The tmux server's generation. Pane ids restart at %0 when the server
 // restarts, so the browser keys its per-pane "done" memory on this; a wrong or
 // constant value silently suppresses badges on unrelated new panes.

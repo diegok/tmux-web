@@ -12,7 +12,7 @@ import (
 // unsafe because window names may contain one.
 const Sep = "\x1f"
 
-const fieldCount = 12
+const fieldCount = 13
 
 // MaxTitle bounds a pane title. tmux normalises control bytes out of titles but
 // does not cap length; an 8KB title was observed stored and reported in full,
@@ -34,7 +34,15 @@ type Row struct {
 	PaneIndex   int    `json:"paneIndex"`   // position within the window, in layout order
 	AppOwned    bool   `json:"appOwned"`    // set from the @wterm_web user option
 	Label       string `json:"label"`       // @wterm_label; user-set, may be ""
-	WindowIndex int    `json:"windowIndex"`
+	// WindowID is @N, and it is what window operations target -- the same
+	// reason SessionID is here rather than a name. WindowIndex is a position,
+	// not an address: tmux renumbers indices on move-window and reuses them
+	// after a kill, so a rename or a kill addressed by index can land on a
+	// different window than the one the sidebar was showing. Without this
+	// field the browser cannot name a window at all, and PATCH/DELETE
+	// /api/windows/{id} -- which validate an @N id -- are unreachable.
+	WindowID    string `json:"windowId"`
+	WindowIndex int    `json:"windowIndex"` // display order within the session
 	WindowName  string `json:"windowName"`
 	PaneActive  bool   `json:"paneActive"`
 	Command     string `json:"command"`
@@ -91,6 +99,7 @@ const Format = "#{?#{session_group},#{session_group},#{session_name}}" + Sep +
 	"#{pane_index}" + Sep +
 	"#{@wterm_web}" + Sep +
 	"#{" + LabelOption + "}" + Sep +
+	"#{window_id}" + Sep +
 	"#{window_index}" + Sep +
 	"#{window_name}" + Sep +
 	"#{pane_active}" + Sep +
@@ -121,7 +130,7 @@ func ParseRows(out string) (rows []Row, dropped int, err error) {
 		// Distinct names: shadowing the named err return here would be
 		// harmless today only because it is always nil.
 		pidx, perr := strconv.Atoi(fields[4])
-		widx, werr := strconv.Atoi(fields[7])
+		widx, werr := strconv.Atoi(fields[8])
 		if perr != nil || werr != nil {
 			dropped++
 			continue
@@ -134,11 +143,12 @@ func ParseRows(out string) (rows []Row, dropped int, err error) {
 			PaneIndex:   pidx,
 			AppOwned:    fields[5] == "1",
 			Label:       fields[6],
+			WindowID:    fields[7],
 			WindowIndex: widx,
-			WindowName:  fields[8],
-			PaneActive:  fields[9] == "1",
-			Command:     fields[10],
-			Title:       truncateAtRuneBoundary(fields[11], MaxTitle),
+			WindowName:  fields[9],
+			PaneActive:  fields[10] == "1",
+			Command:     fields[11],
+			Title:       truncateAtRuneBoundary(fields[12], MaxTitle),
 		})
 	}
 	return rows, dropped, nil

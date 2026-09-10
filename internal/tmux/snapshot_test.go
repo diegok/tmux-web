@@ -13,15 +13,19 @@ func rec(fields ...string) string { return strings.Join(fields, Sep) }
 
 // A valid record, as a named baseline the malformed cases can be varied from.
 // Field order matches Format: group, session id, session name, pane id, pane
-// index, app marker, label, window index, window name, pane active, command,
-// title.
+// index, app marker, label, window id, window index, window name, pane active,
+// command, title.
+//
+// The window id is derived from the index rather than taken as a parameter:
+// every caller varies the pane, and two panes reported with the same window
+// index are in the same window, so they must carry the same id.
 func goodRow(paneID, paneIndex, windowIndex string) string {
-	return rec("work", "$0", "work", paneID, paneIndex, "", "", windowIndex, "api", "1", "claude", "a title")
+	return rec("work", "$0", "work", paneID, paneIndex, "", "", "@"+windowIndex, windowIndex, "api", "1", "claude", "a title")
 }
 
 func TestParseRows(t *testing.T) {
 	t.Run("one well formed row", func(t *testing.T) {
-		got, dropped, err := ParseRows(rec("work", "$0", "work", "%3", "0", "", "", "1", "api", "1", "claude", "a title"))
+		got, dropped, err := ParseRows(rec("work", "$0", "work", "%3", "0", "", "", "@1", "1", "api", "1", "claude", "a title"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -46,7 +50,7 @@ func TestParseRows(t *testing.T) {
 	// Pins the false side of both booleans: a parser hardcoding either to true
 	// passes every other subtest.
 	t.Run("app owned row with an inactive pane", func(t *testing.T) {
-		got, dropped, err := ParseRows(rec("work", "$0", "work", "%3", "2", "1", "", "0", "w", "0", "zsh", "t"))
+		got, dropped, err := ParseRows(rec("work", "$0", "work", "%3", "2", "1", "", "@0", "0", "w", "0", "zsh", "t"))
 		if err != nil || dropped != 0 || len(got) != 1 {
 			t.Fatalf("ParseRows = %+v, %d, %v", got, dropped, err)
 		}
@@ -99,9 +103,9 @@ func TestParseRows(t *testing.T) {
 			goodRow("%1", "0", "0"),
 			"nonsense", // too few fields
 			// Numeric indices, so that only the field count can reject it.
-			rec("work", "$0", "work", "%7", "0", "", "", "0", "w", "1", "zsh", "t", "extra"),
-			rec("work", "$0", "work", "%9", "0", "", "", "notanint", "w", "1", "zsh", "t"), // bad window index
-			rec("work", "$0", "work", "%8", "notanint", "", "", "0", "w", "1", "zsh", "t"), // bad pane index
+			rec("work", "$0", "work", "%7", "0", "", "", "@0", "0", "w", "1", "zsh", "t", "extra"),
+			rec("work", "$0", "work", "%9", "0", "", "", "@0", "notanint", "w", "1", "zsh", "t"), // bad window index
+			rec("work", "$0", "work", "%8", "notanint", "", "", "@0", "0", "w", "1", "zsh", "t"), // bad pane index
 			goodRow("%2", "1", "0"),
 		}, "\n")
 		got, dropped, err := ParseRows(out)
@@ -152,7 +156,7 @@ func TestParseRows(t *testing.T) {
 		// tmux keeps the pre-rename name in session_group, so a fixture where they
 		// match would pass against an implementation that reads the group key --
 		// which is exactly the bug this field exists to fix.
-		line := rec("work3", "$3", "api", "%1", "0", "", "reviewer", "1", "win", "1", "claude", "✳ writing tests")
+		line := rec("work3", "$3", "api", "%1", "0", "", "reviewer", "@7", "1", "win", "1", "claude", "✳ writing tests")
 		got, dropped, err := ParseRows(line)
 		if err != nil || dropped != 0 || len(got) != 1 {
 			t.Fatalf("got %+v dropped=%d err=%v", got, dropped, err)
@@ -168,6 +172,41 @@ func TestParseRows(t *testing.T) {
 		if r.SessionID != "$3" || r.Label != "reviewer" || r.Title != "✳ writing tests" {
 			t.Errorf("bad row: %+v", r)
 		}
+		// The window id is the address; the index is a position. They are
+		// adjacent fields with different values here on purpose, so a parser
+		// reading one where the other belongs is caught.
+		if r.WindowID != "@7" {
+			t.Errorf("WindowID = %q, want @7: management addresses windows by id, "+
+				"and a row with no id leaves rename and kill unreachable", r.WindowID)
+		}
+		if r.WindowIndex != 1 {
+			t.Errorf("WindowIndex = %d, want 1", r.WindowIndex)
+		}
+	})
+
+	// Every field in its own slot, pinned in one place.
+	//
+	// Adding a field shifts every index after it, and the shifted parser still
+	// passes every subtest above that does not happen to distinguish the two
+	// fields it swapped -- which is most of them, because real records repeat
+	// values ("work" is both group and session name, "1" is both an index and a
+	// boolean). Here no two values are equal, so any misread lands a value the
+	// assertion names.
+	t.Run("every field lands in its own slot", func(t *testing.T) {
+		line := rec("grp", "$1", "sess", "%2", "5", "1", "lbl", "@3", "9", "winname", "1", "cmd", "the title")
+		got, dropped, err := ParseRows(line)
+		if err != nil || dropped != 0 || len(got) != 1 {
+			t.Fatalf("ParseRows = %+v, %d, %v", got, dropped, err)
+		}
+		want := Row{
+			GroupKey: "grp", SessionID: "$1", SessionName: "sess",
+			PaneID: "%2", PaneIndex: 5, AppOwned: true, Label: "lbl",
+			WindowID: "@3", WindowIndex: 9, WindowName: "winname",
+			PaneActive: true, Command: "cmd", Title: "the title",
+		}
+		if got[0] != want {
+			t.Errorf("row = %+v, want %+v", got[0], want)
+		}
 	})
 
 	t.Run("a huge title is truncated on a rune boundary", func(t *testing.T) {
@@ -181,7 +220,7 @@ func TestParseRows(t *testing.T) {
 		// also what Claude Code actually puts at the head of a title.
 		for _, r := range []string{"é", "✳"} {
 			huge := strings.Repeat(r, 4000)
-			line := rec("w", "$0", "w", "%1", "0", "", "", "1", "win", "1", "claude", huge)
+			line := rec("w", "$0", "w", "%1", "0", "", "", "@1", "1", "win", "1", "claude", huge)
 			got, _, _ := ParseRows(line)
 			if len(got[0].Title) > MaxTitle {
 				t.Fatalf("%q title kept %d bytes, want <= %d", r, len(got[0].Title), MaxTitle)
@@ -199,7 +238,7 @@ func TestParseRows(t *testing.T) {
 
 	t.Run("a title that fits is not touched", func(t *testing.T) {
 		title := "✳ writing tests"
-		line := rec("w", "$0", "w", "%1", "0", "", "", "1", "win", "1", "claude", title)
+		line := rec("w", "$0", "w", "%1", "0", "", "", "@1", "1", "win", "1", "claude", title)
 		got, _, _ := ParseRows(line)
 		if got[0].Title != title {
 			t.Fatalf("Title = %q, want %q unchanged", got[0].Title, title)
@@ -209,7 +248,7 @@ func TestParseRows(t *testing.T) {
 	// tmux sanitises titles but NOT user option values, so a label is the one
 	// new field that can carry a separator or a newline.
 	t.Run("a label containing control bytes cannot remove a pane", func(t *testing.T) {
-		line := rec("w", "$0", "w", "%1", "0", "", "EV"+Sep+"IL", "1", "win", "1", "claude", "t")
+		line := rec("w", "$0", "w", "%1", "0", "", "EV"+Sep+"IL", "@1", "1", "win", "1", "claude", "t")
 		got, dropped, _ := ParseRows(line)
 		if dropped == 0 {
 			t.Fatal("a malformed record must be counted")

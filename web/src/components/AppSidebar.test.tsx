@@ -142,12 +142,27 @@ function activeTags(markup: string): string[] {
   return [...markup.matchAll(/<[^>]*data-active="true"[^>]*>/g)].map((m) => m[0])
 }
 
-/** Every badge, in document order: its opening tag and the text inside it. */
-function badges(markup: string): { tag: string; text: string }[] {
-  return [...markup.matchAll(/(<span[^>]*data-slot="badge"[^>]*>)([^<]*)<\/span>/g)].map((m) => ({
-    tag: m[1],
-    text: m[2],
-  }))
+/**
+ * What every pane row says about itself, in document order -- and, just as
+ * importantly, *which line* it says it on.
+ *
+ * The two shapes are not interchangeable and telling them apart is most of what
+ * the assertions below are for. A `command` is the monospaced capsule on the
+ * row's first line, beside the window name; a `title` is the dim second line
+ * underneath it. A helper that returned only the text would pass with the two
+ * swapped, which is precisely the regression that would undo this layout.
+ *
+ * One alternation rather than two passes, so the results come back interleaved
+ * in document order and a test can say which row said what.
+ */
+function rowText(markup: string): { kind: 'command' | 'title'; tag: string; text: string }[] {
+  const re =
+    /(<span[^>]*data-slot="badge"[^>]*>)([^<]*)<\/span>|(<span[^>]*class="row-line[^"]*"[^>]*>)<span>([^<]*)<\/span>/g
+  return [...markup.matchAll(re)].map((m) =>
+    m[1] === undefined
+      ? { kind: 'title' as const, tag: m[3], text: m[4] }
+      : { kind: 'command' as const, tag: m[1], text: m[2] },
+  )
 }
 
 const splitWindow: SnapshotRow[] = [
@@ -285,20 +300,26 @@ describe('AppSidebar', () => {
 
 
 /**
- * The badge, which is the only field on a row that says what a pane is doing.
+ * What a pane row says it is doing, and where on the row it says it.
  *
  * With three agents running, `pane_current_command` reads `claude`, `claude`,
  * `claude`; the pane title says what each of them is working on. These pin
  * which of the three candidates -- label, title, command -- reaches the DOM,
- * and the `title=` attribute that keeps the rest of a truncated one reachable.
+ * the line it lands on, and the `title=` attribute that keeps the rest of a cut
+ * one reachable.
+ *
+ * The line is not decoration. A title is a sentence and a command is one word,
+ * and putting the sentence back in the word's capsule is exactly the layout
+ * this replaced -- so every case below asserts `kind` as well as text.
  */
-describe('the pane badge', () => {
+describe('what a pane row says', () => {
   const task = '✳ Categorización productos southafrica'
 
-  it('shows the pane title instead of the command', () => {
+  it('puts the pane title on its own line, not in the command capsule', () => {
     const markup = render(fromRows([row({ command: 'claude', title: task })]))
-    const [badge] = badges(markup)
-    expect(badge.text).toBe(task)
+    expect(rowText(markup)).toEqual([
+      expect.objectContaining({ kind: 'title', text: task }),
+    ])
     // Not "claude" anywhere: the point of the row is that three agents no
     // longer read alike.
     expect(markup).not.toContain('claude')
@@ -310,23 +331,27 @@ describe('the pane badge', () => {
     // nothing but hostname characters is still a title once it has a space in
     // it.
     const plain = 'fix the login redirect'
-    const [badge] = badges(render(fromRows([row({ command: 'claude', title: plain })])))
-    expect(badge.text).toBe(plain)
+    const [said] = rowText(render(fromRows([row({ command: 'claude', title: plain })])))
+    expect(said).toMatchObject({ kind: 'title', text: plain })
   })
 
-  it('keeps the command when the title is only the hostname tmux defaults to', () => {
+  it('keeps the command in its capsule when the title is only tmux\'s hostname', () => {
     // Verified on this machine: an untouched pane's title is the hostname. A
-    // sidebar that showed it would print the same word down every shell row.
+    // sidebar that showed it would print the same word down every shell row --
+    // and, now, would spend a second line on every one of them to do it.
     for (const host of ['devbox', 'dev-box.local', 'x1_carbon', 'w520']) {
-      const [badge] = badges(render(fromRows([row({ command: 'zsh', title: host })])))
-      expect(badge.text).toBe('zsh')
-      expect(badge.tag).toContain('font-mono')
+      const markup = render(fromRows([row({ command: 'zsh', title: host })]))
+      const [said] = rowText(markup)
+      expect(said).toMatchObject({ kind: 'command', text: 'zsh' })
+      expect(said.tag).toContain('font-mono')
+      // And the row stayed one line: no second line was rendered at all.
+      expect(markup).not.toContain('row-line')
     }
   })
 
   it('keeps the command when there is no title at all', () => {
-    const [badge] = badges(render(fromRows([row({ command: 'vim', title: '' })])))
-    expect(badge.text).toBe('vim')
+    const [said] = rowText(render(fromRows([row({ command: 'vim', title: '' })])))
+    expect(said).toMatchObject({ kind: 'command', text: 'vim' })
   })
 
   it('keeps the command when the title only repeats it', () => {
@@ -335,18 +360,17 @@ describe('the pane badge', () => {
     // (`-zsh` is a plausible login shell rather than a verified tmux output --
     // what is pinned is the rule, not the input.) The text is identical
     // whichever branch wins, so the assertion is that the row is still showing
-    // a *command* -- monospaced, no tooltip -- and has not quietly switched to
-    // the title.
-    const [badge] = badges(render(fromRows([row({ command: '-zsh', title: '-zsh' })])))
-    expect(badge.text).toBe('-zsh')
-    expect(badge.tag).toContain('font-mono')
-    expect(badge.tag).not.toContain('title=')
+    // a *command* -- monospaced, on the first line, no tooltip -- and has not
+    // quietly switched to the title.
+    const [said] = rowText(render(fromRows([row({ command: '-zsh', title: '-zsh' })])))
+    expect(said).toMatchObject({ kind: 'command', text: '-zsh' })
+    expect(said.tag).toContain('font-mono')
+    expect(said.tag).not.toContain('title=')
   })
 
   it('prefers a label the user set over both', () => {
     const markup = render(fromRows([row({ command: 'psql', title: task, label: 'prod db' })]))
-    const [badge] = badges(markup)
-    expect(badge.text).toBe('prod db')
+    expect(rowText(markup)[0]).toMatchObject({ kind: 'title', text: 'prod db' })
     expect(markup).not.toContain(task)
     expect(markup).not.toContain('psql')
   })
@@ -354,26 +378,44 @@ describe('the pane badge', () => {
   it('shows a label that a title would not have earned', () => {
     // A label is chosen, not defaulted, so it is not asked to earn the row the
     // way a title is: "notes" is hostname-shaped and shows anyway.
-    const [badge] = badges(render(fromRows([row({ command: 'zsh', label: 'notes' })])))
-    expect(badge.text).toBe('notes')
+    const [said] = rowText(render(fromRows([row({ command: 'zsh', label: 'notes' })])))
+    expect(said).toMatchObject({ kind: 'title', text: 'notes' })
   })
 
   it('treats a blank label as no label', () => {
-    const [badge] = badges(render(fromRows([row({ command: 'zsh', label: '   ' })])))
-    expect(badge.text).toBe('zsh')
+    const [said] = rowText(render(fromRows([row({ command: 'zsh', label: '   ' })])))
+    expect(said).toMatchObject({ kind: 'command', text: 'zsh' })
   })
 
-  it('truncates in CSS and carries the full text in title=', () => {
+  it('cuts the title in CSS and carries the whole of it in title=', () => {
     const markup = render(fromRows([row({ command: 'claude', title: task })]))
-    // The wire caps a title at 256 bytes and the sidebar is 16rem wide, so the
-    // badge always truncates a real one. Both halves of that: the class that
-    // clips it -- all a static render can see of the layout -- and the native
-    // tooltip where the rest of it stays reachable.
-    expect(badges(markup)[0].tag).toContain('truncate')
-    expect(badges(markup)[0].tag).toContain(`title="${task}"`)
+    // The wire caps a title at 256 bytes and the sidebar is 16rem wide, so a
+    // real one is always cut. Both halves of that: the hook for the rule that
+    // clips it and scrolls it on hover -- `.row-line` in index.css, and all a
+    // static render can see of any of it -- and the native tooltip, which is
+    // where the rest stays reachable with no hover at all.
+    const [said] = rowText(markup)
+    expect(said.tag).toContain('row-line')
+    expect(said.tag).toContain(`title="${task}"`)
+    // The marquee moves a child of the clip, not the clip: one box cannot both
+    // hide its overflow and slide inside itself.
+    expect(markup).toContain(`>${task}</span></span>`)
   })
 
-  it('gives every pane of a split window its own badge', () => {
+  it('draws the title quieter than the name it sits under', () => {
+    // The window name is the identity and the title is the description, so the
+    // title is the one that gives way: dimmer, and a step smaller. Whether that
+    // is what the browser actually computes is e2e's question -- see
+    // `agents.spec.ts`, which reads it back off a live row.
+    const markup = render(fromRows([row({ command: 'claude', title: task })]))
+    const [said] = rowText(markup)
+    expect(said.tag).toContain('text-sidebar-foreground/60')
+    expect(said.tag).toContain('text-xs')
+    // And the name above it took neither.
+    expect(markup).toMatch(/<span class="truncate">0: shell<\/span>/)
+  })
+
+  it('gives every pane of a split window its own line', () => {
     const markup = render(
       fromRows([
         row({ windowIndex: 1, windowName: 'api', paneId: '%4', command: 'claude', title: '✳ one' }),
@@ -388,7 +430,10 @@ describe('the pane badge', () => {
         }),
       ]),
     )
-    expect(badges(markup).map((b) => b.text)).toEqual(['✳ one', '✳ two'])
+    expect(rowText(markup)).toEqual([
+      expect.objectContaining({ kind: 'title', text: '✳ one' }),
+      expect.objectContaining({ kind: 'title', text: '✳ two' }),
+    ])
   })
 })
 
@@ -658,16 +703,21 @@ describe('the blocked question', () => {
         }),
       ]),
     )
-    const [badge] = badges(markup)
-    expect(badge.text).toBe('Do you want to run `rm -rf build`?')
+    expect(rowText(markup)[0]).toMatchObject({
+      kind: 'title',
+      text: 'Do you want to run `rm -rf build`?',
+    })
     expect(markup).not.toContain('✳ Fixing the build')
+    // And the row is not describing itself as a program: the question took the
+    // line, so there is no capsule on this row at all.
+    expect(rowText(markup).map((r) => r.kind)).toEqual(['title'])
   })
 
   it('puts the choices in the tooltip, where they fit', () => {
     const markup = render(fromRows([row({ command: 'claude', agentState: 'blocked', question })]))
-    const [badge] = badges(markup)
-    expect(badge.tag).toContain('Yes, and don&#x27;t ask again')
-    expect(badge.tag).toContain('No')
+    const [said] = rowText(markup)
+    expect(said.tag).toContain('Yes, and don&#x27;t ask again')
+    expect(said.tag).toContain('No')
   })
 
   it('outranks even a label the user set, since blocked is the whole point', () => {
@@ -681,7 +731,10 @@ describe('the blocked question', () => {
         }),
       ]),
     )
-    expect(badges(markup)[0].text).toBe('Do you want to run `rm -rf build`?')
+    expect(rowText(markup)[0]).toMatchObject({
+      kind: 'title',
+      text: 'Do you want to run `rm -rf build`?',
+    })
   })
 
   it('keeps the row it had when the daemon could not read the dialog', () => {
@@ -696,7 +749,7 @@ describe('the blocked question', () => {
         }),
       ]),
     )
-    expect(badges(markup)[0].text).toBe('✳ Fixing the build')
+    expect(rowText(markup)[0]).toMatchObject({ kind: 'title', text: '✳ Fixing the build' })
     expect(dots(markup)).toEqual(['blocked', 'blocked'])
   })
 
@@ -711,7 +764,7 @@ describe('the blocked question', () => {
         }),
       ]),
     )
-    expect(badges(markup)[0].text).toBe('✳ Fixing the build')
+    expect(rowText(markup)[0]).toMatchObject({ kind: 'title', text: '✳ Fixing the build' })
   })
 })
 

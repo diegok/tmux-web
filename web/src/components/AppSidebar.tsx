@@ -7,8 +7,29 @@
  * `SidebarGroup` per session group, `SidebarMenu` of windows inside it, and
  * `SidebarMenuSub` of panes **only when a window has more than one**. A window
  * with a single pane is the pane, and rendering a lone child under it would add
- * a row and a disclosure to say nothing. The `Badge` says what the pane is: its
- * label, its title, or `pane_current_command` -- see `paneBadge`.
+ * a row and a disclosure to say nothing.
+ *
+ * ## What a pane row says, and on which line
+ *
+ * `paneText` picks one of label, title or `pane_current_command` -- and *where*
+ * it goes follows from which one won. A command is a program's name: one short
+ * word, and it keeps the monospaced capsule it has always had, on the same line
+ * as the window name. A title is what an agent is working on: prose, routinely
+ * longer than the sidebar is wide, and it gets **a second line of its own** --
+ * no capsule, a step smaller and a step dimmer than the name above it, cut with
+ * an ellipsis and scrolled on hover (see `.row-line` in `index.css`).
+ *
+ * That split is the point. Cramming a sentence into the capsule that held `zsh`
+ * squeezed the window name it sat beside, and cut both; giving every `zsh` row
+ * a second line to say `zsh` on would cost a line per row to say nothing. Only
+ * the rows with something to say grow.
+ *
+ * ## Blocks
+ *
+ * A session group is ruled off from the one above it. A rule is 1px of height
+ * and no width at all, which is what makes it affordable on a phone -- indents
+ * and gutters are not -- and it survives into the collapsed icon rail, where
+ * the groups are otherwise a single column of undifferentiated glyphs.
  *
  * ## Which one needs you
  *
@@ -173,7 +194,13 @@ export function AppSidebar({
 
         <SidebarContent>
           {groups.map((session) => (
-            <SidebarGroup key={session.key}>
+            // The block separator. `first:` rather than a gap or a margin so
+            // the rule only ever appears *between* groups, and 1px of height
+            // is the whole cost -- a phone loses no width to it.
+            <SidebarGroup
+              key={session.key}
+              className="border-sidebar-border border-t first:border-t-0"
+            >
               <RowMenu
                 target={{ kind: 'session', session }}
                 activeSession={activeSession}
@@ -229,7 +256,12 @@ export function AppSidebar({
                 </SidebarGroupLabel>
               </RowMenu>
               <SidebarGroupContent>
-                <SidebarMenu>
+                {/*
+                  shadcn ships this list at `gap-0`, which was fine while every
+                  row was one line: the rows were the rhythm. A two-line row is
+                  a block, and blocks that touch read as one list again.
+                */}
+                <SidebarMenu className="gap-0.5">
                   {session.windows.map((window) => (
                     <WindowItem
                       key={window.key}
@@ -332,7 +364,17 @@ function WindowItem({
             disabled={!reachable}
             title={unreachable}
             onClick={() => target && onSelectPane(target, sessionKey)}
-            className={holdsActive && split ? 'text-sidebar-accent-foreground' : undefined}
+            className={cn(
+              // `h-auto` rather than shadcn's `size="lg"`: lg is a fixed h-12,
+              // which would make every one-line row 48px tall to accommodate
+              // the rows that have a title, and it also sets `p-0` in the icon
+              // rail -- which shifts the glyph 8px left of every other row's.
+              // Growing only when there is a second line keeps the tree as
+              // short as it was and leaves the rail untouched, because the
+              // `size-8!` that clips it there is still the one in force.
+              'row-hover h-auto min-h-8',
+              holdsActive && split ? 'text-sidebar-accent-foreground' : undefined,
+            )}
           >
             <RowIcon
               state={state}
@@ -349,8 +391,13 @@ function WindowItem({
                 )
               }
             />
-            <span className="truncate">{label}</span>
-            {lone && <PaneBadge pane={lone} width="max-w-32" />}
+            {lone ? (
+              <PaneLines pane={lone} name={label} commandWidth="max-w-32" />
+            ) : (
+              // A split window has no pane of its own to describe, so it is the
+              // row it always was: one line, one name.
+              <span className="truncate">{label}</span>
+            )}
           </SidebarMenuButton>
         </div>
       </RowMenu>
@@ -372,6 +419,14 @@ function WindowItem({
                   // hang off, and the pane id is the thing a user debugging a
                   // selection actually wants to read.
                   title={unreachable ?? `${pane.paneId} · pane ${pane.paneIndex}`}
+                  // `h-auto` for the same reason as the window row above,
+                  // against this button's own fixed `h-7`. `w-full` because a
+                  // `<button>` is shrink-to-fit and shadcn does not set it
+                  // here: without it the second line is only as wide as the
+                  // words above it, which is the cramping this rework is
+                  // about. It also puts the command capsule on the right-hand
+                  // edge, where the window rows have always had it.
+                  className="row-hover h-auto min-h-7 w-full"
                 >
                   <button
                     type="button"
@@ -393,19 +448,24 @@ function WindowItem({
                         ) : null
                       }
                     />
-                    <span className="truncate">pane {pane.paneIndex}</span>
-                    {pane.active && (
-                      <span
-                        className="bg-sidebar-foreground/40 size-1.5 shrink-0 rounded-full"
-                        title="tmux's current pane in this window"
-                        // role="img" is what gives an empty span a name a screen
-                        // reader will read; aria-label alone on a generic element
-                        // is ignored.
-                        role="img"
-                        aria-label="current in tmux"
-                      />
-                    )}
-                    <PaneBadge pane={pane} width="max-w-24" />
+                    <PaneLines
+                      pane={pane}
+                      name={`pane ${pane.paneIndex}`}
+                      commandWidth="max-w-24"
+                      afterName={
+                        pane.active && (
+                          <span
+                            className="bg-sidebar-foreground/40 size-1.5 shrink-0 rounded-full"
+                            title="tmux's current pane in this window"
+                            // role="img" is what gives an empty span a name a
+                            // screen reader will read; aria-label alone on a
+                            // generic element is ignored.
+                            role="img"
+                            aria-label="current in tmux"
+                          />
+                        )
+                      }
+                    />
                   </button>
                 </SidebarMenuSubButton>
               </RowMenu>
@@ -650,26 +710,30 @@ function RetryButton({ onRefresh }: { onRefresh: () => void }) {
  */
 const HOSTNAME_LIKE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
-/** What a pane's badge says, and whether the text is a command. */
-interface PaneBadgeText {
+/** What a pane row says about itself, and which line it says it on. */
+interface PaneText {
   text: string
   /**
-   * The native tooltip, when the badge has more to say than it shows. Only a
-   * blocked agent's question does: its choices are what you need in order to
-   * decide whether it is worth switching to.
+   * The native tooltip, when the row has more to say than it shows. A blocked
+   * agent's question always does -- its choices are what you need in order to
+   * decide whether it is worth switching to -- and a title does whenever it is
+   * cut, which the row cannot know and does not have to: the attribute costs
+   * nothing when the text happens to fit.
    */
   tooltip?: string
   /**
    * The text is `pane_current_command` -- a program name, not prose someone
-   * wrote. It keeps the monospaced badge and gets no tooltip of its own: a
-   * command is one short word, and on a pane row what the row's own `title=`
-   * already says -- the pane id and index -- is more use than repeating it.
+   * wrote. That is what decides the whole layout of the row: it keeps the
+   * monospaced capsule, on the same line as the name, and gets no tooltip of
+   * its own -- a command is one short word, and on a pane row what the row's
+   * own `title=` already says (the pane id and index) is more use than
+   * repeating it.
    */
   fromCommand: boolean
 }
 
 /**
- * The badge for a pane: **label, else title, else command**.
+ * What a pane row says: **label, else title, else command**.
  *
  * The label is a name the user gave this pane and wins outright, including over
  * a title a program is rewriting underneath it -- that is the whole point of
@@ -682,11 +746,12 @@ interface PaneBadgeText {
  * which is far better than three rows all reading `claude`, but two kinds of
  * title say nothing the row does not already say: the hostname every untouched
  * pane carries, and a title that is just the command again. Both fall through
- * to the command, so those rows look exactly as they did before this existed.
+ * to the command, so those rows look exactly as they did before this existed --
+ * one line, one capsule -- and only the rows with something to say grow one.
  */
-function paneBadge(
+function paneText(
   pane: Pick<PaneNode, 'command' | 'title' | 'label' | 'agentState' | 'question'>,
-): PaneBadgeText {
+): PaneText {
   // A blocked agent's own words outrank both. The whole app exists to answer
   // "which one needs me, and for what", and once one of them is asking, the
   // question is the answer -- the identity is still in the window row above it
@@ -703,48 +768,85 @@ function paneBadge(
   }
 
   const label = pane.label.trim()
-  if (label !== '') return { text: label, fromCommand: false }
+  if (label !== '') return { text: label, fromCommand: false, tooltip: label }
 
   const title = pane.title.trim()
   const command = pane.command.trim()
   if (title !== '' && !HOSTNAME_LIKE.test(title) && title.toLowerCase() !== command.toLowerCase()) {
-    return { text: title, fromCommand: false }
+    return { text: title, fromCommand: false, tooltip: title }
   }
   return { text: pane.command, fromCommand: true }
 }
 
 /**
- * The badge itself.
+ * A pane row's text: the name, and what the pane is doing under it.
  *
- * Truncation is CSS: the sidebar is 16rem wide and a title arrives capped at
- * 256 bytes, so no width the badge could be given makes measuring in JS worth a
- * layout pass. The full text goes in `title=`, which is where the rest of a
- * truncated row is reachable without a tooltip library and without a click.
+ * One line or two, decided by `paneText` and by nothing else. A command shares
+ * the first line with the name, in the capsule it has always had; a title takes
+ * a second line to itself.
  *
- * `shrink` overrides the badge's own `shrink-0` for a title: when a long window
- * name and a long title compete for one row, the window name is the identity
- * and the title is the description, so the title is what gives way.
+ * The two lines are one column so that the name truncates against the same edge
+ * the title does, and so the row's leading icon centres against the pair rather
+ * than against the first line. `min-w-0` on both is what lets either of them
+ * truncate at all: a flex item's floor is its content, so without it a long
+ * title would push the row wider than the sidebar instead of being cut.
  */
-function PaneBadge({ pane, width }: { pane: PaneNode; width: string }) {
-  const { text, fromCommand, tooltip } = paneBadge(pane)
+function PaneLines({
+  pane,
+  name,
+  commandWidth,
+  afterName,
+}: {
+  pane: PaneNode
+  name: string
+  /** How much of the first line the capsule may take, before the name gives way. */
+  commandWidth: string
+  /** The tmux-active marker, on a split window's pane rows. */
+  afterName?: ReactNode
+}) {
+  const { text, fromCommand, tooltip } = paneText(pane)
   return (
-    <Badge
-      variant="secondary"
-      title={tooltip ?? (fromCommand ? undefined : text)}
-      className={cn('ml-auto truncate', width, fromCommand ? 'font-mono' : 'shrink font-normal')}
-    >
-      {text}
-    </Badge>
+    <span className="flex min-w-0 flex-1 flex-col justify-center gap-0.5">
+      <span className="flex min-w-0 items-center gap-2">
+        <span className="truncate">{name}</span>
+        {afterName}
+        {fromCommand && (
+          // Unchanged, deliberately: a command is a program's name, and a row
+          // running `zsh` should go on looking exactly like a row running
+          // `zsh`. The distinction between "this is a process" and "this is
+          // what an agent is doing" is carried by the shape of the row.
+          <Badge variant="secondary" className={cn('ml-auto truncate font-mono', commandWidth)}>
+            {text}
+          </Badge>
+        )}
+      </span>
+      {!fromCommand && (
+        <span
+          // `.row-line` is the clip, the ellipsis and the hover marquee, all of
+          // which are CSS -- see index.css. Dimmer *and* a step smaller than the
+          // name above: the name is the identity and this is the description,
+          // and the tree is read by scanning the names.
+          className="row-line text-sidebar-foreground/60 text-xs leading-tight font-normal"
+          title={tooltip}
+        >
+          {/* The element the marquee moves. It has to be a child of the clip:
+              one box cannot both hide its overflow and slide inside itself. */}
+          <span>{text}</span>
+        </span>
+      )}
+    </span>
   )
 }
 
 /**
- * The choices, under the question, in the one tooltip a badge can carry.
+ * The choices, under the question, in the one tooltip the second line can carry.
  *
  * A native `title` is what the rest of this file already uses for the overflow
- * of a truncated badge, and it is the only tooltip a row can have without
+ * of a truncated line, and it is the only tooltip a row can have without
  * fighting the `title=` the row itself sets. Newlines are honoured by every
- * browser's implementation of it.
+ * browser's implementation of it. It is also the whole of what a reduced-motion
+ * reader gets in place of the marquee, and the whole of what a phone gets in
+ * place of the hover -- which is why it is set on every title, cut or not.
  *
  * The choices are what make the question actionable -- "Yes / Yes, and don't
  * ask again / No" tells you whether this is a decision or a formality -- but

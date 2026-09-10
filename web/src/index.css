@@ -128,3 +128,75 @@
     @apply font-sans;
     }
 }
+
+/*
+ * The second line of a sidebar row: what the pane is *doing*, which is prose a
+ * program wrote and is routinely longer than the row is wide.
+ *
+ * ## Why the marquee is pure CSS
+ *
+ * The rule is "scroll it on hover, but only if it is actually cut off". A
+ * marquee that runs regardless is worse than none: every short title in the
+ * tree would set off under the pointer for no reason. CSS has no "is this
+ * overflowing" test -- but it does not need one, because the *distance* can be
+ * made zero instead. In a transform, `100%` is the moving element's own width;
+ * `100cqw` is the width of the clip it sits in. So
+ *
+ *     min(0px, calc(100cqw - 100%))
+ *
+ * is exactly how far the end of the text sits past the right edge, and exactly
+ * 0 when it does not sit past it at all. Text that fits animates a transform of
+ * zero and never moves. No measuring, no layout pass, no effect -- which also
+ * means it works under a server render, where this app's tests live.
+ *
+ * ## Why the clamp is dropped on hover
+ *
+ * The ellipsis and the scroll cannot both be on: an ellipsis needs the box
+ * clamped to the container, and the scroll needs it at its natural width. The
+ * clamp goes for the length of the hover, which is also what makes the ellipsis
+ * vanish as the text starts to move.
+ *
+ * Reduced motion gets no marquee at all; the whole text is still on the row's
+ * native `title=`, which is where it was reachable before any of this.
+ */
+@layer components {
+  .row-line {
+    /* Both jobs at once: the clip the ellipsis needs, and the yardstick
+       `100cqw` is measured against. */
+    container-type: inline-size;
+    overflow: hidden;
+  }
+
+  .row-line > span {
+    display: block;
+    width: max-content;
+    max-width: 100%;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  /* Hovering the row, not the text: a 12px line is a small target, and the
+     whole row is what the pointer is already on. `:focus-visible` because a
+     keyboard reaches these rows too, and it is the same question. */
+  @media (prefers-reduced-motion: no-preference) {
+    .row-hover:hover .row-line > span,
+    .row-hover:focus-visible .row-line > span {
+      max-width: none;
+      animation: row-line-scroll 5s ease-in-out 0.4s infinite alternate;
+    }
+  }
+
+  @keyframes row-line-scroll {
+    /* The pauses are the point: a title that slid away the instant it arrived
+       and never came back would be unreadable at both ends. */
+    0%,
+    12% {
+      transform: translateX(0);
+    }
+    88%,
+    100% {
+      transform: translateX(min(0px, calc(100cqw - 100%)));
+    }
+  }
+}

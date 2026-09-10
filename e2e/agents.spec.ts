@@ -123,6 +123,183 @@ test('an agent pane reads working while it redraws and idle when it stops', asyn
   await expect(stateDot(windowRow(page, BASE_WINDOW))).toHaveCount(0)
 })
 
+/**
+ * The row layout, which nothing under vitest can see.
+ *
+ * `react-dom/server` runs no effects and gives nothing a size, so every rule
+ * this rework rests on -- that the title is cut, that it is quieter than the
+ * name, that it moves on hover, and above all that it moves *only when it is
+ * too long* -- is invisible there. The unit tests pin which text lands on which
+ * line; this pins what the browser does with it.
+ *
+ * The marquee is checked by seeking its animation rather than by waiting for
+ * it: a screenshot-timed assertion on a 5s pendulum is a flake generator, and
+ * the interesting value is the one at the far end of the travel, which is
+ * exactly what `currentTime` can be moved to.
+ */
+test('a pane title gets a line of its own, cut, and scrolled only when it is too long', async ({
+  page,
+  wterm,
+}) => {
+  await enroll(page, wterm, 'laptop')
+  const claude = wterm.fakeAgent('claude')
+
+  // Long enough to be cut in a 16rem sidebar at 12px, and short enough to be a
+  // title a coding agent would really write.
+  const LONG = '✳ Categorización de productos de southafrica en el catálogo'
+  // Not hostname-shaped -- it has a space -- so it is shown, and comfortably
+  // narrower than the row.
+  const SHORT = 'in tests'
+
+  wterm.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'catalog', claude)
+  wterm.tmux('select-pane', '-t', `${BASE_SESSION}:catalog`, '-T', LONG)
+  wterm.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'unit', claude)
+  wterm.tmux('select-pane', '-t', `${BASE_SESSION}:unit`, '-T', SHORT)
+  // A split window, whose pane rows are a different button with a different
+  // set of shadcn defaults -- notably no width of its own, since a `<button>`
+  // is shrink-to-fit.
+  wterm.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'split', claude)
+  wterm.tmux('select-pane', '-t', `${BASE_SESSION}:split.0`, '-T', LONG)
+  wterm.tmux('split-window', '-d', '-v', '-t', `${BASE_SESSION}:split`, 'sh')
+  // A second session, so there are two blocks to keep apart.
+  // Named `scratch`, not `shell`: `windowRow` finds a row by its name, and a
+  // second window called `shell` would make the base one ambiguous.
+  wterm.tmux('new-session', '-d', '-s', 'notes', '-n', 'scratch', 'sh')
+
+  const long = windowRow(page, 'catalog')
+  const short = windowRow(page, 'unit')
+  await expect(long).toContainText(LONG)
+  await expect(short).toContainText(SHORT)
+
+  // A second line, not the capsule the command has. The capsule is `h-5` and
+  // sits on the first line; the title's box starts below the name's.
+  const name = long.locator('.truncate').first()
+  const line = long.locator('.row-line')
+  const nameBox = (await name.boundingBox())!
+  const lineBox = (await line.boundingBox())!
+  expect(lineBox.y, 'the title is under the name, not beside it').toBeGreaterThanOrEqual(
+    nameBox.y + nameBox.height,
+  )
+  // And the row grew to hold it. shadcn pins these buttons to a fixed height
+  // and hides their overflow, so a row that did not give that up would draw the
+  // second line into a box that clips it -- visible to a person and to nothing
+  // else.
+  const rowBox = (await long.boundingBox())!
+  expect(lineBox.y + lineBox.height, 'the row is tall enough for the line it drew').toBeLessThanOrEqual(
+    rowBox.y + rowBox.height + 0.5,
+  )
+  // The line has the row to itself, rather than the leftovers of the name's
+  // width: that width is the entire reason the title left the capsule.
+  expect(lineBox.width).toBeGreaterThan(rowBox.width * 0.7)
+
+  // Quieter than the name: a step smaller, and a different colour. If the
+  // dimming were dropped the line would simply inherit the row's own colour,
+  // which is the name's -- so this is an equality that has to fail.
+  const tone = await long.evaluate((row) => {
+    const label = row.querySelector('.truncate')!
+    const title = row.querySelector('.row-line')!
+    const a = getComputedStyle(label)
+    const b = getComputedStyle(title)
+    return {
+      name: { size: parseFloat(a.fontSize), color: a.color },
+      title: { size: parseFloat(b.fontSize), color: b.color },
+    }
+  })
+  expect(tone.title.size).toBeLessThan(tone.name.size)
+  expect(tone.title.color).not.toBe(tone.name.color)
+
+  // Cut with an ellipsis: overflowing, clipped, on one line, and told to draw
+  // the mark. All four, because any one of them alone is satisfiable by a row
+  // that does not show an ellipsis at all.
+  const cut = await line.evaluate((el) => {
+    const inner = el.firstElementChild as HTMLElement
+    const cs = getComputedStyle(inner)
+    return {
+      overflowing: inner.scrollWidth - inner.clientWidth,
+      overflow: cs.overflow,
+      whiteSpace: cs.whiteSpace,
+      textOverflow: cs.textOverflow,
+    }
+  })
+  expect(cut.overflowing).toBeGreaterThan(0)
+  expect(cut.overflow).toBe('hidden')
+  expect(cut.whiteSpace).toBe('nowrap')
+  expect(cut.textOverflow).toBe('ellipsis')
+
+  /**
+   * Hover the row, seek its marquee to the far end of the travel, and report
+   * how far it went -- and how far it had to go.
+   */
+  async function travel(row: Locator): Promise<{ moved: number; needed: number }> {
+    await row.hover()
+    return await row.locator('.row-line').evaluate((el) => {
+      const inner = el.firstElementChild as HTMLElement
+      const anims = inner.getAnimations()
+      if (anims.length === 0) return { moved: NaN, needed: NaN }
+      for (const a of anims) {
+        a.pause()
+        // Past the 400ms delay and a whole 5s iteration: the end of the first
+        // pass, which `alternate` makes the far end of the swing.
+        a.currentTime = 5_400
+      }
+      const moved = new DOMMatrixReadOnly(getComputedStyle(inner).transform).m41
+      // The clamp is dropped while hovering, so this is now the natural width.
+      return { moved, needed: el.clientWidth - inner.getBoundingClientRect().width }
+    })
+  }
+
+  // The long one travels, and travels exactly as far as it is over -- which is
+  // the whole of the `min(0px, 100cqw - 100%)` trick working in a real engine.
+  const far = await travel(long)
+  expect(far.moved, 'a cut title scrolls').toBeLessThan(-20)
+  expect(far.moved).toBeCloseTo(far.needed, 0)
+
+  // And the short one does not move at all, though it is running the same
+  // animation. This is the assertion the whole approach exists for: a marquee
+  // that ran regardless would wobble every short title in the tree.
+  const near = await travel(short)
+  expect(near.moved, 'the short title is animating too').not.toBeNaN()
+  expect(near.moved, 'a title that fits does not move').toBe(0)
+
+  // Reduced motion gets no marquee -- and still gets the whole title, on the
+  // native tooltip, which is the reason it can be dropped rather than slowed.
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  const still = await travel(long)
+  expect(still.moved, 'no marquee under prefers-reduced-motion').toBeNaN()
+  await expect(long.locator('.row-line')).toHaveAttribute('title', LONG)
+  await page.emulateMedia({ reducedMotion: 'no-preference' })
+
+  // The pane rows of a split window are a different button with different
+  // defaults, and the one that matters is that a `<button>` is shrink-to-fit:
+  // without a width of its own its second line is only as wide as the words
+  // above it, which is the cramping this rework is about.
+  const subRow = page.getByRole('button', { name: /pane 0/ })
+  const subBox = (await subRow.boundingBox())!
+  const subLine = (await subRow.locator('.row-line').boundingBox())!
+  expect(subLine.width, 'a pane row gives its title the full row too').toBeGreaterThan(
+    subBox.width * 0.7,
+  )
+
+  // The blocks. A rule between session groups and none above the first: 1px of
+  // height, no width -- which is what makes it affordable on a phone, where an
+  // indent or a gutter would not be.
+  const rules = await page
+    .locator('[data-slot="sidebar-group"]')
+    .evaluateAll((groups) => groups.map((g) => getComputedStyle(g).borderTopWidth))
+  expect(rules.length).toBeGreaterThan(1)
+  expect(rules[0], 'nothing is ruled off above the first group').toBe('0px')
+  expect(rules.slice(1).every((w) => w !== '0px'), `border widths: ${rules}`).toBe(true)
+
+  // The other half of the layout, unchanged: a shell says what program it is
+  // running, in a capsule, in a monospaced face, on the row's own line. No
+  // second line is spent to print `sh`.
+  const shell = windowRow(page, BASE_WINDOW)
+  await expect(shell.locator('.row-line')).toHaveCount(0)
+  const capsule = shell.locator('[data-slot="badge"]')
+  await expect(capsule).toHaveText('sh')
+  expect(await capsule.evaluate((el) => getComputedStyle(el).fontFamily)).toMatch(/mono/i)
+})
+
 test('a blocked agent rolls up to its window and session, and badges the tab', async ({
   page,
   wterm,

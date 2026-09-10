@@ -87,9 +87,9 @@ export const AGENT_MARKS: Record<string, AgentMark> = {
    * `#131010` field, drawn at 512. Reduction: the field and the grey block are
    * dropped -- monochrome cannot carry two tones -- leaving upstream's own
    * even-odd frame path, translated by (-128, -96) and scaled by 24/320. That
-   * is exact: every upstream coordinate is a multiple of 64/0.075. simple-icons
-   * makes the same reduction, which is corroboration, but it also widens the
-   * frame by ~4% to sit in a square box; this does not.
+   * is exact: every upstream coordinate is a multiple of 64, and 64 x 24/320
+   * is 4.8. simple-icons makes the same reduction, which is corroboration, but
+   * it also widens the frame by ~4% to sit in a square box; this does not.
    */
   opencode: {
     name: 'opencode',

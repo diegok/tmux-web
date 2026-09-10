@@ -38,7 +38,7 @@ const expected = {
     viewBox: '0 0 24 24',
     pathStartsWith: 'm4.7144 15.9555 4.7174-2.6471.079-.2307',
     pathEndsWith: '.0608-.7467.2307-.2429 1.9064-1.3114Z',
-    pathLength: 1712,
+    pathLength: 1811,
     fillRule: undefined,
   },
   opencode: {

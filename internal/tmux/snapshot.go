@@ -39,6 +39,12 @@ type Row struct {
 	PaneActive  bool   `json:"paneActive"`
 	Command     string `json:"command"`
 	Title       string `json:"title"` // tmux-sanitised, truncated
+	// Question is what a blocked agent is waiting on. It is a pointer and
+	// omitempty because it is absent far more often than present -- every
+	// non-agent pane, every agent that is not blocked, and every blocked agent
+	// whose dialog the grammar could not read. Its absence never means the
+	// pane is not blocked: AgentState is the state, this is a convenience.
+	Question *Question `json:"question,omitempty"`
 }
 
 // Format is the -F argument producing rows this package can parse.

@@ -183,3 +183,139 @@ func TestIsBlockedRequiresEveryMarker(t *testing.T) {
 		}
 	}
 }
+
+// --- question extraction ----------------------------------------------------
+
+// The exact text and the exact choices, against the real capture. Asserting
+// only "not nil" would pass for a parser that returned the footer as the
+// question and the file preview as a choice.
+func TestExtractQuestion(t *testing.T) {
+	q := ExtractQuestion("claude", readFixture(t, "claude-blocked.txt"))
+	if q == nil {
+		t.Fatal("no question extracted from a screen that IsBlocked matches")
+	}
+	if want := "Do you want to create fixture.txt?"; q.Text != want {
+		t.Errorf("Text = %q, want %q", q.Text, want)
+	}
+	// The second choice wraps onto a line that is NOT numbered. Counting
+	// numbered lines makes that invisible to IsBlocked; extraction has to
+	// rejoin it, or the tooltip shows a sentence cut off mid-clause and a
+	// phantom fourth choice made of its tail.
+	want := []string{
+		"Yes",
+		"Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)",
+		"No",
+	}
+	if len(q.Choices) != len(want) {
+		t.Fatalf("Choices = %q, want %q", q.Choices, want)
+	}
+	for i := range want {
+		if q.Choices[i] != want[i] {
+			t.Errorf("Choices[%d] = %q, want %q", i, q.Choices[i], want[i])
+		}
+	}
+}
+
+// dropBlankBefore removes the blank line immediately above the first line whose
+// trimmed form has the given prefix. It fails the test if there was not one, so
+// it cannot quietly stop modifying the screen.
+func dropBlankBefore(t *testing.T, screen, prefix string) string {
+	t.Helper()
+	lines := strings.Split(screen, "\n")
+	for i, line := range lines {
+		if !strings.HasPrefix(strings.TrimSpace(line), prefix) {
+			continue
+		}
+		if i == 0 || strings.TrimSpace(lines[i-1]) != "" {
+			t.Fatalf("no blank line above %q to remove", prefix)
+		}
+		return strings.Join(append(append([]string{}, lines[:i-1]...), lines[i:]...), "\n")
+	}
+	t.Fatalf("no line starting %q", prefix)
+	return ""
+}
+
+// The footer is not part of the last choice.
+//
+// On the real capture a blank line separates them, so the join rule is never
+// asked the question. Take the blank away -- one line, and exactly what a
+// dialog drawn one row shorter looks like -- and the only thing between "No"
+// and "Esc to cancel · Tab to amend" is the column a wrapped continuation has
+// to reach. Recognising the footer by its wording instead is not an option:
+// blocked.go calls it the most style-volatile line on the screen and the
+// detector deliberately refuses to depend on it.
+func TestExtractQuestionDoesNotSwallowTheFooter(t *testing.T) {
+	tight := dropBlankBefore(t, readFixture(t, "claude-blocked.txt"), "Esc to cancel")
+	q := ExtractQuestion("claude", tight)
+	if q == nil {
+		t.Fatal("removing one blank line must not stop the dialog parsing")
+	}
+	if n := len(q.Choices); n != 3 {
+		t.Fatalf("Choices = %q, want the same three", q.Choices)
+	}
+	if last := q.Choices[2]; last != "No" {
+		t.Errorf("last choice = %q, want %q: the footer is chrome, not an option", last, "No")
+	}
+}
+
+// Extraction failing must not take the state with it: the badge is
+// load-bearing and this text is a convenience, so a grammar that stops matching
+// a restyled dialog has to yield nothing rather than something wrong.
+//
+// The plan named a `claude-blocked-unparseable.txt` fixture -- a screen that
+// IsBlocked still matches but extraction cannot read -- and no such screen can
+// be derived from the capture. IsBlocked needs a cursored choice, two lines
+// matching `^(?:❯ )?\d+\. ` and a line ending in "?"; that trailing space means
+// a line only counts as a choice while it still has text on it, and this
+// capture's only "?" is the question itself, sitting above the choices. So
+// every deletion that defeats extraction -- of the question, of the options, of
+// their text -- defeats detection too. Rather than invent a screen, this pins
+// that coincidence: the `blocked` column is the claim, and if a future edit to
+// the detector ever makes one of these blockable, this test says so and the
+// missing fixture becomes recordable.
+func TestExtractionFailureKeepsTheState(t *testing.T) {
+	dialog := readFixture(t, "claude-blocked.txt")
+
+	// The options with their text taken away: the numbers, the cursor and the
+	// question all survive, which is the shape a capture landing mid-redraw
+	// has. IsBlocked stops matching because a bare "1." is not a choice.
+	emptied := regexp.MustCompile(`(?m)^(\s*(?:❯ )?\d+\. ).*$`).ReplaceAllString(dialog, "$1")
+
+	for _, tc := range []struct {
+		name    string
+		screen  string
+		blocked bool
+	}{
+		{"choices with no text", emptied, false},
+		{"no question line", dropLine(t, dialog, "Do you want"), false},
+		{"a single option", dropLine(t, dropLine(t, dialog, "2."), "3."), false},
+		// Numbered lines and a question with no rule above them are prose.
+		{"no dialog region at all", "Do you want to?\n1. Yes\n2. No", false},
+		// An answered dialog above a live input box. Extraction reads the same
+		// bottommost region the detector does, so it quotes nothing here --
+		// reporting the lower box's state while quoting the upper box's text
+		// would be worse than quoting nothing at all.
+		{"a dialog already answered", dialog + readFixture(t, "claude-idle.txt"), false},
+	} {
+		if tc.screen == dialog {
+			t.Fatalf("%s: transform changed nothing", tc.name)
+		}
+		if got := IsBlocked("claude", tc.screen); got != tc.blocked {
+			t.Errorf("%s: IsBlocked = %v, want %v", tc.name, got, tc.blocked)
+		}
+		if q := ExtractQuestion("claude", tc.screen); q != nil {
+			t.Errorf("%s: want no question rather than a wrong one, got %+v", tc.name, q)
+		}
+	}
+}
+
+// Extraction is per agent for the same reason detection is: the grammar was
+// written against one agent's screen and running it on another's is a guess.
+func TestExtractQuestionIsPerAgent(t *testing.T) {
+	blocked := readFixture(t, "claude-blocked.txt")
+	for _, agent := range []string{"opencode", "pi", "zsh", ""} {
+		if q := ExtractQuestion(agent, blocked); q != nil {
+			t.Errorf("ExtractQuestion(%q) = %+v, want nil: no rules exist for %q", agent, q, agent)
+		}
+	}
+}

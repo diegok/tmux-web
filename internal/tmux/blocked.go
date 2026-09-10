@@ -3,6 +3,7 @@ package tmux
 import (
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // dialogRules is how one agent draws a prompt it is waiting on.
@@ -72,20 +73,14 @@ func IsBlocked(agent, screen string) bool {
 		return false
 	}
 
-	lines := strings.Split(screen, "\n")
-	last := -1
-	for i, line := range lines {
-		if isRule(line, r.rules) {
-			last = i
-		}
-	}
-	if last < 0 {
+	region, ok := dialogRegion(screen, r.rules)
+	if !ok {
 		return false
 	}
 
 	var choices int
 	var cursor, asked bool
-	for _, line := range lines[last+1:] {
+	for _, line := range region {
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -110,4 +105,116 @@ func isRule(line, runes string) bool {
 		return false
 	}
 	return strings.Trim(line, runes) == ""
+}
+
+// dialogRegion returns the lines below the bottommost rule, and whether there
+// was one.
+//
+// Shared by detection and extraction so that the two can never disagree about
+// which dialog on the screen they are looking at -- a screen can hold an
+// answered box above a live one, and reporting the state of the lower while
+// quoting the text of the upper is worse than quoting nothing.
+func dialogRegion(screen, rules string) ([]string, bool) {
+	lines := strings.Split(screen, "\n")
+	last := -1
+	for i, line := range lines {
+		if isRule(line, rules) {
+			last = i
+		}
+	}
+	if last < 0 {
+		return nil, false
+	}
+	return lines[last+1:], true
+}
+
+// Question is the request a blocked agent is waiting on.
+//
+// It is present only when AgentState is blocked, and omitted entirely when
+// extraction failed: the state is load-bearing and the text is a convenience,
+// so a grammar that stops matching a restyled dialog must cost a quote in a
+// tooltip rather than a badge.
+type Question struct {
+	Text    string   `json:"text"`
+	Choices []string `json:"choices,omitempty"`
+}
+
+// ExtractQuestion returns the request on a blocked agent's screen, or nil if it
+// cannot be read with confidence.
+//
+// It is meaningful only for a screen IsBlocked has already matched, and it
+// deliberately does not re-check the markers IsBlocked checks -- the selection
+// cursor in particular. Two copies of that rule would be two things to keep in
+// step, and the caller has just run the authoritative one.
+//
+// Everything here fails closed: too few options, or no line asking anything
+// above them, returns nil rather than half a dialog. The caller keeps the
+// state it already decided.
+func ExtractQuestion(agent, screen string) *Question {
+	r, ok := blockedRules[agent]
+	if !ok {
+		return nil
+	}
+	region, ok := dialogRegion(screen, r.rules)
+	if !ok {
+		return nil
+	}
+
+	var choices []string
+	first := -1
+	// textCol is the column the current choice's own text starts at, or -1 when
+	// no choice is open. A wrapped continuation is indented to line up under
+	// it; the footer and the question sit hard against the left margin. That is
+	// the difference between them, and it is the only one available -- matching
+	// the footer's wording would tie extraction to the most style-volatile line
+	// on the screen, which is exactly what the detector refuses to do.
+	textCol := -1
+	for i, raw := range region {
+		line := strings.TrimRight(raw, " ")
+		body := strings.TrimSpace(line)
+		// A blank line needs no case of its own: its indent is 0, which is
+		// below any choice's text column, so it falls through to the reset at
+		// the bottom and closes the choice above it.
+		indent := utf8.RuneCountInString(line) - utf8.RuneCountInString(strings.TrimLeft(line, " "))
+		if prefix := r.choice.FindString(body); prefix != "" {
+			if first < 0 {
+				first = i
+			}
+			choices = append(choices, strings.TrimSpace(body[len(prefix):]))
+			textCol = indent + utf8.RuneCountInString(prefix)
+			continue
+		}
+		if textCol >= 0 && indent >= textCol {
+			// Claude Code's second option routinely wraps onto a line that
+			// carries no number. Joined with a single space: the wrap point is
+			// a column, not a word break, so the two halves are one sentence.
+			choices[len(choices)-1] = strings.TrimSpace(choices[len(choices)-1] + " " + body)
+			continue
+		}
+		textCol = -1
+	}
+
+	// first < 0 is implied by the count today, since minChoices is 2. It is
+	// checked anyway because the alternative is region[:-1] panicking in the
+	// poller goroutine if anyone ever writes a rules table with minChoices 0,
+	// and the whole point of that table is that it can be edited as data.
+	if first < 0 || len(choices) < r.minChoices {
+		return nil
+	}
+
+	// The question is above the options, because that is how a dialog reads and
+	// because the region can hold other lines ending in "?" -- a diff preview
+	// of a file that contains one, say. The nearest such line above the first
+	// choice is the one being asked; IsBlocked does not care where it is,
+	// because for a badge the existence of a question is the whole signal.
+	text := ""
+	for _, raw := range region[:first] {
+		if body := strings.TrimSpace(raw); r.question.MatchString(body) {
+			text = body
+		}
+	}
+	if text == "" {
+		return nil
+	}
+	return &Question{Text: text, Choices: choices}
 }

@@ -99,6 +99,22 @@ export interface SnapshotRow {
    * row.
    */
   title: string
+  /**
+   * What a blocked agent is waiting on, when the daemon could read it.
+   *
+   * Absent for every pane that is not a blocked agent -- and also for a blocked
+   * agent whose dialog the daemon's grammar did not recognise, which is the
+   * point of it being optional: the badge comes from `agentState`, and a
+   * restyled dialog costs the quote rather than the state.
+   */
+  question?: SnapshotQuestion
+}
+
+/** The request on a blocked agent's screen, as `tmux.Question` marshals it. */
+export interface SnapshotQuestion {
+  text: string
+  /** Omitted by the daemon when empty, hence optional here. */
+  choices?: string[]
 }
 
 /** The body of `GET /api/snapshot`, normalised. */
@@ -380,9 +396,25 @@ function rowsEqual(a: readonly SnapshotRow[], b: readonly SnapshotRow[]): boolea
       x.title === y.title &&
       x.label === y.label &&
       x.paneActive === y.paneActive &&
-      x.appOwned === y.appOwned
+      x.appOwned === y.appOwned &&
+      questionsEqual(x.question, y.question)
     )
   })
+}
+
+/**
+ * Whether two panes are asking the same thing.
+ *
+ * `question` is the one field on the wire that is not a scalar, so it needs its
+ * own comparison: `x.question === y.question` is false on every poll, since the
+ * daemon parses a fresh object out of the capture each time, and the tree would
+ * be rebuilt every 1.5s for every blocked pane.
+ */
+function questionsEqual(a?: SnapshotQuestion, b?: SnapshotQuestion): boolean {
+  if (a === undefined || b === undefined) return a === b
+  const ac = a.choices ?? []
+  const bc = b.choices ?? []
+  return a.text === b.text && ac.length === bc.length && ac.every((c, i) => c === bc[i])
 }
 
 /** Everything the sidebar needs to render, including why it might be wrong. */

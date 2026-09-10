@@ -33,6 +33,10 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     command: 'zsh',
     // What tmux gives a pane nothing has titled: the hostname.
     title: 'devbox',
+    // Present as a key and undefined as a value: `question` is omitempty on the
+    // Go side, and the contract check below compares KEYS, so a fixture that
+    // simply left it out would report the field as missing from TypeScript.
+    question: undefined,
     ...over,
   }
 }
@@ -81,8 +85,11 @@ describe('contract with the daemon', () => {
   it('uses the json names tmux.Row marshals', () => {
     const struct = goSource('internal/tmux/snapshot.go').match(/type Row struct \{([\s\S]*?)\n\}/)
     if (!struct) throw new Error('type Row not found in internal/tmux/snapshot.go')
-    const tags = [...struct[1].matchAll(/json:"([^",]+)"/g)].map((m) => m[1])
-    expect(tags).toHaveLength(12)
+    // The name is everything before the first comma: `question` is omitempty,
+    // and a pattern that stopped at the quote would simply not see it -- which
+    // reads as "TypeScript is missing a field" rather than as a broken check.
+    const tags = [...struct[1].matchAll(/json:"([^"]+)"/g)].map((m) => m[1].split(',')[0])
+    expect(tags).toHaveLength(13)
     expect(Object.keys(row()).sort()).toEqual(tags.sort())
   })
 })
@@ -577,6 +584,39 @@ describe('SnapshotPoller', () => {
       await h.tick()
       expect(h.last.groups, `a change to ${key} was swallowed`).not.toBe(first)
     }
+  })
+
+  // `question` is the only field on the wire that is not a scalar, so it is the
+  // only one where identity and equality come apart. The daemon parses a fresh
+  // object out of the capture every poll, so comparing by reference would
+  // rebuild the tree every 1.5s for every blocked pane -- and comparing not at
+  // all would leave a changed question stuck on screen.
+  it('rebuilds only when the question itself changed', async () => {
+    const asking = (text: string, choices: string[]) =>
+      row({ paneId: '%1', command: 'claude', question: { text, choices } })
+
+    const h = harness()
+    h.answerWith(() => ok({ panes: [asking('Do you want to create fixture.txt?', ['Yes', 'No'])] }))
+    h.poller.start()
+    await h.tick(0)
+    const first = h.last.groups
+
+    // A structurally identical question in a new object: nothing changed.
+    h.answerWith(() => ok({ panes: [asking('Do you want to create fixture.txt?', ['Yes', 'No'])] }))
+    await h.tick()
+    expect(h.last.groups, 'a re-parsed but identical question rebuilt the tree').toBe(first)
+
+    // Same text, different options -- an agent that moved on to another ask.
+    h.answerWith(() =>
+      ok({ panes: [asking('Do you want to create fixture.txt?', ['Yes', 'Yes to all', 'No'])] }),
+    )
+    await h.tick()
+    expect(h.last.groups, 'a change to the choices was swallowed').not.toBe(first)
+    const second = h.last.groups
+
+    h.answerWith(() => ok({ panes: [asking('Do you want to run rm -rf?', ['Yes', 'Yes to all', 'No'])] }))
+    await h.tick()
+    expect(h.last.groups, 'a change to the question text was swallowed').not.toBe(second)
   })
 
   it('notices a pane appearing or disappearing even when the count is the same', async () => {

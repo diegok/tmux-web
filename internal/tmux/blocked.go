@@ -64,6 +64,7 @@ var blockedRules = map[string]dialog{
 		cursorChoice: regexp.MustCompile(`^→ \d+\. `),
 		choice:       regexp.MustCompile(`^(?:→ )?\d+\. `),
 		minChoices:   2,
+		question:     regexp.MustCompile(`\?$`),
 	},
 }
 
@@ -498,6 +499,12 @@ type piDialog struct {
 	// not numbered, so it is neither counted here nor quoted later.
 	choice     *regexp.Regexp
 	minChoices int
+	// question is the line that asks, and it is used for extraction only --
+	// detection never requires it. pi scrolls the prompt inside its own box, so
+	// requiring a question mark to light the badge would lose it exactly when a
+	// question is long enough to need reading; and a menu with something
+	// highlighted in it is already a pane waiting on a keystroke.
+	question *regexp.Regexp
 }
 
 // isBlocked looks for the menu inside the bottommost fully drawn box.
@@ -579,6 +586,68 @@ func (d piDialog) column(line string) string {
 	return inner
 }
 
-// extractQuestion is deliberately absent for now: pi reports blocked, and the
-// tooltip stays empty until a grammar for the overlay's text is proven.
-func (d piDialog) extractQuestion(string) *Question { return nil }
+// extractQuestion reads the question and its options out of the same box
+// isBlocked matched, so the two can never disagree about which box on the
+// screen they are looking at.
+//
+// The options are the numbered lines, in the order they are drawn. The
+// unnumbered "Type something" entry pi offers below them is not one: it is an
+// escape hatch, not an answer, and it carries no text to quote.
+//
+// The question is the line that asks, and it is looked for above the first
+// option -- the same rule and the same reasoning as Claude Code's, arrived at
+// from pi's own screen rather than borrowed. The box holds a whole prompt, not
+// a one-line question: a preamble, a context section, a bulleted trade-off
+// summary, any of which can end in a "?". The nearest such line above the
+// options is the one being answered.
+//
+// One known wrong quote it will produce: the filter line sits above the options
+// too, so an operator who has typed a filter query ending in a question mark
+// gets that quoted instead of the question. Excluding it would mean matching
+// the word "Filter", which is chrome and the most restyleable kind of it. A
+// wrong quote in a tooltip under a badge that is right is the trade this whole
+// extractor is built on.
+//
+// It fails closed twice over, which matters more here than for the other two
+// agents: pi scrolls the prompt INSIDE the box -- the capture has the scroll
+// indicator to prove it -- so a long question can be off the top of its own
+// box while the options are still on screen. Then there is no line ending in
+// "?" to find, and the pane reports blocked with nothing quoted rather than
+// quoting whatever paragraph happened to be scrolled to.
+func (d piDialog) extractQuestion(screen string) *Question {
+	box, ok := d.box(screen)
+	if !ok {
+		return nil
+	}
+
+	var choices []string
+	first := -1
+	for i, line := range box {
+		body := strings.TrimSpace(d.column(line))
+		prefix := d.choice.FindString(body)
+		if prefix == "" {
+			continue
+		}
+		if first < 0 {
+			first = i
+		}
+		choices = append(choices, strings.TrimSpace(body[len(prefix):]))
+	}
+	// first < 0 is implied by the count while minChoices is 2, and checked
+	// anyway: the rules table is meant to be edited as data, and box[:-1] would
+	// panic in the poller's goroutine.
+	if first < 0 || len(choices) < d.minChoices {
+		return nil
+	}
+
+	text := ""
+	for _, line := range box[:first] {
+		if body := strings.TrimSpace(d.column(line)); d.question.MatchString(body) {
+			text = body
+		}
+	}
+	if text == "" {
+		return nil
+	}
+	return &Question{Text: text, Choices: choices}
+}

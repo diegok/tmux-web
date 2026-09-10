@@ -792,3 +792,130 @@ func TestIsBlockedPiWantsTheBottommostBox(t *testing.T) {
 		t.Error("an overlay above a later box is answered, not blocked")
 	}
 }
+
+// The exact text and the exact options, against the real capture.
+//
+// "Not nil" would pass for a parser that quoted the filter line, the key hints,
+// or the description of the highlighted option in the pane beside the list --
+// and for one that left "1. " on the front of every option.
+func TestExtractQuestionPi(t *testing.T) {
+	q := ExtractQuestion("pi", readFixture(t, "pi-blocked.txt"))
+	if q == nil {
+		t.Fatal("no question extracted from a screen that IsBlocked matches")
+	}
+	if want := "Which database should this project use?"; q.Text != want {
+		t.Errorf("Text = %q, want %q", q.Text, want)
+	}
+	// Four options, and not the fifth thing on the list: the unnumbered "Type
+	// something. — Enter a custom response" entry is an escape hatch with no
+	// answer in it, and it wraps onto a second line that a looser rule would
+	// quote as a sixth.
+	want := []string{"PostgreSQL", "SQLite", "MySQL / MariaDB", "MongoDB"}
+	if len(q.Choices) != len(want) {
+		t.Fatalf("Choices = %q, want %q", q.Choices, want)
+	}
+	for i := range want {
+		if q.Choices[i] != want[i] {
+			t.Errorf("Choices[%d] = %q, want %q", i, q.Choices[i], want[i])
+		}
+	}
+}
+
+// The question is the nearest line that asks above the options, not the first
+// one in the box.
+//
+// pi's box holds a whole prompt -- a preamble, a context section, a bulleted
+// trade-off summary -- and any of those lines can end in a question mark. The
+// screen here is the real capture with one character changed, a colon into a
+// question mark, on a line the prompt already has; taking the first match
+// instead of the nearest passes every other test in this file.
+func TestExtractQuestionPiTakesTheNearestQuestionAboveTheOptions(t *testing.T) {
+	overlay := readFixture(t, "pi-blocked.txt")
+	two := strings.Replace(overlay, "Quick trade-off summary:", "Quick trade-off summary?", 1)
+	if two == overlay {
+		t.Fatal("transform changed nothing")
+	}
+	q := ExtractQuestion("pi", two)
+	if q == nil {
+		t.Fatal("a second question mark stopped the box parsing")
+	}
+	if want := "Quick trade-off summary?"; q.Text != want {
+		t.Errorf("Text = %q, want %q: the nearest line above the options is the "+
+			"one being answered", q.Text, want)
+	}
+}
+
+// An option is not the question, wherever its text happens to end.
+//
+// The question is looked for above the options for a reason, and the option
+// text is arbitrary -- pi's tool supplies it -- so an option that ends in a
+// question mark is an ordinary screen, not a contrived one. Searching the whole
+// box instead of the part above the options passes every other test in this
+// file, and quotes "4. MongoDB?" as the question being asked.
+//
+// One substitution of the capture's own bytes, and the line keeps its length so
+// that nothing in the box moves.
+func TestExtractQuestionPiDoesNotQuoteAnOption(t *testing.T) {
+	overlay := readFixture(t, "pi-blocked.txt")
+	asking := strings.Replace(overlay, "4. MongoDB ", "4. MongoDB?", 1)
+	if asking == overlay {
+		t.Fatal("transform changed nothing")
+	}
+	q := ExtractQuestion("pi", asking)
+	if q == nil {
+		t.Fatal("an option ending in a question mark stopped the box parsing")
+	}
+	if want := "Which database should this project use?"; q.Text != want {
+		t.Errorf("Text = %q, want %q", q.Text, want)
+	}
+	if len(q.Choices) != 4 || q.Choices[3] != "MongoDB?" {
+		t.Errorf("Choices = %q, want the same four with the last one asking", q.Choices)
+	}
+}
+
+// Extraction failing must not take the state with it, and pi has a real screen
+// that shows it rather than a composed one: it scrolls the prompt inside its
+// own box -- the capture carries the ↓ indicator that proves it -- so a long
+// question can be off the top of the box while the options are still on it.
+// The badge comes from the menu and the quote from the prompt, so losing the
+// second leaves the first standing.
+func TestExtractQuestionPiFailureKeepsTheState(t *testing.T) {
+	overlay := readFixture(t, "pi-blocked.txt")
+	// The prompt scrolled past its question: the line that asks is gone, the
+	// context and the options are not.
+	scrolled := dropGutterLine(t, overlay, "Which database should this project use?")
+	// One option left. The detector says this is a list rather than a menu, and
+	// extraction has to agree: quoting a question whose answers were not read
+	// puts a decision in the tooltip that the pane is not offering.
+	oneChoice := dropGutterLine(t, dropGutterLine(t, dropGutterLine(t,
+		overlay, "2. SQLite"), "3. MySQL / MariaDB"), "4. MongoDB")
+
+	// An answered overlay with a later box below it. Extraction reads the same
+	// bottommost box the detector does, so it quotes nothing here -- reporting
+	// the lower box's state while quoting the upper box's text would be worse
+	// than quoting nothing at all.
+	answered := overlay + readFixture(t, "pi-idle.txt") +
+		"\n╭─ notes ─╮\n│ nothing to decide │\n╰───────────────────╯"
+
+	for _, tc := range []struct {
+		name    string
+		screen  string
+		blocked bool
+	}{
+		{"the question scrolled out of the box", scrolled, true},
+		{"a single option", oneChoice, false},
+		// No box at all: nothing to be blocked on and nothing to quote.
+		{"the overlay is gone", readFixture(t, "pi-idle.txt"), false},
+		{"an overlay already answered", answered, false},
+	} {
+		if tc.screen == overlay {
+			t.Fatalf("%s: transform changed nothing", tc.name)
+		}
+		if got := IsBlocked("pi", tc.screen); got != tc.blocked {
+			t.Errorf("%s: IsBlocked = %v, want %v", tc.name, got, tc.blocked)
+		}
+		if q := ExtractQuestion("pi", tc.screen); q != nil {
+			t.Errorf("%s: want no question rather than a wrong one, got %+v", tc.name, q)
+		}
+	}
+}

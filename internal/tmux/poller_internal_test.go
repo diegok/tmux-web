@@ -252,6 +252,12 @@ func TestRefreshBlockedOverridesChurnForPi(t *testing.T) {
 	if got := stateOf(t, p, "%1").FinishedAt; got != 0 {
 		t.Errorf("a waiting overlay stamped a finish edge at %d", got)
 	}
+	// The question rides the same poll. A screen changing behind the box does
+	// not disturb reading the box: this is the last frame's capture, not the
+	// first one's.
+	if got := stateOf(t, p, "%1").Question; got == nil || got.Text == "" {
+		t.Errorf("blocked row carries no question: %+v", got)
+	}
 
 	// The overlay goes away: whatever churn says is what the pane reads, which
 	// is what makes the assertions above a decision rather than a constant.

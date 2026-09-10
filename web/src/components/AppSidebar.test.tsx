@@ -13,10 +13,12 @@
  * App.tsx's wiring and Task 23's Playwright run.
  */
 
+import { readFileSync } from 'node:fs'
+
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
-import { AppSidebar } from './AppSidebar'
+import { AGENT_TITLE_PREFIXES, AppSidebar } from './AppSidebar'
 import { SidebarProvider } from '@/components/ui/sidebar'
 import { groupRows, readSeen, viewedSeen } from '@/lib/useSnapshot'
 import type { SnapshotRow, SnapshotState } from '@/lib/useSnapshot'
@@ -313,12 +315,16 @@ describe('AppSidebar', () => {
  * this replaced -- so every case below asserts `kind` as well as text.
  */
 describe('what a pane row says', () => {
+  // What tmux actually reports for a working claude pane, glyph and all, and
+  // what the row is expected to show once the agent's own branding comes off --
+  // see "the agent's own branding" below for that rule on its own.
   const task = '✳ Categorización productos southafrica'
+  const shown = 'Categorización productos southafrica'
 
   it('puts the pane title on its own line, not in the command capsule', () => {
     const markup = render(fromRows([row({ command: 'claude', title: task })]))
     expect(rowText(markup)).toEqual([
-      expect.objectContaining({ kind: 'title', text: task }),
+      expect.objectContaining({ kind: 'title', text: shown }),
     ])
     // Not "claude" anywhere: the point of the row is that three agents no
     // longer read alike.
@@ -396,10 +402,10 @@ describe('what a pane row says', () => {
     // where the rest stays reachable with no hover at all.
     const [said] = rowText(markup)
     expect(said.tag).toContain('row-line')
-    expect(said.tag).toContain(`title="${task}"`)
+    expect(said.tag).toContain(`title="${shown}"`)
     // The marquee moves a child of the clip, not the clip: one box cannot both
     // hide its overflow and slide inside itself.
-    expect(markup).toContain(`>${task}</span></span>`)
+    expect(markup).toContain(`>${shown}</span></span>`)
   })
 
   it('draws the title quieter than the name it sits under', () => {
@@ -431,9 +437,193 @@ describe('what a pane row says', () => {
       ]),
     )
     expect(rowText(markup)).toEqual([
-      expect.objectContaining({ kind: 'title', text: '✳ one' }),
-      expect.objectContaining({ kind: 'title', text: '✳ two' }),
+      expect.objectContaining({ kind: 'title', text: 'one' }),
+      expect.objectContaining({ kind: 'title', text: 'two' }),
     ])
+  })
+})
+
+/**
+ * The agent's own branding, which the row is already saying in the mark beside
+ * the text.
+ *
+ * Every fixture below is a title an agent really writes -- the glyphs and the
+ * separators were read off the live panes and out of the shipping binaries, and
+ * `AGENT_TITLE_PREFIXES` records where each one came from. What is pinned here
+ * is the *narrowness* of the rule, because that is the half that can do damage:
+ * the wrong agent, the second prefix, the near-miss glyph and the row that ends
+ * up with nothing to say are each their own test.
+ */
+describe("the agent's own branding", () => {
+  /** What the one row of a one-row snapshot says, and on which line. */
+  const rowSaid = (over: Partial<SnapshotRow>) => rowText(render(fromRows([row(over)])))[0]
+
+  it('takes claude\'s glyph off the front of the title', () => {
+    // Measured: `tmux display -p '#{pane_title}'` on a live claude pane gives
+    // `e2 9c b3 20` and then the words.
+    const markup = render(fromRows([row({ command: 'claude', title: '✳ Issue 13846 en master' })]))
+    expect(rowText(markup)[0]).toMatchObject({ kind: 'title', text: 'Issue 13846 en master' })
+    // Nowhere in the row, not even in the tooltip: the tooltip is the overflow
+    // of this line, so it has to be the same text.
+    expect(markup).not.toContain('✳')
+  })
+
+  it("takes opencode's and pi's off too", () => {
+    // Both measured the same way. opencode's bar is an ASCII pipe, `4f 43 20 7c
+    // 20`, and pi's separator is a hyphen with a space on each side.
+    expect(rowSaid({ command: 'opencode', title: 'OC | Revisión de worktrees' })).toMatchObject({
+      kind: 'title',
+      text: 'Revisión de worktrees',
+    })
+    expect(rowSaid({ command: 'pi', title: 'π - master' })).toMatchObject({
+      kind: 'title',
+      text: 'master',
+    })
+    // opencode's bar with a box-drawing `│` instead: not what the binary
+    // writes, but what the report quoted, and one extra table entry is cheaper
+    // than finding out a font lied.
+    expect(rowSaid({ command: 'opencode', title: 'OC │ Revisión de worktrees' })).toMatchObject({
+      kind: 'title',
+      text: 'Revisión de worktrees',
+    })
+  })
+
+  it('covers every frame claude animates that glyph through', () => {
+    // The prefix is only worth removing if it stays removed while the agent is
+    // working, which is exactly when the row is being looked at. Each of these
+    // can lead a title: `✳` when it holds still, `◐ ◑` while it animates, and
+    // the older spinner set the report saw. A list that covers only what a
+    // parked agent shows would put the glyph back the moment one started.
+    for (const glyph of ['✳', '◐', '◑', '·', '✢', '✶', '✻', '✽']) {
+      expect(rowSaid({ command: 'claude', title: `${glyph} Compiling the parser` })).toMatchObject({
+        kind: 'title',
+        text: 'Compiling the parser',
+      })
+    }
+  })
+
+  it('leaves a pane that is not one of Go\'s agents completely alone', () => {
+    // Live on this machine: pane %31 runs `zsh` and is still titled `π -
+    // browsers` from the pi that ran there. That row carries no mark, so the
+    // branding is not redundant with anything -- and the lookup is exact, the
+    // way `tmux.KnownAgent` is, so neither `claude-helper` nor `CLAUDE` is
+    // claude.
+    // `constructor` and `toString` are legal filenames, and a plain-object
+    // lookup answers for both of them; the table is asked whether it *owns* the
+    // key, so neither one reaches the loop.
+    for (const command of [
+      'zsh',
+      'bash',
+      'vim',
+      'claude-helper',
+      'CLAUDE',
+      'Pi',
+      'constructor',
+      'toString',
+    ]) {
+      expect(rowSaid({ command, title: 'π - browsers' })).toMatchObject({
+        kind: 'title',
+        text: 'π - browsers',
+      })
+      expect(rowSaid({ command, title: '✳ Issue 13846 en master' })).toMatchObject({
+        kind: 'title',
+        text: '✳ Issue 13846 en master',
+      })
+    }
+  })
+
+  it('takes one prefix off, never two', () => {
+    // A doubled glyph is not something an agent writes; it is the shape a
+    // greedy rule takes when it meets a title that opens with a real one.
+    expect(rowSaid({ command: 'claude', title: '✳ ✻ Issue 13846' })).toMatchObject({
+      kind: 'title',
+      text: '✻ Issue 13846',
+    })
+    expect(rowSaid({ command: 'pi', title: 'π - π - master' })).toMatchObject({
+      kind: 'title',
+      text: 'π - master',
+    })
+  })
+
+  it('will not strip a prefix a different agent writes', () => {
+    expect(rowSaid({ command: 'claude', title: 'π - master' })).toMatchObject({
+      kind: 'title',
+      text: 'π - master',
+    })
+    expect(rowSaid({ command: 'pi', title: '✳ Issue 13846' })).toMatchObject({
+      kind: 'title',
+      text: '✳ Issue 13846',
+    })
+    expect(rowSaid({ command: 'opencode', title: '✳ Issue 13846' })).toMatchObject({
+      kind: 'title',
+      text: '✳ Issue 13846',
+    })
+  })
+
+  it('will not strip something that merely starts like a prefix', () => {
+    // `✱` is not `✳`, `•` is not `·`, and neither a glyph run together with the
+    // first word nor one followed by punctuation is the branding. Matching is
+    // literal and the separator is required, so all four keep what they had.
+    for (const title of ['✱ Issue 13846', '• Issue 13846', '✳Issue 13846', '✳: Issue 13846']) {
+      expect(rowSaid({ command: 'claude', title })).toMatchObject({ kind: 'title', text: title })
+    }
+  })
+
+  it('falls back to the command when the title is nothing but branding', () => {
+    // A pi between sessions writes `π - ` and nothing else. Stripped, that row
+    // has nothing to say, so it takes the fallback the hostname and the echoed
+    // command already take -- and, crucially, does not grow a dim empty second
+    // line where the title used to be.
+    const markup = render(fromRows([row({ command: 'pi', title: 'π - ' })]))
+    expect(rowText(markup)[0]).toMatchObject({ kind: 'command', text: 'pi' })
+    expect(markup).not.toContain('row-line')
+    // The same for a lone claude glyph.
+    const claude = render(fromRows([row({ command: 'claude', title: '✳' })]))
+    expect(rowText(claude)[0]).toMatchObject({ kind: 'command', text: 'claude' })
+    expect(claude).not.toContain('row-line')
+  })
+
+  it('judges whether the title earned the row before stripping, not after', () => {
+    // `master` on its own is hostname-shaped and would lose to the command; `π
+    // - master` is not, and is the whole reason the row exists. Stripping is
+    // display only, so the row keeps the one word it had to say.
+    expect(rowSaid({ command: 'pi', title: 'π - master' })).toMatchObject({
+      kind: 'title',
+      text: 'master',
+    })
+    expect(rowSaid({ command: 'claude', title: '✳ devbox' })).toMatchObject({
+      kind: 'title',
+      text: 'devbox',
+    })
+  })
+
+  it('leaves the label alone -- those are the user\'s own words', () => {
+    // A label is typed, not generated, so a glyph in one is there because
+    // somebody put it there. Stripping applied to whatever `paneText` returns,
+    // rather than to the title branch, would edit it.
+    expect(rowSaid({ command: 'claude', label: '✳ prod db', title: '✳ Issue 13846' })).toMatchObject(
+      { kind: 'title', text: '✳ prod db' },
+    )
+  })
+
+  it('quotes the blocked question exactly, glyph and all', () => {
+    // The daemon quotes the dialog it read; this is the agent asking, not the
+    // agent branding itself, and the same one-level-too-high mistake would cut
+    // the first word off a question. Shaped like a title on purpose.
+    const markup = render(
+      fromRows([
+        row({
+          command: 'claude',
+          title: '✳ Issue 13846',
+          agentState: 'blocked',
+          question: { text: '✳ Overwrite src/main.ts?', choices: ['Yes', 'No'] },
+        }),
+      ]),
+    )
+    expect(rowText(markup)[0]).toMatchObject({
+      kind: 'title',
+      text: '✳ Overwrite src/main.ts?',
+    })
   })
 })
 
@@ -749,7 +939,7 @@ describe('the blocked question', () => {
         }),
       ]),
     )
-    expect(rowText(markup)[0]).toMatchObject({ kind: 'title', text: '✳ Fixing the build' })
+    expect(rowText(markup)[0]).toMatchObject({ kind: 'title', text: 'Fixing the build' })
     expect(dots(markup)).toEqual(['blocked', 'blocked'])
   })
 
@@ -764,7 +954,7 @@ describe('the blocked question', () => {
         }),
       ]),
     )
-    expect(rowText(markup)[0]).toMatchObject({ kind: 'title', text: '✳ Fixing the build' })
+    expect(rowText(markup)[0]).toMatchObject({ kind: 'title', text: 'Fixing the build' })
   })
 })
 
@@ -842,5 +1032,44 @@ describe('management affordances', () => {
     // with the tab.
     const markup = render(fromRows([row({ groupKey: 'dead', appOwned: true })]))
     expect(markup).not.toContain('New window in')
+  })
+})
+
+/**
+ * The one list that decides who is an agent lives in Go, and this file's
+ * branding table has to stay under it.
+ *
+ * Same invariant, and the same one-directional reading, as
+ * `AgentIcon.test.tsx`: `tmux.Agents` gates capture, state and mark together,
+ * so a command Go does not call an agent must never have its title edited here.
+ * A *subset*, not equality -- Go may name an agent whose branding has not been
+ * established (e2e runs a scripted fake one), and that pane correctly keeps its
+ * title whole.
+ */
+describe('contract with the daemon', () => {
+  it('only strips prefixes from commands Go classifies as agents', () => {
+    const source = readFileSync(new URL('../../../internal/tmux/agent.go', import.meta.url), 'utf8')
+    const m = source.match(/Agents\s*=\s*\[\]string\{([^}]*)\}/)
+    if (!m) throw new Error('Agents not found in internal/tmux/agent.go')
+    const agents = [...m[1].matchAll(/"([^"]*)"/g)].map((q) => q[1])
+    expect(agents.length).toBeGreaterThan(0)
+    for (const command of Object.keys(AGENT_TITLE_PREFIXES)) {
+      expect(agents).toContain(command)
+    }
+  })
+
+  it('gives every agent it knows a prefix that could actually match', () => {
+    // An empty string is a prefix of everything, and a table entry that is one
+    // would silently strip nothing while looking like it strips everything.
+    for (const [command, prefixes] of Object.entries(AGENT_TITLE_PREFIXES)) {
+      expect(prefixes.length, command).toBeGreaterThan(0)
+      for (const prefix of prefixes) {
+        expect(prefix, command).not.toBe('')
+        // The separator belongs to the rule, not the table -- carrying one here
+        // would stop `withoutAgentPrefix` recognising a title trimmed down to
+        // nothing but its branding.
+        expect(prefix, command).toBe(prefix.trim())
+      }
+    }
   })
 })

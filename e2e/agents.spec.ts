@@ -147,6 +147,11 @@ test('a pane title gets a line of its own, cut, and scrolled only when it is too
   // Long enough to be cut in a 16rem sidebar at 12px, and short enough to be a
   // title a coding agent would really write.
   const LONG = '✳ Categorización de productos de southafrica en el catálogo'
+  // What the row is expected to *show*: claude's own glyph comes off the front,
+  // because the row is already saying which agent this is in the mark beside
+  // the text -- see `AGENT_TITLE_PREFIXES` in AppSidebar. tmux is still told
+  // the whole thing, so this also pins that the strip is display only.
+  const LONG_SHOWN = 'Categorización de productos de southafrica en el catálogo'
   // Not hostname-shaped -- it has a space -- so it is shown, and comfortably
   // narrower than the row.
   const SHORT = 'in tests'
@@ -168,7 +173,8 @@ test('a pane title gets a line of its own, cut, and scrolled only when it is too
 
   const long = windowRow(page, 'catalog')
   const short = windowRow(page, 'unit')
-  await expect(long).toContainText(LONG)
+  await expect(long).toContainText(LONG_SHOWN)
+  await expect(long).not.toContainText('✳')
   await expect(short).toContainText(SHORT)
 
   // A second line, not the capsule the command has. The capsule is `h-5` and
@@ -266,7 +272,7 @@ test('a pane title gets a line of its own, cut, and scrolled only when it is too
   await page.emulateMedia({ reducedMotion: 'reduce' })
   const still = await travel(long)
   expect(still.moved, 'no marquee under prefers-reduced-motion').toBeNaN()
-  await expect(long.locator('.row-line')).toHaveAttribute('title', LONG)
+  await expect(long.locator('.row-line')).toHaveAttribute('title', LONG_SHOWN)
   await page.emulateMedia({ reducedMotion: 'no-preference' })
 
   // The pane rows of a split window are a different button with different

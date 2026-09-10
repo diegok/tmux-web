@@ -24,6 +24,11 @@
  * a second line to say `zsh` on would cost a line per row to say nothing. Only
  * the rows with something to say grow.
  *
+ * A title also arrives with the agent's own branding on the front of it -- `✳ `,
+ * `OC | `, `π - ` -- which the row is already saying in the mark beside it, so
+ * one recognised prefix comes off before the title is shown. That is display
+ * only and it is per agent: see `AGENT_TITLE_PREFIXES`.
+ *
  * ## Blocks
  *
  * A session group is ruled off from the one above it. A rule is 1px of height
@@ -710,6 +715,106 @@ function RetryButton({ onRefresh }: { onRefresh: () => void }) {
  */
 const HOSTNAME_LIKE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
+/**
+ * Each agent's own branding, at the head of the titles it writes.
+ *
+ * The row already says which agent this is: `AgentIcon` draws the project's own
+ * mark a few pixels to the left of this text. Saying it again in words spends
+ * the *front* of a 16rem line repeating the icon -- and the front of the line is
+ * the half that survives the ellipsis, so the redundant characters are the ones
+ * that always show and the useful ones are what gets cut.
+ *
+ * Keyed by `pane_current_command`, and a subset of Go's `tmux.Agents` exactly as
+ * `AGENT_MARKS` is: a pane that is not a known agent has its title left alone.
+ * That is not a formality. A shell sitting where an agent last ran keeps the
+ * agent's title -- `zsh` titled `π - browsers` is on this machine right now --
+ * and that row has no mark beside it, so there is nothing there for the branding
+ * to be redundant with.
+ *
+ * Each entry is the branding *without* its trailing space; the separator is the
+ * matching rule's, not the table's, so that a title trimmed down to nothing but
+ * its branding still matches. See `withoutAgentPrefix`.
+ *
+ * ## Where each entry came from
+ *
+ * Every string below was read out of the binary that writes it and checked
+ * against the bytes of a live pane title, because a prefix table that is a
+ * little bit wrong either does nothing or eats a word.
+ *
+ * **claude** -- `claude.exe` is Bun-compiled but its JS is literal inside, and
+ * it builds the title as `` `${frame} ${text}` `` out of
+ * `var eD=["◐","◑"],tD="✳"`: `tD` when it is holding still, `eD[n]` when it is
+ * animating, a frame every 960ms. Under a multiplexer the animation is gated
+ * off and the title holds at `✳` -- which is what sampling the live panes gave,
+ * 1500 reads of `#{pane_title}` over ten minutes with both claude panes mid-run
+ * and `✳` every time. That gate is a feature flag, so the two animated frames
+ * are listed anyway: the prefix coming back the moment an agent starts working
+ * is precisely the moment it is being looked at.
+ *
+ * The rest -- `· ✢ ✶ ✻ ✽` -- are the frames of the *in-pane* spinner in the
+ * same binary (three arrays of them, one per terminal). That is where the
+ * `✻ ✽ ✳ ✶` set in the report comes from; whether a build ever drove the title
+ * off it or the report is reading the glyph on the `Ruminating…` line instead,
+ * this file has no evidence either way, and it does not need any: five strings
+ * cost nothing and make the entry version-proof in both directions. Note the
+ * design doc's own correction on the same glyph -- a `✳` that is *assumed* to
+ * animate has already been wrong here once, so the safe move is to cover the
+ * set and pin it.
+ *
+ * Not `*`. The same spinner has an ASCII-asterisk frame for terminals that are
+ * not ghostty, and it has never been a title glyph. A line of prose that opens
+ * `* ` is ordinary; a line that opens `✻ ` is not. It is the one candidate that
+ * could take a word off a real title, and it buys nothing observable.
+ *
+ * **opencode** -- `` setTerminalTitle(`OC | ${title}`) ``, an ASCII pipe, which
+ * is what the live pane's title bytes say too (`4f 43 20 7c 20`). The report
+ * quotes it with a box-drawing `│`; nothing ships that today, but one extra
+ * string makes sure a font that draws `|` like `│` cannot turn a mis-read into
+ * a bug.
+ *
+ * **pi** -- `APP_TITLE` is `"π"` and the title is `` `${APP_TITLE} - ${cwd}` ``,
+ * so `π -` (live bytes `cf 80 20 2d 20`). `APP_TITLE` becomes the *configured*
+ * name when pi is renamed in its config, and that name is unknowable from here,
+ * so a renamed pi keeps its whole title. Showing a prefix is a much smaller
+ * failure than guessing at one.
+ */
+export const AGENT_TITLE_PREFIXES: Record<string, readonly string[]> = {
+  claude: ['✳', '◐', '◑', '·', '✢', '✶', '✻', '✽'],
+  opencode: ['OC |', 'OC │'],
+  pi: ['π -'],
+}
+
+/**
+ * A title with its agent's branding taken off the front, or the title unchanged.
+ *
+ * **One prefix, matched literally, only for the agent that writes it, and only
+ * where a space or the end of the title follows it.** No character class and no
+ * repetition: `✳ ✻ done` loses the `✳` and keeps the `✻`, `✱ done` keeps its
+ * glyph because `✱` is not `✳`, `✳done` keeps its because nothing separates the
+ * two, and `π - x` on a claude pane keeps its because claude does not write it.
+ * Getting a redundant glyph off the front of a row is worth a little; taking the
+ * first word off a real title is worth a good deal less than nothing, and a rule
+ * loose enough to do the first is loose enough to do the second.
+ *
+ * "Or the end of the title" is what makes `π - `, whose caller has already
+ * trimmed it to `π -`, come back as the empty string rather than as itself --
+ * which is the answer `paneText` needs in order to fall back rather than render
+ * a blank line.
+ *
+ * `Object.hasOwn` rather than a bare lookup: a command is whatever binary the
+ * user happened to run, and `constructor` is a legal filename.
+ */
+function withoutAgentPrefix(title: string, command: string): string {
+  if (!Object.hasOwn(AGENT_TITLE_PREFIXES, command)) return title
+  for (const prefix of AGENT_TITLE_PREFIXES[command]) {
+    if (!title.startsWith(prefix)) continue
+    const rest = title.slice(prefix.length)
+    if (rest === '') return ''
+    if (rest.startsWith(' ')) return rest.trim()
+  }
+  return title
+}
+
 /** What a pane row says about itself, and which line it says it on. */
 interface PaneText {
   text: string
@@ -748,6 +853,26 @@ interface PaneText {
  * pane carries, and a title that is just the command again. Both fall through
  * to the command, so those rows look exactly as they did before this existed --
  * one line, one capsule -- and only the rows with something to say grow one.
+ *
+ * ## Earned on the raw title, shown without the branding
+ *
+ * A title that earns the row then loses its agent's own prefix -- see
+ * `AGENT_TITLE_PREFIXES`. Both of the tests above are made against the title
+ * tmux reported, deliberately, and only the *display* is stripped: `π - master`
+ * earns its row because `π - master` has a space in it, and re-testing the
+ * `master` that is left would fail the hostname rule and drop the row back to a
+ * `pi` capsule -- losing the one word it had to say to a rule written for
+ * `thinkpad`.
+ *
+ * The one thing stripping may not do is empty the row. A title that is nothing
+ * but branding -- `π - `, a pi with no session yet -- has nothing left once the
+ * branding goes, so it falls through to the command, the same fallback the
+ * hostname and the echoed command already take. A dim, empty second line would
+ * be a worse row than the glyph was.
+ *
+ * Nothing else on the way in is touched. A label is the user's own words and a
+ * blocked question is the agent's own, quoted; neither is branding, and neither
+ * is something this may edit.
  */
 function paneText(
   pane: Pick<PaneNode, 'command' | 'title' | 'label' | 'agentState' | 'question'>,
@@ -773,7 +898,8 @@ function paneText(
   const title = pane.title.trim()
   const command = pane.command.trim()
   if (title !== '' && !HOSTNAME_LIKE.test(title) && title.toLowerCase() !== command.toLowerCase()) {
-    return { text: title, fromCommand: false, tooltip: title }
+    const text = withoutAgentPrefix(title, command)
+    if (text !== '') return { text, fromCommand: false, tooltip: text }
   }
   return { text: pane.command, fromCommand: true }
 }

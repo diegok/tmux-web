@@ -494,6 +494,44 @@ Match the **bottommost** box-drawing dialog in the capture, and require the stru
 
 **Step 4: Run, expect PASS. Commit.**
 
+**What shipped, per agent.** Three captures, and the table per agent earned
+itself: no two of them share a structural signal.
+
+| | corners | rules `─` | gutter `┃` | box `│` | numbered |
+| --- | --- | --- | --- | --- | --- |
+| claude | 0 | 100 | 0 | 0 | 3 |
+| opencode | 0 | 0 | 18 | 0 | 0 |
+| pi | 4 | 319 | 0 | 60 | 4 |
+
+claude is a region between horizontal rules holding a cursored numbered choice
+under a line that asks. opencode is a left-guttered block whose first line says
+"Permission required". **pi is different in kind: it has no permission dialog at
+all.** It asks through a tool, and the tool renders a two-pane selector inside a
+closed box — the only closed box on pi's screen, and the only corners any of the
+three agents draw. It is matched on that: a numbered option highlighted inside
+the bottommost fully drawn box. The overlay is drawn *over* the transcript
+rather than replacing it, so every line carries background text on both sides of
+the box and only the box's own first column is read.
+
+Two judgement calls on pi, both argued in `blocked.go`:
+
+- **A picker the operator opened themselves lights the badge too.** The pane
+  really is waiting on a keystroke. The only thing that would separate the two
+  is the tool name pi writes into the top border, and that name is not stable —
+  the capture says `ask_user`, the extension is `pi-ask-user`, this document
+  says `ask_question` — so matching it would miss every question raised by a
+  tool named differently.
+- **Nothing reads the key hint line.** It is the most style-volatile line on the
+  screen, it adds nothing over the highlight, and matching it loosely would fire
+  on any pane whose output quotes pi's own help.
+
+**pi's spinner keeps animating behind the overlay**, so churn never settles
+while it waits. Confirmed rather than assumed: blocked is decided on every
+capture with no idle gate and overrides churn's verdict (Task 6), and a poller
+test drives pi's own spinner frames through the real capture to pin that the
+badge survives a screen that never stops changing — and that no finish edge is
+stamped underneath it.
+
 ---
 
 ### Task 5: The blocked question
@@ -525,6 +563,23 @@ grammar changes the test says so and the fixture becomes recordable. The
 property the plan actually wanted -- a blocked state surviving a failed
 extraction -- is structural in Task 6's poller: the state comes from IsBlocked
 and the question is assigned separately, and a nil question changes nothing.
+
+**opencode and pi both produce that screen for real**, from opposite directions:
+opencode's badge comes from its header and its quote from the request line
+below, so losing the second leaves the first standing; and **pi scrolls the
+prompt inside its own box** -- the capture carries the `↓` indicator that proves
+it -- so a question long enough to need reading can be off the top of the box
+while its options are still on screen.
+
+**pi's grammar**, shipped as its own commit after detection: the options are the
+numbered lines of the box's first column, in the order drawn, and the question
+is the nearest line ending in "?" *above* the first option. Above, because the
+box holds a whole prompt -- preamble, context, a bulleted summary -- any line of
+which can end in one, and because the option text comes from the tool, so an
+option can end in one too. The unnumbered "Type something" escape hatch is not
+an option and is never quoted. One wrong quote it will produce, stated in the
+comment rather than papered over: the filter line sits above the options, so a
+filter query typed with a question mark on the end is what gets quoted.
 
 **Step 1: The wire shape**
 

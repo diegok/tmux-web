@@ -27,6 +27,13 @@
  * **It keeps no model of tmux.** The response renders directly; nothing is
  * merged across polls except the last good copy, so there is no client-side
  * state that can drift from the server.
+ *
+ * The one exception, and it is deliberate: **`seen`** -- which finished runs
+ * this device has already been shown. That is not a model of tmux, it is a
+ * model of *this browser*, which is exactly why it cannot live on the daemon:
+ * the phone must keep its badge after the laptop has cleared its own. It is
+ * keyed on the tmux server generation so that it cannot outlive the panes it
+ * describes. See `isDone`.
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -136,6 +143,15 @@ export interface SnapshotQuestion {
 /** The body of `GET /api/snapshot`, normalised. */
 export interface SnapshotPayload {
   panes: SnapshotRow[]
+  /**
+   * The tmux server's generation (`#{start_time}`), or "" when no tmux server
+   * is running -- and "" too from a daemon too old to send the field.
+   *
+   * Every `seen` key is prefixed with it, because pane ids restart at `%0` when
+   * the tmux server does: without it a remembered `%3` from the previous server
+   * silently suppresses the done badge on an unrelated new pane.
+   */
+  serverStart: string
   /** The daemon's most recent poll failed; these rows predate it. */
   stale: boolean
   /** Why that poll failed, when it did. */
@@ -175,7 +191,12 @@ export function parseSnapshot(body: unknown): SnapshotPayload {
   if (typeof body !== 'object' || body === null) {
     throw new SnapshotFetchError('the snapshot response was not an object')
   }
-  const raw = body as { panes?: unknown; stale?: unknown; error?: unknown }
+  const raw = body as {
+    panes?: unknown
+    serverStart?: unknown
+    stale?: unknown
+    error?: unknown
+  }
   let panes: SnapshotRow[]
   if (raw.panes === undefined || raw.panes === null) {
     panes = []
@@ -186,6 +207,9 @@ export function parseSnapshot(body: unknown): SnapshotPayload {
   }
   return {
     panes,
+    // Anything that is not a string is no generation at all, and "" is the
+    // documented "cannot key a `seen` entry safely" value -- see `isDone`.
+    serverStart: typeof raw.serverStart === 'string' ? raw.serverStart : '',
     stale: raw.stale === true,
     error: typeof raw.error === 'string' && raw.error !== '' ? raw.error : null,
   }
@@ -238,6 +262,12 @@ export interface PaneNode {
   /** tmux's active pane within this window. */
   active: boolean
   appOwned: boolean
+  /** `SnapshotRow.agentState`, carried through unchanged. "" is not a state. */
+  agentState: string
+  /** `SnapshotRow.finishedAt`: unix ms of the last working -> idle edge, or 0. */
+  finishedAt: number
+  /** `SnapshotRow.question`, present only on a blocked pane the daemon read. */
+  question?: SnapshotQuestion
 }
 
 /** A window in the tree. Panes are sub-items only when there is more than one. */
@@ -251,7 +281,24 @@ export interface WindowNode {
 
 /** A tmux session (really a session *group*) in the tree. */
 export interface SessionNode {
+  /**
+   * The session *group*: identity, the React key, and what `?session=` carries.
+   *
+   * Not what the sidebar prints. tmux freezes `session_group` at the name the
+   * group was created under, so after a rename this is the *old* name forever
+   * -- see `name`.
+   */
   key: string
+  /**
+   * The live `session_name` to display, falling back to `key` when the rows
+   * carry none.
+   *
+   * Taken from the group's first non-app-owned row, because that is the session
+   * the user made and named; a group's app-owned members are throwaways this app
+   * created and their names are generated. When every member is app-owned the
+   * first row still answers, which is better than printing a stale group key.
+   */
+  name: string
   windows: WindowNode[]
   /** No member of this group is a session the user made; see `chooseSession`. */
   appOnly: boolean
@@ -274,12 +321,26 @@ export function groupRows(rows: readonly SnapshotRow[]): SessionNode[] {
   for (const row of rows) {
     let session = sessions.get(row.groupKey)
     if (!session) {
-      session = { key: row.groupKey, windows: [], appOnly: true }
+      session = {
+        key: row.groupKey,
+        // A placeholder only until a row supplies one; the group key is the
+        // pre-rename name, so it is the last resort rather than the default.
+        name: row.sessionName || row.groupKey,
+        windows: [],
+        appOnly: true,
+      }
       sessions.set(row.groupKey, session)
     }
     // One non-app row anywhere in the group means the group has a session the
     // user can be attached to under its own name.
-    if (!row.appOwned) session.appOnly = false
+    if (!row.appOwned) {
+      // The first such row names the group. Later ones do not overwrite it:
+      // `tmux new -t work` puts a second real session in the group, and a label
+      // that flipped between two live names every poll would be worse than one
+      // that picks the first and stays there.
+      if (session.appOnly) session.name = row.sessionName || row.groupKey
+      session.appOnly = false
+    }
 
     // A colon cannot appear in a tmux session name -- tmux uses it as the
     // session:window separator and rejects one in a name -- so this is a
@@ -299,6 +360,9 @@ export function groupRows(rows: readonly SnapshotRow[]): SessionNode[] {
       label: row.label,
       active: row.paneActive,
       appOwned: row.appOwned,
+      agentState: row.agentState,
+      finishedAt: row.finishedAt,
+      question: row.question,
     })
   }
   return [...sessions.values()]
@@ -336,6 +400,253 @@ export function findPane(
  */
 export function windowTarget(window: WindowNode): string | null {
   return (window.panes.find((p) => p.active) ?? window.panes[0])?.paneId ?? null
+}
+
+// --- which agent needs you --------------------------------------------------
+//
+// The one question the app exists to answer. The daemon reports what each agent
+// pane is doing; everything below turns that into the four things a row can say
+// and rolls them up the tree, because a collapsed sidebar is the case that has
+// to work.
+
+/**
+ * The states a row can display, **most urgent first**.
+ *
+ * The order is the roll-up: a window shows the most urgent state among its
+ * panes and a session among its windows, so a blocked agent three levels down
+ * is visible without expanding anything.
+ *
+ * `done` is not one of the daemon's states. The daemon reports a *timestamp*,
+ * `finishedAt`, and `done` is what this browser makes of it -- see `isDone`.
+ */
+export const STATE_ORDER = ['blocked', 'done', 'working', 'idle'] as const
+
+/** One of `STATE_ORDER`. `""` is separate: it means nothing computed a state. */
+export type DisplayState = (typeof STATE_ORDER)[number]
+
+/**
+ * The most urgent of a set of states, or `""` when none of them is a state.
+ *
+ * `""` is skipped rather than ranked. A window of three shells and one blocked
+ * agent reads blocked; a window of three shells reads nothing at all, which is
+ * the point of the daemon leaving `agentState` empty for a pane it did not
+ * classify.
+ */
+export function mostUrgent(states: Iterable<DisplayState | ''>): DisplayState | '' {
+  // `number`, not the literal 4 a const tuple's length infers to.
+  let best: number = STATE_ORDER.length
+  for (const state of states) {
+    const rank = (STATE_ORDER as readonly string[]).indexOf(state)
+    if (rank >= 0 && rank < best) best = rank
+  }
+  return best === STATE_ORDER.length ? '' : STATE_ORDER[best]
+}
+
+/**
+ * A pane that finished since this browser last looked at it.
+ *
+ * `finishedAt` is the daemon's unix-ms stamp of the last working -> idle edge
+ * and `seen` is this device's memory of the one it has already been shown, so
+ * the badge clears per device: the phone keeps it after the laptop has cleared
+ * its own, and no per-device state ever reaches the daemon.
+ *
+ * **Without a server generation there is no `done`.** The key is
+ * `${serverStart}:${paneId}` because pane ids restart at `%0` when the tmux
+ * server does; with `serverStart` empty every pane would share one unqualified
+ * key across server restarts, and a stale `%3` would silently suppress the
+ * badge on an unrelated new pane. Refusing to compute it is the honest failure:
+ * a missing badge costs a glance, a wrong one costs trust in all of them.
+ */
+export function isDone(
+  pane: Pick<PaneNode, 'paneId' | 'finishedAt'>,
+  serverStart: string,
+  seen: SeenMap,
+): boolean {
+  if (serverStart === '' || pane.finishedAt <= 0) return false
+  return pane.finishedAt > (seen[seenKey(serverStart, pane.paneId)] ?? 0)
+}
+
+/**
+ * What one pane's dot says.
+ *
+ * `blocked` and `working` are the daemon's own answers and are reported as
+ * given. `done` refines `idle`: a finished run this browser has not looked at
+ * is the thing you want to be told about, and one it has is simply idle.
+ *
+ * A *working* pane is working even when it carries an unseen `finishedAt` --
+ * that stamp is the end of an earlier run, and the pane has since started
+ * another. Nothing is lost by saying so: the next working -> idle edge stamps a
+ * newer `finishedAt` and the badge comes back.
+ *
+ * Any other value, `""` included, is not a state. The daemon owns the list of
+ * what counts as an agent; a value this file does not know is a wire change,
+ * and rendering a dot for it would be inventing a state.
+ */
+export function paneState(
+  pane: Pick<PaneNode, 'paneId' | 'agentState' | 'finishedAt'>,
+  serverStart: string,
+  seen: SeenMap,
+): DisplayState | '' {
+  switch (pane.agentState) {
+    case 'blocked':
+      return 'blocked'
+    case 'working':
+      return 'working'
+    case 'idle':
+      return isDone(pane, serverStart, seen) ? 'done' : 'idle'
+    default:
+      return ''
+  }
+}
+
+/** The most urgent state among a window's panes. */
+export function windowState(
+  window: WindowNode,
+  serverStart: string,
+  seen: SeenMap,
+): DisplayState | '' {
+  return mostUrgent(window.panes.map((p) => paneState(p, serverStart, seen)))
+}
+
+/** The most urgent state among a session's windows. */
+export function sessionState(
+  session: SessionNode,
+  serverStart: string,
+  seen: SeenMap,
+): DisplayState | '' {
+  return mostUrgent(session.windows.map((w) => windowState(w, serverStart, seen)))
+}
+
+// --- what this browser has already looked at --------------------------------
+
+/** Where `seen` lives. One key: the map is small and read whole on every load. */
+export const SEEN_STORAGE_KEY = 'wterm-web:seen'
+
+/**
+ * `finishedAt` of the newest finish this device has been shown, per pane.
+ *
+ * Keys are `${serverStart}:${paneId}` -- never a bare pane id. Values are the
+ * daemon's unix-ms stamps, compared with `>` so that a stamp equal to the one
+ * already seen is not a new finish.
+ */
+export type SeenMap = Readonly<Record<string, number>>
+
+/** The `seen` key for one pane under one tmux server generation. */
+export function seenKey(serverStart: string, paneId: string): string {
+  return `${serverStart}:${paneId}`
+}
+
+/** Just enough of `Storage` to be swapped for a fake in a test. */
+export interface StorageLike {
+  getItem(key: string): string | null
+  setItem(key: string, value: string): void
+}
+
+/**
+ * `localStorage`, or null where there is none.
+ *
+ * Absent under vitest's node environment, and a *throw* rather than an absence
+ * in a browser with site data blocked -- Safari's private mode is the usual
+ * one. Both mean the same thing here: the device forgets which finishes it has
+ * been shown, every badge reappears once, and nothing else changes.
+ */
+function defaultStorage(): StorageLike | null {
+  try {
+    return globalThis.localStorage ?? null
+  } catch {
+    return null
+  }
+}
+
+/** Load `seen`. A corrupt or foreign value reads as empty rather than throwing. */
+export function readSeen(
+  storage: StorageLike | null = defaultStorage(),
+): SeenMap {
+  try {
+    const raw = storage?.getItem(SEEN_STORAGE_KEY)
+    if (!raw) return {}
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
+    const out: Record<string, number> = {}
+    for (const [k, v] of Object.entries(parsed)) {
+      if (typeof v === 'number' && Number.isFinite(v)) out[k] = v
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+/** Persist `seen`. A storage that refuses the write costs the memory, nothing more. */
+export function writeSeen(
+  seen: SeenMap,
+  storage: StorageLike | null = defaultStorage(),
+): void {
+  try {
+    storage?.setItem(SEEN_STORAGE_KEY, JSON.stringify(seen))
+  } catch {
+    // Quota, or a browser that blocked site data. See defaultStorage.
+  }
+}
+
+/**
+ * Record that this device has been shown `finishedAt` for one pane.
+ *
+ * Returns the map **unchanged, by reference** when there is nothing to record,
+ * so a caller can use identity to decide whether to persist and re-render. A
+ * stamp that is not newer than the one already stored is nothing to record --
+ * including `0`, which is what a pane that has never finished carries and what
+ * every pane carries again after a daemon restart rebuilds its map from
+ * nothing. Lowering an entry there would make one already-seen finish
+ * announceable a second time.
+ *
+ * Writing also drops entries from other tmux server generations: they can never
+ * match a lookup again, and this is the only moment that knows which generation
+ * is current.
+ */
+export function markSeen(
+  seen: SeenMap,
+  serverStart: string,
+  paneId: string,
+  finishedAt: number,
+): SeenMap {
+  if (serverStart === '') return seen
+  const key = seenKey(serverStart, paneId)
+  if (finishedAt <= (seen[key] ?? 0)) return seen
+  const prefix = `${serverStart}:`
+  const next: Record<string, number> = {}
+  for (const [k, v] of Object.entries(seen)) {
+    if (k.startsWith(prefix)) next[k] = v
+  }
+  next[key] = finishedAt
+  return next
+}
+
+/**
+ * `seen` with the pane this tab is looking at marked as seen.
+ *
+ * Viewing is what clears a done badge, and it is the only thing that does: the
+ * daemon is never told, so every device clears its own.
+ *
+ * Pure, and applied during render rather than in an effect, so the pane you are
+ * looking at never shows a done badge for one frame before it clears -- and so
+ * that the rule can be tested without a renderer.
+ *
+ * The active pane is looked up in `rows` rather than trusted, because a pane
+ * the snapshot no longer carries has no `finishedAt` to record -- and inventing
+ * one would suppress the badge on whatever pane inherits that id after a
+ * restart. Returns the map unchanged by reference when nothing changed.
+ */
+export function viewedSeen(
+  seen: SeenMap,
+  serverStart: string,
+  activePane: string | null,
+  rows: readonly SnapshotRow[],
+): SeenMap {
+  if (!activePane) return seen
+  const row = rows.find((r) => r.paneId === activePane)
+  if (!row) return seen
+  return markSeen(seen, serverStart, activePane, row.finishedAt)
 }
 
 /**
@@ -441,6 +752,13 @@ export interface SnapshotState {
   groups: SessionNode[]
   /** The rows behind it, in server order. */
   rows: SnapshotRow[]
+  /**
+   * The tmux server generation the rows came from; "" when none is known.
+   *
+   * Held across a failed poll along with the rows, so a hiccup cannot make
+   * every done badge reappear for one interval by dropping the key prefix.
+   */
+  serverStart: string
   /** At least one poll has succeeded, so `groups` is an answer and not a guess. */
   loaded: boolean
   /**
@@ -460,6 +778,7 @@ export interface SnapshotState {
 const EMPTY_STATE: SnapshotState = {
   groups: [],
   rows: [],
+  serverStart: '',
   loaded: false,
   stale: false,
   error: null,
@@ -589,6 +908,7 @@ export class SnapshotPoller {
     this.#emit({
       rows: unchanged ? prev.rows : payload.panes,
       groups: unchanged ? prev.groups : groupRows(payload.panes),
+      serverStart: payload.serverStart,
       loaded: true,
       stale: trouble >= TROUBLE_BEFORE_STALE,
       error: payload.error,
@@ -608,6 +928,7 @@ export class SnapshotPoller {
       // screen through a tmux restart or a lost request.
       rows: prev.rows,
       groups: prev.groups,
+      serverStart: prev.serverStart,
       loaded: prev.loaded,
       stale: trouble >= TROUBLE_BEFORE_STALE,
       error: message,
@@ -672,4 +993,52 @@ export function useSnapshot(options: UseSnapshotOptions = {}): UseSnapshotResult
 
   const refresh = useCallback(() => poller.current?.refresh(), [])
   return { ...state, refresh }
+}
+
+/**
+ * This device's memory of which finished runs it has already been shown, kept
+ * current with the pane the tab is looking at.
+ *
+ * Read from `localStorage` once, during the first render, so the first frame
+ * after a reload already has the badges right rather than showing every pane as
+ * done for a tick and then clearing them.
+ *
+ * What is *returned* is derived during render, so looking at a pane clears its
+ * badge in the same frame -- and so that the rule is testable under
+ * `react-dom/server`, where effects never run. Only the `localStorage` write is
+ * an effect, because only that is one. It is idempotent: it re-runs on its own
+ * result and `viewedSeen` answers with the same map by reference the second
+ * time.
+ *
+ * Task 14's tab badge wants this same map one level up, in App. It lives here
+ * so that the rules are testable without a renderer; hoisting the *call* is a
+ * prop, not a rewrite.
+ *
+ * **The one thing under here no unit test reaches** is that this effect is
+ * wired at all: `renderToStaticMarkup` does not run effects, and this suite has
+ * no DOM renderer by design. Everything the effect decides -- `viewedSeen`,
+ * `writeSeen`, the key format -- is tested directly; deleting the effect itself
+ * would cost the memory across a reload and nothing within a session, and it is
+ * the e2e run that would notice.
+ */
+export function useSeenPanes(
+  serverStart: string,
+  activePane: string | null,
+  rows: readonly SnapshotRow[],
+): SeenMap {
+  const [stored, setStored] = useState<SeenMap>(readSeen)
+  const seen = viewedSeen(stored, serverStart, activePane, rows)
+  useEffect(() => {
+    if (seen === stored) return
+    writeSeen(seen)
+    // oxlint react(set-state-in-effect) flags this, and it is right to ask.
+    // The answer is that `seen` *accumulates*: without folding the mark back
+    // into state, the next pane you look at would be derived from the map as it
+    // was on load and the previous pane's mark would be lost. It converges in
+    // one extra render -- `viewedSeen` then answers with the same map by
+    // reference -- and only runs when a pane you are looking at has a finish
+    // this device has not been shown, which is at most once per finished run.
+    setStored(seen)
+  }, [seen, stored])
+  return seen
 }

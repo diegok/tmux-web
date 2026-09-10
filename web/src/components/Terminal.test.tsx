@@ -219,6 +219,12 @@ function row(over: Partial<SnapshotRow> & Pick<SnapshotRow, 'sessionName'>): Sna
     paneActive: true,
     command: 'zsh',
     title: 't',
+    // A shell: the daemon computes no state for it, and "" is not a state.
+    agentState: '',
+    finishedAt: 0,
+    // Present as a key and undefined as a value: `question` is omitempty on the
+    // Go side and the wire contract compares keys.
+    question: undefined,
     ...over,
   }
 }

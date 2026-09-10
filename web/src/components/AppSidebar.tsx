@@ -10,6 +10,20 @@
  * a row and a disclosure to say nothing. The `Badge` says what the pane is: its
  * label, its title, or `pane_current_command` -- see `paneBadge`.
  *
+ * ## Which one needs you
+ *
+ * An agent pane carries its agent's mark and a state dot; a window and a
+ * session carry the most urgent state under them, `blocked > done > working >
+ * idle`, so the question is answerable without expanding anything. A pane the
+ * daemon computed no state for carries neither -- a shell is not idle, it is a
+ * shell. `done` is the one state this browser works out for itself, by
+ * comparing the daemon's `finishedAt` with what it remembers being shown; see
+ * `useSeenPanes`.
+ *
+ * A session row shows the **live session name**, never the group key it is
+ * identified by: tmux freezes `session_group` at the pre-rename name, so a
+ * sidebar labelled on it makes renaming look like it did nothing.
+ *
  * ## Responsiveness is shadcn's, not ours
  *
  * `Sidebar` collapses to icons on desktop and swaps itself for a `Sheet` drawer
@@ -27,7 +41,9 @@
  */
 
 import { Columns2, RefreshCw, SquareTerminal, TriangleAlert } from 'lucide-react'
+import type { ReactNode } from 'react'
 
+import { AGENT_MARKS, AgentIcon } from '@/components/AgentIcon'
 import { UserMenu } from '@/components/UserMenu'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -50,8 +66,15 @@ import {
 import { TooltipProvider } from '@/components/ui/tooltip'
 import type { TerminalPhase } from '@/components/Terminal'
 import { cn } from '@/lib/utils'
-import { windowTarget } from '@/lib/useSnapshot'
-import type { PaneNode, SnapshotState, WindowNode } from '@/lib/useSnapshot'
+import { paneState, sessionState, useSeenPanes, windowState, windowTarget } from '@/lib/useSnapshot'
+import type {
+  DisplayState,
+  PaneNode,
+  SeenMap,
+  SnapshotQuestion,
+  SnapshotState,
+  WindowNode,
+} from '@/lib/useSnapshot'
 
 export interface AppSidebarProps {
   /** Everything `useSnapshot` knows, including why it might be out of date. */
@@ -83,7 +106,10 @@ export function AppSidebar({
   onRefresh,
   connection = null,
 }: AppSidebarProps) {
-  const { groups, loaded } = snapshot
+  const { groups, loaded, serverStart, rows } = snapshot
+  // This device's memory of which finished runs it has already been shown, and
+  // the write that clears one: looking at a pane is what marks it seen.
+  const seen = useSeenPanes(serverStart, activePane, rows)
 
   return (
     // The tooltips on the collapsed rail are this component's, so the provider
@@ -108,7 +134,26 @@ export function AppSidebar({
               <SidebarGroupLabel
                 className={session.key === activeSession ? 'text-sidebar-foreground' : undefined}
               >
-                <span className="truncate">{session.key}</span>
+                {/*
+                  The roll-up: the most urgent state anywhere under this
+                  session. Visible only while the sidebar is expanded --
+                  shadcn fades group labels out in the icon rail -- so the
+                  window rows below carry their own, on their icons, for the
+                  collapsed case.
+                */}
+                <StateDot
+                  state={sessionState(session, serverStart, seen)}
+                  className="mr-1.5"
+                />
+                {/*
+                  The live session name, never `session.key`. tmux freezes
+                  session_group at the name the group was created under, so a
+                  sidebar keyed and labelled on it shows the pre-rename name
+                  forever -- which makes renaming from the browser look like it
+                  did nothing. The key is still the identity: it is the React
+                  key, the `?session=` value and what a click carries.
+                */}
+                <span className="truncate">{session.name}</span>
                 {session.appOnly && (
                   // The user's own session under this group name is gone; its
                   // windows are only still alive because a browser tab is holding
@@ -128,6 +173,8 @@ export function AppSidebar({
                       sessionKey={session.key}
                       activePane={activePane}
                       onSelectPane={onSelectPane}
+                      serverStart={serverStart}
+                      seen={seen}
                       // An orphaned group has no session of its own left to
                       // attach to, so a click could only start a socket the
                       // daemon answers with 404 -- and it would drop a working
@@ -171,17 +218,25 @@ function WindowItem({
   activePane,
   onSelectPane,
   reachable,
+  serverStart,
+  seen,
 }: {
   window: WindowNode
   sessionKey: string
   activePane: string | null
   onSelectPane: (paneId: string, groupKey: string) => void
   reachable: boolean
+  serverStart: string
+  seen: SeenMap
 }) {
   const split = window.panes.length > 1
   const target = windowTarget(window)
   const holdsActive = window.panes.some((p) => p.paneId === activePane)
   const label = `${window.index}: ${window.name}`
+  // The window's own roll-up. On a single-pane window that is the pane's state,
+  // which is why the pane below it gets no second dot of its own.
+  const state = windowState(window, serverStart, seen)
+  const lone = split ? undefined : window.panes[0]
   const unreachable = reachable
     ? undefined
     : 'This session was killed; its panes are only alive because a tab is holding the group open'
@@ -199,9 +254,23 @@ function WindowItem({
         onClick={() => target && onSelectPane(target, sessionKey)}
         className={holdsActive && split ? 'text-sidebar-accent-foreground' : undefined}
       >
-        {split ? <Columns2 aria-hidden /> : <SquareTerminal aria-hidden />}
+        <RowIcon
+          state={state}
+          icon={
+            split ? (
+              <Columns2 aria-hidden />
+            ) : lone && Object.hasOwn(AGENT_MARKS, lone.command) ? (
+              // The agent's own mark says more than a generic terminal glyph,
+              // and on a single-pane window this row *is* the pane. A pane
+              // running something else keeps the glyph.
+              <AgentIcon command={lone.command} />
+            ) : (
+              <SquareTerminal aria-hidden />
+            )
+          }
+        />
         <span className="truncate">{label}</span>
-        {!split && window.panes[0] && <PaneBadge pane={window.panes[0]} width="max-w-32" />}
+        {lone && <PaneBadge pane={lone} width="max-w-32" />}
       </SidebarMenuButton>
 
       {split && (
@@ -222,6 +291,21 @@ function WindowItem({
                   disabled={!reachable}
                   onClick={() => onSelectPane(pane.paneId, sessionKey)}
                 >
+                  <RowIcon
+                    state={paneState(pane, serverStart, seen)}
+                    // Null rather than an <AgentIcon> that renders nothing:
+                    // an element returning null is still an element, and
+                    // RowIcon would reserve 16px of gutter for it on every
+                    // shell row. hasOwn rather than `in` because `in` walks the
+                    // prototype, so a pane whose command happened to be
+                    // `toString` would take this branch and be handed a
+                    // function to draw.
+                    icon={
+                      Object.hasOwn(AGENT_MARKS, pane.command) ? (
+                        <AgentIcon command={pane.command} />
+                      ) : null
+                    }
+                  />
                   <span className="truncate">pane {pane.paneIndex}</span>
                   {pane.active && (
                     <span
@@ -369,6 +453,12 @@ const HOSTNAME_LIKE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 interface PaneBadgeText {
   text: string
   /**
+   * The native tooltip, when the badge has more to say than it shows. Only a
+   * blocked agent's question does: its choices are what you need in order to
+   * decide whether it is worth switching to.
+   */
+  tooltip?: string
+  /**
    * The text is `pane_current_command` -- a program name, not prose someone
    * wrote. It keeps the monospaced badge and gets no tooltip of its own: a
    * command is one short word, and on a pane row what the row's own `title=`
@@ -393,7 +483,24 @@ interface PaneBadgeText {
  * pane carries, and a title that is just the command again. Both fall through
  * to the command, so those rows look exactly as they did before this existed.
  */
-function paneBadge(pane: Pick<PaneNode, 'command' | 'title' | 'label'>): PaneBadgeText {
+function paneBadge(
+  pane: Pick<PaneNode, 'command' | 'title' | 'label' | 'agentState' | 'question'>,
+): PaneBadgeText {
+  // A blocked agent's own words outrank both. The whole app exists to answer
+  // "which one needs me, and for what", and once one of them is asking, the
+  // question is the answer -- the identity is still in the window row above it
+  // and in the agent's mark beside it. Only when the daemon actually read the
+  // dialog: detection and extraction are separate, so a restyled approval box
+  // costs the quote and keeps the state.
+  if (pane.agentState === 'blocked' && pane.question && pane.question.text.trim() !== '') {
+    const text = pane.question.text.trim()
+    return {
+      text,
+      fromCommand: false,
+      tooltip: questionTooltip(text, pane.question),
+    }
+  }
+
   const label = pane.label.trim()
   if (label !== '') return { text: label, fromCommand: false }
 
@@ -418,15 +525,111 @@ function paneBadge(pane: Pick<PaneNode, 'command' | 'title' | 'label'>): PaneBad
  * and the title is the description, so the title is what gives way.
  */
 function PaneBadge({ pane, width }: { pane: PaneNode; width: string }) {
-  const { text, fromCommand } = paneBadge(pane)
+  const { text, fromCommand, tooltip } = paneBadge(pane)
   return (
     <Badge
       variant="secondary"
-      title={fromCommand ? undefined : text}
+      title={tooltip ?? (fromCommand ? undefined : text)}
       className={cn('ml-auto truncate', width, fromCommand ? 'font-mono' : 'shrink font-normal')}
     >
       {text}
     </Badge>
+  )
+}
+
+/**
+ * The choices, under the question, in the one tooltip a badge can carry.
+ *
+ * A native `title` is what the rest of this file already uses for the overflow
+ * of a truncated badge, and it is the only tooltip a row can have without
+ * fighting the `title=` the row itself sets. Newlines are honoured by every
+ * browser's implementation of it.
+ *
+ * The choices are what make the question actionable -- "Yes / Yes, and don't
+ * ask again / No" tells you whether this is a decision or a formality -- but
+ * they are far too wide for a 16rem sidebar, so they live here rather than in
+ * the row.
+ */
+function questionTooltip(text: string, question: SnapshotQuestion): string {
+  const choices = question.choices ?? []
+  return choices.length === 0 ? text : `${text}\n\n${choices.join('\n')}`
+}
+
+/**
+ * How each state looks and what it is called.
+ *
+ * Colour is the glance and the label is the answer: the dot is 8px and carries
+ * no text, so `aria-label` is the whole of what a screen reader gets and
+ * `title` is the whole of what a user who cannot tell amber from emerald gets.
+ * Never colour alone.
+ *
+ * `working` is the only one that moves. A pulse on `blocked` would be louder
+ * than the state that is actually waiting on nobody, and four animated dots in
+ * a sidebar is a slot machine.
+ */
+const STATE_TONE: Record<DisplayState, { className: string; label: string }> = {
+  blocked: {
+    className: 'bg-amber-500',
+    label: 'blocked — waiting for an answer',
+  },
+  done: {
+    className: 'bg-emerald-500',
+    label: 'done — finished since you last looked',
+  },
+  working: { className: 'bg-sky-500 animate-pulse', label: 'working' },
+  idle: { className: 'bg-sidebar-foreground/30', label: 'idle' },
+}
+
+/**
+ * One state dot, or nothing at all.
+ *
+ * `""` renders nothing, and that is the rule the whole feature rests on: it
+ * means the daemon computed no state -- the pane is not a known agent, or the
+ * poll was taken with no browser connected -- and a dot there would be a claim
+ * about a pane nothing looked at. A shell gets no dot.
+ */
+function StateDot({ state, className }: { state: DisplayState | ''; className?: string }) {
+  if (state === '') return null
+  const tone = STATE_TONE[state]
+  return (
+    <span
+      // The hook every test in this file uses, and the one thing about the dot
+      // that is not a colour.
+      data-agent-state={state}
+      className={cn('size-2 shrink-0 rounded-full', tone.className, className)}
+      // role="img" is what gives an empty span a name a screen reader will
+      // read; aria-label alone on a generic element is ignored.
+      role="img"
+      aria-label={tone.label}
+      title={tone.label}
+    />
+  )
+}
+
+/**
+ * A row's leading icon with its state dot on the corner.
+ *
+ * The dot rides the icon rather than sitting at the end of the row because the
+ * end of the row is not there when the sidebar is collapsed: shadcn shrinks a
+ * menu button to `size-8` with `overflow-hidden`, so everything after the first
+ * 16px is clipped. This keeps "which project needs me" answerable from the icon
+ * rail, which is the case the roll-up exists for. The 4px overhang stays inside
+ * the button's own 8px padding, so it survives that clip.
+ *
+ * `icon` is null for a pane running something with no mark: an element that
+ * renders nothing is still an element, and reserving a 16px gutter on every
+ * shell row for one would be worse than the dot moving 16px left.
+ */
+function RowIcon({ state, icon }: { state: DisplayState | ''; icon: ReactNode }) {
+  // Nothing to hang a dot on, or no dot to hang: both render exactly what came
+  // in, so a row with no agent in it is the row it was before this existed.
+  if (state === '') return <>{icon}</>
+  if (!icon) return <StateDot state={state} />
+  return (
+    <span className="relative flex size-4 shrink-0 items-center justify-center">
+      {icon}
+      <StateDot state={state} className="absolute -right-1 -bottom-1" />
+    </span>
   )
 }
 

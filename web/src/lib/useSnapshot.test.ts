@@ -6,15 +6,26 @@ import {
   SNAPSHOT_URL,
   SnapshotFetchError,
   SnapshotPoller,
+  SEEN_STORAGE_KEY,
   chooseSession,
   fetchSnapshot,
   findPane,
   groupRows,
+  isDone,
+  markSeen,
+  mostUrgent,
+  paneState,
   parseSnapshot,
+  readSeen,
   resolveSession,
+  seenKey,
+  sessionState,
+  viewedSeen,
+  windowState,
   windowTarget,
+  writeSeen,
 } from './useSnapshot'
-import type { SnapshotPayload, SnapshotRow, SnapshotState } from './useSnapshot'
+import type { PaneNode, SeenMap, SnapshotPayload, SnapshotRow, SnapshotState } from './useSnapshot'
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -57,7 +68,7 @@ const scrambled: SnapshotRow[] = [
 ]
 
 function ok(payload: Partial<SnapshotPayload> & { panes: SnapshotRow[] }): SnapshotPayload {
-  return { stale: false, error: null, ...payload }
+  return { serverStart: '1757500000', stale: false, error: null, ...payload }
 }
 
 // --- the contract with the Go daemon ----------------------------------------
@@ -104,8 +115,9 @@ describe('parseSnapshot', () => {
     // The Go side returns nil for both "no panes" and "no tmux server", and
     // both are answers rather than faults. The daemon rewrites nil to [] today;
     // this is the case that must not become a thrown error if it stops.
-    expect(parseSnapshot({ panes: null })).toEqual({ panes: [], stale: false, error: null })
-    expect(parseSnapshot({})).toEqual({ panes: [], stale: false, error: null })
+    const empty = { panes: [], serverStart: '', stale: false, error: null }
+    expect(parseSnapshot({ panes: null })).toEqual(empty)
+    expect(parseSnapshot({})).toEqual(empty)
   })
 
   it('keeps the rows and the stale flag', () => {
@@ -191,6 +203,75 @@ describe('groupRows', () => {
       title: '✳ Categorización',
       label: 'prod db',
     })
+  })
+
+  it('carries the agent fields onto the pane, since the dot is made of them', () => {
+    const question = { text: 'Run `rm -rf build`?', choices: ['Yes', 'No'] }
+    const [session] = groupRows([
+      row({
+        command: 'claude',
+        agentState: 'blocked',
+        finishedAt: 900,
+        question,
+      }),
+    ])
+    expect(session.windows[0].panes[0]).toMatchObject({
+      agentState: 'blocked',
+      finishedAt: 900,
+      question,
+    })
+  })
+
+  it('names a session by its live name, never by the group key', () => {
+    // tmux freezes session_group at the name the group was created under, so
+    // after `rename-session work3 -> api` every row still carries group=work3.
+    // A sidebar labelled on the group shows the old name forever, which is what
+    // made rename from the browser look like it did nothing.
+    const [session] = groupRows([row({ groupKey: 'work3', sessionName: 'api' })])
+    expect(session.name).toBe('api')
+    // And the group key is still the identity: the React key, `?session=`, and
+    // what a click carries.
+    expect(session.key).toBe('work3')
+  })
+
+  it('takes the name from the session the user made, not from a throwaway', () => {
+    // The app's own sessions are grouped with the user's and have generated
+    // names; `list-panes -a` reports them in whatever order tmux likes.
+    const [session] = groupRows([
+      row({
+        groupKey: 'work3',
+        sessionName: 'wterm-web-1',
+        paneId: '%0',
+        appOwned: true,
+      }),
+      row({
+        groupKey: 'work3',
+        sessionName: 'api',
+        paneId: '%1',
+        appOwned: false,
+      }),
+      row({
+        groupKey: 'work3',
+        sessionName: 'wterm-web-2',
+        paneId: '%2',
+        appOwned: true,
+      }),
+    ])
+    expect(session.name).toBe('api')
+  })
+
+  it('still shows a live name when every session in the group is app-owned', () => {
+    // The user killed the namesake under an attached tab. The group key is the
+    // dead session's name; the throwaway's own name is at least a live one.
+    const [session] = groupRows([
+      row({ groupKey: 'work3', sessionName: 'wterm-web-1', appOwned: true }),
+    ])
+    expect(session.name).toBe('wterm-web-1')
+  })
+
+  it('falls back to the group key when a row carries no name at all', () => {
+    const [session] = groupRows([row({ groupKey: 'work3', sessionName: '' })])
+    expect(session.name).toBe('work3')
   })
 
   it('keeps sessions and windows in arrival order', () => {
@@ -393,6 +474,29 @@ describe('SnapshotPoller', () => {
     expect(h.last.rows).toHaveLength(4)
     expect(h.last.loaded).toBe(true)
     expect(h.last.error).toBe('network down')
+  })
+
+  it('carries the server generation through, and holds it across a failure', async () => {
+    const h = harness()
+    h.answerWith(() => ok({ panes: scrambled, serverStart: '1757500000' }))
+    h.poller.start()
+    await h.tick(0)
+    expect(h.last.serverStart).toBe('1757500000')
+
+    h.answerWith(() => {
+      throw new SnapshotFetchError('network down')
+    })
+    await h.tick()
+    // Dropping it here would key every `seen` lookup on "" for one interval,
+    // and `isDone` refuses to compute a badge without a generation -- so every
+    // done dot would blink off and back on with each hiccup.
+    expect(h.last.serverStart).toBe('1757500000')
+
+    // A restarted tmux server is a new generation, and it replaces the old one
+    // rather than being merged with it.
+    h.answerWith(() => ok({ panes: scrambled, serverStart: '1757509999' }))
+    await h.tick()
+    expect(h.last.serverStart).toBe('1757509999')
   })
 
   it('says stale only after two consecutive bad polls', async () => {
@@ -634,5 +738,265 @@ describe('SnapshotPoller', () => {
     )
     await h.tick()
     expect(h.last.groups).not.toBe(first)
+  })
+})
+
+// --- which agent needs you --------------------------------------------------
+//
+// The four states, the roll-up that makes a collapsed sidebar useful, and the
+// one of them this browser computes for itself.
+
+describe('the wire carries the tmux server generation', () => {
+  it('reads the field the daemon sends on the envelope, not on a row', () => {
+    // `seen` is keyed on it, so a rename of the Go field would silently turn
+    // every done badge off -- `isDone` refuses to compute one without it.
+    const go = goSource('internal/front/server.go')
+    const struct = go.match(/type snapshotResponse struct \{([\s\S]*?)\n\}/)
+    if (!struct) throw new Error('type snapshotResponse not found in internal/front/server.go')
+    expect(struct[1]).toContain('json:"serverStart"')
+    expect(parseSnapshot({ panes: [], serverStart: '1757500000' }).serverStart).toBe('1757500000')
+  })
+
+  it('reads anything that is not a string as no generation at all', () => {
+    // "" is the documented "cannot key a seen entry safely" value, and a daemon
+    // too old to send the field must land on it rather than on "undefined".
+    expect(parseSnapshot({ panes: [], serverStart: 12345 }).serverStart).toBe('')
+    expect(parseSnapshot({ panes: [] }).serverStart).toBe('')
+  })
+})
+
+describe('mostUrgent', () => {
+  it('ranks blocked over done over working over idle', () => {
+    // Every adjacent pair, in both argument orders, so that neither a reversed
+    // comparison nor a "first one wins" can pass.
+    const pairs = [
+      ['blocked', 'done'],
+      ['done', 'working'],
+      ['working', 'idle'],
+    ] as const
+    for (const [urgent, calm] of pairs) {
+      expect(mostUrgent([urgent, calm])).toBe(urgent)
+      expect(mostUrgent([calm, urgent])).toBe(urgent)
+    }
+    // And end to end, so a comparator that is only wrong across two ranks is
+    // caught too.
+    expect(mostUrgent(['idle', 'working', 'blocked', 'done'])).toBe('blocked')
+    expect(mostUrgent(['idle', 'working', 'done'])).toBe('done')
+  })
+
+  it('skips panes with no state rather than ranking them', () => {
+    // "" is not a state: three shells and one blocked agent is a blocked
+    // window, and three shells are nothing at all.
+    expect(mostUrgent(['', 'idle', ''])).toBe('idle')
+    expect(mostUrgent(['', '', ''])).toBe('')
+    expect(mostUrgent([])).toBe('')
+  })
+})
+
+describe('paneState', () => {
+  const seen: SeenMap = {}
+  const at = (over: Partial<PaneNode>) => ({
+    paneId: '%1',
+    agentState: '',
+    finishedAt: 0,
+    ...over,
+  })
+
+  it('renders no state for a pane the daemon did not classify', () => {
+    // A shell is not idle; it is a shell. "" means nothing computed a state --
+    // the pane is not a known agent, or nobody was watching -- and a dot there
+    // would be a claim about a pane nothing looked at.
+    expect(paneState(at({ agentState: '' }), '1', seen)).toBe('')
+    // Including when it carries a finish stamp from when it *was* an agent.
+    expect(paneState(at({ agentState: '', finishedAt: 500 }), '1', seen)).toBe('')
+  })
+
+  it('renders no state for a value it does not recognise', () => {
+    // The daemon owns the list. A fourth state arriving on the wire is a wire
+    // change, and inventing a dot for it is worse than showing none.
+    expect(paneState(at({ agentState: 'thinking' }), '1', seen)).toBe('')
+  })
+
+  it("reports the daemon's own blocked and working unchanged", () => {
+    expect(paneState(at({ agentState: 'blocked' }), '1', seen)).toBe('blocked')
+    expect(paneState(at({ agentState: 'working' }), '1', seen)).toBe('working')
+  })
+
+  it('turns an idle pane with an unseen finish into done', () => {
+    expect(paneState(at({ agentState: 'idle', finishedAt: 500 }), '1', seen)).toBe('done')
+    expect(paneState(at({ agentState: 'idle', finishedAt: 0 }), '1', seen)).toBe('idle')
+    expect(
+      paneState(at({ agentState: 'idle', finishedAt: 500 }), '1', {
+        '1:%1': 500,
+      }),
+    ).toBe('idle')
+  })
+
+  it('keeps a blocked pane blocked even when it also has an unseen finish', () => {
+    // Both are true and only one is the answer: blocked is what needs you now.
+    expect(paneState(at({ agentState: 'blocked', finishedAt: 500 }), '1', seen)).toBe('blocked')
+  })
+
+  it('keeps a working pane working even when it has an unseen finish', () => {
+    // The stamp is the end of an *earlier* run and the pane has started
+    // another. Nothing is lost: the next working -> idle edge stamps a newer
+    // finishedAt and the badge comes back.
+    expect(paneState(at({ agentState: 'working', finishedAt: 500 }), '1', seen)).toBe('working')
+  })
+})
+
+describe('isDone', () => {
+  it('keys what this browser has seen on the tmux server generation', () => {
+    // Pane ids restart at %0 when the tmux server does. A `seen` entry from the
+    // previous server must not suppress the badge on the pane that inherited
+    // its id -- which is exactly what a bare `seen["%3"]` would do.
+    const pane = { paneId: '%3', finishedAt: 500 }
+    expect(isDone(pane, '200', { '100:%3': 900 })).toBe(true)
+    expect(isDone(pane, '200', { '200:%3': 900 })).toBe(false)
+    // And the key really is `${serverStart}:${paneId}`, not some other join.
+    expect(isDone(pane, '200', { [seenKey('200', '%3')]: 900 })).toBe(false)
+  })
+
+  it('refuses to compute done at all without a generation', () => {
+    // "" is what an empty tmux server sends and what a daemon too old to send
+    // the field leaves behind. Every pane would share one unqualified key, so
+    // the honest answer is no badge: a missing one costs a glance, a wrong one
+    // costs trust in all of them.
+    expect(isDone({ paneId: '%3', finishedAt: 500 }, '', {})).toBe(false)
+  })
+
+  it('is false for a pane that has never finished', () => {
+    expect(isDone({ paneId: '%3', finishedAt: 0 }, '200', {})).toBe(false)
+  })
+
+  it('needs the finish to be strictly newer than the one already seen', () => {
+    expect(isDone({ paneId: '%3', finishedAt: 500 }, '200', { '200:%3': 499 })).toBe(true)
+    expect(isDone({ paneId: '%3', finishedAt: 500 }, '200', { '200:%3': 500 })).toBe(false)
+  })
+})
+
+describe('the roll-up', () => {
+  const pane = (over: Partial<SnapshotRow>) => row({ command: 'claude', ...over })
+
+  it('gives a window the most urgent state among its panes', () => {
+    const [session] = groupRows([
+      pane({ paneId: '%0', paneIndex: 0, agentState: 'idle' }),
+      pane({ paneId: '%1', paneIndex: 1, agentState: 'blocked' }),
+      pane({ paneId: '%2', paneIndex: 2, agentState: 'working' }),
+    ])
+    expect(windowState(session.windows[0], '1', {})).toBe('blocked')
+  })
+
+  it('gives a session the most urgent state among its windows', () => {
+    const [session] = groupRows([
+      pane({ paneId: '%0', windowIndex: 0, agentState: 'idle' }),
+      pane({
+        paneId: '%1',
+        windowIndex: 1,
+        agentState: 'idle',
+        finishedAt: 500,
+      }),
+      pane({ paneId: '%2', windowIndex: 2, agentState: 'working' }),
+    ])
+    // The middle window is the only one with an unseen finish, so the session
+    // reads done -- above working, below blocked.
+    expect(session.windows.map((w) => windowState(w, '1', {}))).toEqual(['idle', 'done', 'working'])
+    expect(sessionState(session, '1', {})).toBe('done')
+  })
+
+  it('says nothing about a session running no agents', () => {
+    const [session] = groupRows([row({ command: 'zsh' }), row({ paneId: '%1', command: 'vim' })])
+    expect(sessionState(session, '1', {})).toBe('')
+  })
+})
+
+describe('seen', () => {
+  /** A `Storage` that keeps its one value in a closure. */
+  function fakeStorage(initial: Record<string, string> = {}) {
+    const items = { ...initial }
+    return {
+      items,
+      getItem: (k: string) => items[k] ?? null,
+      setItem: (k: string, v: string) => {
+        items[k] = v
+      },
+    }
+  }
+
+  it('stores every entry under the server generation', () => {
+    const next = markSeen({}, '1757500000', '%3', 900)
+    expect(next).toEqual({ '1757500000:%3': 900 })
+    // Spelled out rather than built with seenKey, so a change to the key
+    // format has to be made here too.
+    expect(Object.keys(next)).toEqual(['1757500000:%3'])
+  })
+
+  it('drops entries from tmux servers that are gone', () => {
+    // They can never match a lookup again, and this is the only moment that
+    // knows which generation is current.
+    const next = markSeen({ '100:%3': 900, '200:%1': 5 }, '200', '%3', 950)
+    expect(next).toEqual({ '200:%1': 5, '200:%3': 950 })
+  })
+
+  it('never lowers an entry, so one finish is never announced twice', () => {
+    // A daemon restart rebuilds its map from nothing and reports finishedAt 0
+    // for every pane. Recording that would make an already-seen finish
+    // announceable again as soon as the stamp came back.
+    const seen = { '200:%3': 900 }
+    expect(markSeen(seen, '200', '%3', 0)).toBe(seen)
+    expect(markSeen(seen, '200', '%3', 900)).toBe(seen)
+    expect(markSeen(seen, '200', '%3', 901)).toEqual({ '200:%3': 901 })
+  })
+
+  it('records nothing at all without a generation to key it on', () => {
+    const seen = {}
+    expect(markSeen(seen, '', '%3', 900)).toBe(seen)
+  })
+
+  it('marks the pane the tab is looking at, and only that one', () => {
+    const rows = [
+      row({ paneId: '%0', agentState: 'idle', finishedAt: 700 }),
+      row({ paneId: '%1', agentState: 'idle', finishedAt: 900 }),
+    ]
+    expect(viewedSeen({}, '200', '%1', rows)).toEqual({ '200:%1': 900 })
+  })
+
+  it('records nothing for a pane the snapshot no longer carries', () => {
+    // Inventing a stamp here would suppress the badge on whatever pane
+    // inherits that id.
+    const seen = {}
+    expect(viewedSeen(seen, '200', '%9', [row({ paneId: '%0' })])).toBe(seen)
+    expect(viewedSeen(seen, '200', null, [row({ paneId: '%0' })])).toBe(seen)
+  })
+
+  it('round-trips through storage under one key', () => {
+    const storage = fakeStorage()
+    writeSeen({ '200:%3': 900 }, storage)
+    expect(storage.items[SEEN_STORAGE_KEY]).toBe('{"200:%3":900}')
+    expect(readSeen(storage)).toEqual({ '200:%3': 900 })
+  })
+
+  it('reads a missing, corrupt or foreign value as nothing seen', () => {
+    // Clearing browser data forgets it and every badge reappears once, which is
+    // harmless. Throwing would blank the sidebar.
+    expect(readSeen(fakeStorage())).toEqual({})
+    expect(readSeen(fakeStorage({ [SEEN_STORAGE_KEY]: 'not json' }))).toEqual({})
+    expect(readSeen(fakeStorage({ [SEEN_STORAGE_KEY]: '[1,2]' }))).toEqual({})
+    expect(readSeen(fakeStorage({ [SEEN_STORAGE_KEY]: '{"a":"soon"}' }))).toEqual({})
+    expect(readSeen(null)).toEqual({})
+  })
+
+  it('survives a storage that throws on every access', () => {
+    // Safari's private mode, and any browser told to block site data.
+    const hostile = {
+      getItem() {
+        throw new Error('SecurityError')
+      },
+      setItem() {
+        throw new Error('SecurityError')
+      },
+    }
+    expect(readSeen(hostile)).toEqual({})
+    expect(() => writeSeen({ '200:%3': 900 }, hostile)).not.toThrow()
   })
 })

@@ -556,9 +556,74 @@ func TestServeParsesItsFlags(t *testing.T) {
 	r := runCLI("serve", "--host", "tmux.example.com", "--dev", "--port", "9000", "--socket", "/tmp/x.sock")
 	r.wantCode(t, 0)
 
-	want := serveConfig{Host: "tmux.example.com", Dev: true, Port: 9000, Socket: "/tmp/x.sock"}
+	// TLSPort carries the flag's default rather than a zero, so that `serve -h`
+	// can show it. The daemon treats 0 as 443 too, for programmatic callers.
+	want := serveConfig{
+		Host: "tmux.example.com", Dev: true, Port: 9000,
+		Socket: "/tmp/x.sock", TLSPort: 443,
+	}
 	if got != want {
 		t.Fatalf("serve config = %+v, want %+v", got, want)
+	}
+}
+
+// Each mode is a different answer to "how does a browser get a trusted
+// connection", so asking for two is a contradiction rather than a preference
+// the daemon should resolve on its own.
+func TestServeRefusesContradictoryTLSModes(t *testing.T) {
+	restore := stubServe(t, func(serveConfig, io.Writer, io.Writer) error {
+		t.Fatal("the daemon must not start with contradictory TLS flags")
+		return nil
+	})
+	defer restore()
+
+	for _, args := range [][]string{
+		{"serve", "--host", "h", "--dev", "--self-signed"},
+		{"serve", "--host", "h", "--dev", "--tls-cert", "c", "--tls-key", "k"},
+		{"serve", "--host", "h", "--self-signed", "--tls-cert", "c", "--tls-key", "k"},
+	} {
+		r := runCLI(args...)
+		if r.code == 0 {
+			t.Errorf("%v was accepted, want a usage error", args[1:])
+		}
+	}
+}
+
+// A certificate without its key, or the reverse, is a misconfiguration that
+// would otherwise surface as a TLS failure at first connection.
+func TestServeRequiresCertAndKeyTogether(t *testing.T) {
+	restore := stubServe(t, func(serveConfig, io.Writer, io.Writer) error {
+		t.Fatal("the daemon must not start with half a keypair")
+		return nil
+	})
+	defer restore()
+
+	for _, args := range [][]string{
+		{"serve", "--host", "h", "--tls-cert", "only-cert.pem"},
+		{"serve", "--host", "h", "--tls-key", "only-key.pem"},
+	} {
+		if r := runCLI(args...); r.code == 0 {
+			t.Errorf("%v was accepted, want a usage error", args[1:])
+		}
+	}
+}
+
+func TestServeParsesTLSFlags(t *testing.T) {
+	var got serveConfig
+	restore := stubServe(t, func(cfg serveConfig, _, _ io.Writer) error {
+		got = cfg
+		return nil
+	})
+	defer restore()
+
+	runCLI("serve", "--host", "devbox.ss", "--self-signed", "--tls-port", "8443").wantCode(t, 0)
+	if !got.SelfSigned || got.TLSPort != 8443 || got.Dev {
+		t.Fatalf("serve config = %+v", got)
+	}
+
+	runCLI("serve", "--host", "devbox.ss", "--tls-cert", "c.pem", "--tls-key", "k.pem").wantCode(t, 0)
+	if got.TLSCert != "c.pem" || got.TLSKey != "k.pem" || got.SelfSigned {
+		t.Fatalf("serve config = %+v", got)
 	}
 }
 

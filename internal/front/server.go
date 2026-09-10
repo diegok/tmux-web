@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/user"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -772,6 +773,22 @@ type Config struct {
 
 	// PollInterval overrides DefaultPollInterval.
 	PollInterval time.Duration
+
+	// TLSCert and TLSKey serve an existing certificate instead of getting one
+	// from ACME. This is the path for an internal CA or a mkcert-issued pair,
+	// which browsers accept without a warning because the CA is already
+	// trusted -- the only way to run on an invented hostname and still get a
+	// clean padlock.
+	TLSCert, TLSKey string
+
+	// SelfSigned generates a certificate for Host on first run and reuses it
+	// afterwards. For a name no public CA can ever validate, such as an
+	// invented internal one. Browsers warn once per device until the exception
+	// is accepted.
+	SelfSigned bool
+
+	// TLSPort overrides 443, for running unprivileged.
+	TLSPort int
 }
 
 // Serve runs the daemon until ctx is cancelled.
@@ -836,10 +853,14 @@ func Serve(ctx context.Context, cfg Config) error {
 	}()
 	slog.Info("wterm-web serving", "url", d.baseURL, "state", d.statePath, "socket", socket)
 
-	if cfg.Dev {
+	switch {
+	case cfg.Dev:
 		return serveDev(ctx, cfg, d.handler)
+	case cfg.TLSCert != "" || cfg.SelfSigned:
+		return serveOwnCert(ctx, cfg, d.handler)
+	default:
+		return serveTLS(ctx, cfg, d.handler)
 	}
-	return serveTLS(ctx, cfg, d.handler)
 }
 
 // daemon is everything Serve assembles before it touches the network.
@@ -1025,6 +1046,74 @@ func serveTLS(ctx context.Context, cfg Config, handler http.Handler) error {
 		// device file is fsynced on every write.
 		return nil
 	case err := <-errc:
+		return err
+	}
+}
+
+// serveOwnCert serves a certificate this machine already has, rather than one
+// a public CA issued.
+//
+// Two cases, one code path. With --tls-cert the pair comes from an internal CA
+// or mkcert and browsers trust it silently. With --self-signed the daemon
+// generates its own and every device gets one warning to accept.
+//
+// This exists because ACME cannot help with an invented hostname: no public CA
+// will issue for a name it has no way to validate. On a VPN, that is most
+// names worth using.
+//
+// The fingerprint is logged so the exception accepted in the browser can be
+// compared against what the daemon actually served. Without that check a
+// self-signed setup trusts whatever certificate arrives, which is the whole
+// thing a certificate was supposed to prevent.
+func serveOwnCert(ctx context.Context, cfg Config, handler http.Handler) error {
+	certPath, keyPath := cfg.TLSCert, cfg.TLSKey
+
+	if certPath == "" {
+		dir := filepath.Dir(cfg.StatePath)
+		if cfg.StatePath == "" {
+			p, err := auth.DefaultPath()
+			if err != nil {
+				return err
+			}
+			dir = filepath.Dir(p)
+		}
+		var err error
+		certPath, keyPath, err = SelfSignedCert(dir, cfg.Host)
+		if err != nil {
+			return fmt.Errorf("front: generating a self-signed certificate: %w", err)
+		}
+		if fp, err := CertFingerprint(certPath); err == nil {
+			slog.Warn("serving a self-signed certificate; browsers will warn once per device",
+				"host", cfg.Host, "sha256", fp, "cert", certPath)
+		}
+	}
+
+	port := cfg.TLSPort
+	if port == 0 {
+		port = 443
+	}
+	srv := &http.Server{
+		Addr:    net.JoinHostPort("", strconv.Itoa(port)),
+		Handler: handler,
+		// No ReadTimeout or WriteTimeout on purpose: they would apply to the
+		// terminal socket. net/http clears deadlines when a handler hijacks the
+		// connection, but only after they have been set, and a WriteTimeout set
+		// here would still bound the handshake in ways a quiet terminal trips.
+		// The socket's own keepalive ping is what collects a dead peer.
+		ReadHeaderTimeout: 20 * time.Second,
+	}
+
+	errc := make(chan error, 1)
+	go func() { errc <- srv.ListenAndServeTLS(certPath, keyPath) }()
+	select {
+	case <-ctx.Done():
+		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return srv.Shutdown(shutdown)
+	case err := <-errc:
+		if errors.Is(err, http.ErrServerClosed) {
+			return nil
+		}
 		return err
 	}
 }

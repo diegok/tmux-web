@@ -46,7 +46,7 @@ const adminRequestTimeout = 15 * time.Second
 const usageText = `wterm-web -- drive the local tmux server from a browser.
 
 Usage:
-  wterm-web serve   --host <hostname> [--dev] [--port <n>]
+  wterm-web serve   --host <hostname> [--dev | --self-signed | --tls-cert F --tls-key F]
   wterm-web enroll  --name <device>
   wterm-web devices
   wterm-web revoke  <device-id>
@@ -97,10 +97,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 // things -- a state path, tmux arguments, a poll interval -- that no flag
 // exposes.
 type serveConfig struct {
-	Host   string
-	Dev    bool
-	Port   int
-	Socket string
+	Host       string
+	Dev        bool
+	Port       int
+	Socket     string
+	TLSCert    string
+	TLSKey     string
+	SelfSigned bool
+	TLSPort    int
 }
 
 // serveRun starts the daemon. A variable rather than a direct call so a test
@@ -129,14 +133,24 @@ func runDaemon(cfg serveConfig, stdout, stderr io.Writer) error {
 		Dev:         cfg.Dev,
 		Port:        cfg.Port,
 		AdminSocket: cfg.Socket,
+		TLSCert:     cfg.TLSCert,
+		TLSKey:      cfg.TLSKey,
+		SelfSigned:  cfg.SelfSigned,
+		TLSPort:     cfg.TLSPort,
 	})
 }
 
 func cmdServe(args []string, stdout, stderr io.Writer) int {
-	fset := newFlagSet("serve", stderr, "wterm-web serve --host <hostname> [--dev] [--port <n>]")
+	fset := newFlagSet("serve", stderr,
+		"wterm-web serve --host <hostname> [--dev | --self-signed | --tls-cert F --tls-key F]")
 	host := fset.String("host", "", "public hostname browsers reach this daemon on, e.g. tmux.example.com")
 	dev := fset.Bool("dev", false, "serve plain HTTP on loopback instead of getting a certificate")
 	port := fset.Int("port", 8080, "listen port in --dev mode")
+	selfSigned := fset.Bool("self-signed", false,
+		"generate and reuse a certificate for --host, for a name no public CA can validate")
+	tlsCert := fset.String("tls-cert", "", "PEM certificate to serve, e.g. from mkcert or an internal CA")
+	tlsKey := fset.String("tls-key", "", "PEM private key for --tls-cert")
+	tlsPort := fset.Int("tls-port", 443, "HTTPS port for --self-signed or --tls-cert")
 	socket := socketFlag(fset)
 	operands, code, ok := parseFlags(fset, args)
 	if !ok {
@@ -152,7 +166,31 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 		return usageError(stderr, fset, "--host is required: the hostname browsers will use, e.g. tmux.example.com")
 	}
 
-	cfg := serveConfig{Host: strings.TrimSpace(*host), Dev: *dev, Port: *port, Socket: *socket}
+	// Each mode decides how a browser gets a trusted connection, so asking for
+	// two is a contradiction rather than a preference to resolve silently.
+	modes := 0
+	for _, on := range []bool{*dev, *selfSigned, *tlsCert != "" || *tlsKey != ""} {
+		if on {
+			modes++
+		}
+	}
+	if modes > 1 {
+		return usageError(stderr, fset, "choose one of --dev, --self-signed or --tls-cert/--tls-key")
+	}
+	if (*tlsCert == "") != (*tlsKey == "") {
+		return usageError(stderr, fset, "--tls-cert and --tls-key must be given together")
+	}
+
+	cfg := serveConfig{
+		Host:       strings.TrimSpace(*host),
+		Dev:        *dev,
+		Port:       *port,
+		Socket:     *socket,
+		TLSCert:    *tlsCert,
+		TLSKey:     *tlsKey,
+		SelfSigned: *selfSigned,
+		TLSPort:    *tlsPort,
+	}
 	if err := serveRun(cfg, stdout, stderr); err != nil {
 		return fail(stderr, err)
 	}

@@ -670,7 +670,21 @@ Requirements each needing its own test against real tmux:
 - **`SplitPane` and `NewWindow` resolve the working directory server-side** from `#{pane_current_path}` and pass `-c`. The path never comes from the browser.
 - **A path that no longer exists is reported, not silently ignored.** `tmux split-window -c /gone` exits 0 and lands in `$HOME`. Stat first.
 - **Kill refuses an `@wterm_web` session** on the direct session path.
-- **Rename is visible in a subsequent snapshot** — the test that revision 1's design would have failed.
+- **Rename is visible in a subsequent snapshot** — the test that revision 1's design would have failed. **Rename twice.** A single rename against a grouped session is vacuous, measured: an implementation that addresses the session by its group key still renames the right session the first time, because the group key and the live name are equal until the first rename lands. Mutation-tested — rename-by-group-name survives the one-rename version and dies on the two-rename one.
+
+**Decided in implementation, since the plan left it open:** window names get a
+sibling, `ValidateWindowName`, sharing one `validateName(kind, name)` body with
+`ValidateSessionName`. Not a reuse, because the message reaches the owner in a
+toast and "invalid session name" on a window rename is a lie about what went
+wrong. The rules are identical and were re-probed for windows; one hazard is
+worse there — `rename-window -t @1 ''` exits 0 and *stores* the empty name,
+leaving a blank sidebar row immediately, where `new-window -n ''` is quieter
+because automatic-rename fills one in.
+
+Also measured while implementing, and worth knowing for Task 9's error mapping:
+tmux's stale-target message is not uniform. `kill-pane`, `split-window` and
+`list-panes` say `can't find pane: %99`; `set-option` says `no such pane: %99`.
+Any test pinning one string must pin the one that command emits.
 
 ---
 

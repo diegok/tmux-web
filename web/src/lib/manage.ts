@@ -279,41 +279,43 @@ export async function runManage(
 // --- what a row offers -------------------------------------------------------
 
 /**
- * The thing a menu entry was opened on.
+ * A window the wire named no `@N` for.
  *
- * A window id is carried separately rather than read off `WindowNode` because
- * **the snapshot does not carry one**: `tmux.Format` has session, window
- * *index* and pane ids, and no `#{window_id}`. Renaming and killing a window
- * are addressed by `@N` on the daemon (`ValidateWindowID`), so both are
- * unavailable until that field exists, and `rowMenu` leaves them out rather
- * than offering a menu entry that cannot work. Everything else -- new window,
- * split, zoom, and every session and pane verb -- is addressable today.
+ * The snapshot carries `windowId` now, so this is the degraded case rather than
+ * the normal one: a daemon too old to send the field. Renaming and killing a
+ * window are addressed by `@N` on the daemon (`ValidateWindowID`), which is the
+ * only thing either verb could send, so `rowMenu` leaves both out rather than
+ * offering an entry that cannot work. Everything else -- new window, split,
+ * zoom, and every session and pane verb -- is addressed by a session or a pane
+ * id and is offered regardless.
  */
 export const NO_WINDOW_ID = ''
 
+/**
+ * The thing a menu entry was opened on.
+ *
+ * Every id a verb sends is read off the nodes in here -- `session.sessionId`,
+ * `window.id`, `pane.paneId` -- and never passed alongside them, so a menu
+ * built for one row cannot address another.
+ */
 export type RowTarget =
   | { kind: 'session'; session: SessionNode }
-  | { kind: 'window'; session: SessionNode; window: WindowNode; windowId: string }
-  | { kind: 'pane'; session: SessionNode; window: WindowNode; windowId: string; pane: PaneNode }
+  | { kind: 'window'; session: SessionNode; window: WindowNode }
+  | { kind: 'pane'; session: SessionNode; window: WindowNode; pane: PaneNode }
 
 /**
  * What a window *row* in the sidebar is acting on.
  *
  * A window with one pane is that pane: the row already carries the pane's badge
  * and the pane's agent mark, and treating it as a window would leave a lone
- * pane with no kill on any row it has -- killing a window needs a `@N` the
- * snapshot does not carry. A split window is a window, and its panes have rows
- * of their own underneath.
+ * pane with no kill of its own on any row it has. A split window is a window,
+ * and its panes have rows of their own underneath.
  */
-export function rowTargetForWindow(
-  session: SessionNode,
-  window: WindowNode,
-  windowId: string = NO_WINDOW_ID,
-): RowTarget {
+export function rowTargetForWindow(session: SessionNode, window: WindowNode): RowTarget {
   const lone = window.panes.length === 1 ? window.panes[0] : undefined
   return lone
-    ? { kind: 'pane', session, window, windowId, pane: lone }
-    : { kind: 'window', session, window, windowId }
+    ? { kind: 'pane', session, window, pane: lone }
+    : { kind: 'window', session, window }
 }
 
 /** What a menu entry does when it is chosen. */
@@ -380,7 +382,12 @@ export function rowMenu(target: RowTarget, activeSession: string | null): MenuEn
     }
   }
 
-  if (target.kind === 'window' && target.windowId !== '') {
+  // Read off the node the row was built from rather than passed alongside it,
+  // exactly as a session's id is: two spellings of "which window" is one more
+  // than can ever disagree, and a rename dialog titled "api" must not send the
+  // `@N` of the window beside it.
+  if (target.kind === 'window' && target.window.id !== NO_WINDOW_ID) {
+    const windowId = target.window.id
     entries.push({
       id: 'rename-window',
       label: `Rename window "${target.window.name}"…`,
@@ -391,10 +398,10 @@ export function rowMenu(target: RowTarget, activeSession: string | null): MenuEn
           description: 'tmux renames the window itself, so the new name shows up everywhere.',
           fields: [{ name: 'name', label: 'Name', initial: target.window.name, required: true }],
           submitLabel: 'Rename',
-          build: (v) => ({ verb: 'rename-window', window: target.windowId, name: v.name }),
+          build: (v) => ({ verb: 'rename-window', window: windowId, name: v.name }),
         },
       },
-      search: `rename window ${target.window.name} ${target.windowId}`,
+      search: `rename window ${target.window.name} ${windowId}`,
     })
   }
 
@@ -563,10 +570,13 @@ export function planKill(target: RowTarget, activeSession: string | null): KillP
   }
 
   if (target.kind === 'window') {
-    if (target.windowId === '') return null
+    // Nothing to send: see NO_WINDOW_ID. `rowMenu` drops the entry on the same
+    // answer, so the dialog is never reached with one -- and this is the check
+    // that makes that true rather than a comment saying it is.
+    if (target.window.id === NO_WINDOW_ID) return null
     return {
-      id: `kill-window:${target.windowId}`,
-      action: { verb: 'kill-window', window: target.windowId },
+      id: `kill-window:${target.window.id}`,
+      action: { verb: 'kill-window', window: target.window.id },
       title: `kill window "${target.window.name}"`,
       detail: join([count(target.window.panes.length, 'pane'), agentPhrase(target.window.panes)]),
       warnings: killWarnings(target, activeSession),

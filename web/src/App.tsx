@@ -45,7 +45,8 @@ import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/s
 import { Toaster } from '@/components/ui/sonner'
 import { newSessionPrompt, runManage } from '@/lib/manage'
 import type { ManageAction, MenuIntent } from '@/lib/manage'
-import { findPane, resolveSession, useSnapshot } from '@/lib/useSnapshot'
+import { useTabBadge } from '@/lib/tabBadge'
+import { findPane, resolveSession, useSeenPanes, useSnapshot } from '@/lib/useSnapshot'
 
 /** Where this tab remembers its base session, so a reload lands where it was. */
 const SESSION_KEY = 'wterm-web:session'
@@ -156,6 +157,19 @@ export default function App() {
   const activePane = pendingPane ?? status?.pane ?? null
   const located = findPane(groups, activePane)
 
+  // This device's memory of which finished runs it has already been shown, and
+  // the write that clears one: looking at a pane is what marks it seen. It is
+  // read here rather than inside the sidebar because the tab badge counts the
+  // same `done` panes -- two copies of the map would each clear their own half,
+  // and the badge would keep counting a pane you are looking at.
+  const seen = useSeenPanes(snapshot.serverStart, activePane, snapshot.rows)
+
+  // `(2) tmux-web` and a dot on the favicon while an agent is blocked or has
+  // finished unseen. Both are late while the tab is in the background and stop
+  // entirely on a locked phone -- the accepted cost of a badge over push, which
+  // the module header spells out.
+  useTabBadge(snapshot.rows, snapshot.serverStart, seen)
+
   // The two dialogs management needs, and the reducers behind them. Both state
   // machines live in their own files, where the rules that matter -- a
   // dismissal disarming the kill, a prompt opening on the *current* name --
@@ -240,6 +254,7 @@ export default function App() {
       <SidebarProvider>
         <AppSidebar
           snapshot={snapshot}
+          seen={seen}
           activePane={activePane}
           activeSession={session}
           onSelectPane={handleSelectPane}

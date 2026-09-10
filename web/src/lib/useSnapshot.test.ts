@@ -38,6 +38,9 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     paneIndex: 0,
     appOwned: false,
     label: '',
+    // `@N`, derived from the index so that a fixture varying `windowIndex`
+    // still describes two *different* windows -- the tree keys on the id.
+    windowId: `@${over.windowIndex ?? 0}`,
     windowIndex: 0,
     windowName: 'shell',
     paneActive: true,
@@ -103,7 +106,7 @@ describe('contract with the daemon', () => {
     // and a pattern that stopped at the quote would simply not see it -- which
     // reads as "TypeScript is missing a field" rather than as a broken check.
     const tags = [...struct[1].matchAll(/json:"([^"]+)"/g)].map((m) => m[1].split(',')[0])
-    expect(tags).toHaveLength(15)
+    expect(tags).toHaveLength(16)
     expect(Object.keys(row()).sort()).toEqual(tags.sort())
   })
 })
@@ -354,6 +357,50 @@ describe('groupRows', () => {
       row({ groupKey: 'b', windowIndex: 0, paneId: '%1' }),
     ])
     expect(groups[0].windows[0].key).not.toBe(groups[1].windows[0].key)
+  })
+
+  it('carries the window id every window operation targets', () => {
+    // Without it the sidebar cannot name a window at all: PATCH and DELETE
+    // /api/windows/{id} validate an @N, so rename and kill are unreachable --
+    // which is why `rowMenu` leaves them out when this is "".
+    const [session] = groupRows([row({ windowId: '@7', windowIndex: 2 })])
+    expect(session.windows[0].id).toBe('@7')
+  })
+
+  it('keys a window on its id, so renumbering it does not replace its row', () => {
+    // `move-window` renumbers, and a kill lets a later window take the index
+    // that was freed. A key built on the index is one two different windows
+    // wear one after the other; @N is stable for the window's life.
+    const before = groupRows([
+      row({ windowId: '@7', windowIndex: 2, windowName: 'api' }),
+      row({ windowId: '@3', windowIndex: 3, windowName: 'notes', paneId: '%1' }),
+    ])
+    expect(before[0].windows.map((w) => w.key)).toEqual(['work:@7', 'work:@3'])
+
+    const after = groupRows([
+      row({ windowId: '@7', windowIndex: 0, windowName: 'api' }),
+      row({ windowId: '@3', windowIndex: 1, windowName: 'notes', paneId: '%1' }),
+    ])
+    expect(after[0].windows.map((w) => w.key)).toEqual(['work:@7', 'work:@3'])
+
+    // And the converse: a window killed and replaced at the same index is not
+    // the same row, however alike the two look.
+    const replaced = groupRows([row({ windowId: '@9', windowIndex: 2, windowName: 'api' })])
+    expect(replaced[0].windows[0].key).not.toBe(before[0].windows[0].key)
+  })
+
+  it('falls back to the index when the wire carried no id at all', () => {
+    // A daemon too old to send `windowId`. Keying every row on "" would fold a
+    // whole session into one window and lose every row but the first; the
+    // fallback keeps the tree, and the empty `id` is what keeps rename and kill
+    // off a window nothing can address.
+    const [session] = groupRows([
+      row({ windowId: '', windowIndex: 0, windowName: 'shell' }),
+      row({ windowId: '', windowIndex: 1, windowName: 'api', paneId: '%1' }),
+    ])
+    expect(session.windows.map((w) => w.name)).toEqual(['shell', 'api'])
+    expect(session.windows.map((w) => w.key)).toEqual(['work:0', 'work:1'])
+    expect(session.windows.map((w) => w.id)).toEqual(['', ''])
   })
 })
 

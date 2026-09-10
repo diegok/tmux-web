@@ -93,6 +93,20 @@ export interface SnapshotRow {
   appOwned: boolean
   /** `@wterm_label`: a name the user gave this pane, or "" when unset. */
   label: string
+  /**
+   * `@N`: the window's identity, and what every window operation targets.
+   *
+   * Here for the same reason `sessionId` is: `windowIndex` is a *position*.
+   * tmux renumbers indices on `move-window` and reuses them after a kill, so a
+   * rename or a kill addressed by index can land on a window other than the one
+   * the sidebar was showing -- and the daemon refuses it anyway, since
+   * `PATCH`/`DELETE /api/windows/{id}` validate an `@N`.
+   *
+   * "" only from a daemon too old to send the field. Nothing that needs an
+   * address is offered for such a window; see `NO_WINDOW_ID` in manage.ts.
+   */
+  windowId: string
+  /** Position in the session, in display order. Not the id -- see `windowId`. */
   windowIndex: number
   windowName: string
   /** tmux's current pane *for that window*. Windows are shared by a group. */
@@ -272,8 +286,16 @@ export interface PaneNode {
 
 /** A window in the tree. Panes are sub-items only when there is more than one. */
 export interface WindowNode {
-  /** Stable React key: group and window index, which are unique together. */
+  /**
+   * Stable React key: the group and the window's `@N`, falling back to its
+   * index where the wire carried no id. See `groupRows`.
+   */
   key: string
+  /**
+   * `@N`, and "" from a daemon too old to send one. What a rename or a kill
+   * targets -- and what their absence from the menu is decided on.
+   */
+  id: string
   index: number
   name: string
   panes: PaneNode[]
@@ -359,13 +381,32 @@ export function groupRows(rows: readonly SnapshotRow[]): SessionNode[] {
       session.appOnly = false
     }
 
-    // A colon cannot appear in a tmux session name -- tmux uses it as the
-    // session:window separator and rejects one in a name -- so this is a
-    // unique React key and still readable in devtools.
-    const windowKey = `${row.groupKey}:${row.windowIndex}`
+    // `@N` and not the index, because the index is a position: tmux renumbers
+    // on `move-window` and reuses an index after a kill, so a key built on one
+    // is a key two different windows wear one after the other -- and the
+    // sidebar sorts by index precisely because it moves. The id is stable for
+    // the window's life. A row that carries none (a daemon too old to send the
+    // field) falls back to the index rather than keying every window in the
+    // snapshot on "" and merging the whole session into one row; `id` stays ""
+    // there, which is what keeps rename and kill off it.
+    //
+    // Still scoped to the group. A colon cannot appear in a tmux session name
+    // -- tmux uses it as the session:window separator and rejects one in a name
+    // -- so this is unique across the tree and still readable in devtools. The
+    // scoping is what the index key already had and is kept deliberately: an id
+    // is unique per *server*, so an unscoped key would make grouping depend on
+    // the daemon deduping a window that two sessions share (`Dedupe` does, by
+    // pane id) rather than on anything this function can see.
+    const windowKey = `${row.groupKey}:${row.windowId || row.windowIndex}`
     let win = windows.get(windowKey)
     if (!win) {
-      win = { key: windowKey, index: row.windowIndex, name: row.windowName, panes: [] }
+      win = {
+        key: windowKey,
+        id: row.windowId,
+        index: row.windowIndex,
+        name: row.windowName,
+        panes: [],
+      }
       windows.set(windowKey, win)
       session.windows.push(win)
     }
@@ -734,6 +775,11 @@ function rowsEqual(a: readonly SnapshotRow[], b: readonly SnapshotRow[]): boolea
       x.sessionId === y.sessionId &&
       x.sessionName === y.sessionName &&
       x.paneIndex === y.paneIndex &&
+      // Not covered by windowIndex: a window killed and replaced under the same
+      // index carries a new `@N` and nothing else that moves, so without this
+      // the previous tree object survives, React reconciles nothing, and the
+      // menu goes on offering to rename and kill the window that died.
+      x.windowId === y.windowId &&
       x.windowIndex === y.windowIndex &&
       x.windowName === y.windowName &&
       x.command === y.command &&
@@ -1027,9 +1073,11 @@ export function useSnapshot(options: UseSnapshotOptions = {}): UseSnapshotResult
  * result and `viewedSeen` answers with the same map by reference the second
  * time.
  *
- * Task 14's tab badge wants this same map one level up, in App. It lives here
- * so that the rules are testable without a renderer; hoisting the *call* is a
- * prop, not a rewrite.
+ * **Called in App, not in the sidebar.** Task 14's tab badge counts the same
+ * `done` panes one level up, and two copies of this map would each clear their
+ * own half -- the badge would go on counting the pane you are looking at. App
+ * calls it and hands the answer down as a prop; the rules stay here, where they
+ * are testable without a renderer.
  *
  * **The one thing under here no unit test reaches** is that this effect is
  * wired at all: `renderToStaticMarkup` does not run effects, and this suite has

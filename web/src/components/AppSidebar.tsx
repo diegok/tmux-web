@@ -17,8 +17,8 @@
  * idle`, so the question is answerable without expanding anything. A pane the
  * daemon computed no state for carries neither -- a shell is not idle, it is a
  * shell. `done` is the one state this browser works out for itself, by
- * comparing the daemon's `finishedAt` with what it remembers being shown; see
- * `useSeenPanes`.
+ * comparing the daemon's `finishedAt` with what it remembers being shown -- see
+ * `useSeenPanes`, which App calls and passes in as `seen`.
  *
  * A session row shows the **live session name**, never the group key it is
  * identified by: tmux freezes `session_group` at the pre-rename name, so a
@@ -74,10 +74,10 @@ import {
 } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import type { TerminalPhase } from '@/components/Terminal'
-import { NO_WINDOW_ID, newSessionPrompt, newWindowAction, rowMenu, rowTargetForWindow } from '@/lib/manage'
+import { newSessionPrompt, newWindowAction, rowMenu, rowTargetForWindow } from '@/lib/manage'
 import type { MenuIntent, RowTarget } from '@/lib/manage'
 import { cn } from '@/lib/utils'
-import { paneState, sessionState, useSeenPanes, windowState, windowTarget } from '@/lib/useSnapshot'
+import { paneState, sessionState, windowState, windowTarget } from '@/lib/useSnapshot'
 import type {
   DisplayState,
   PaneNode,
@@ -92,6 +92,15 @@ import type {
 export interface AppSidebarProps {
   /** Everything `useSnapshot` knows, including why it might be out of date. */
   snapshot: SnapshotState
+  /**
+   * This device's memory of which finished runs it has already been shown --
+   * `useSeenPanes`, called in App.
+   *
+   * A prop rather than a hook call here because the tab badge counts the same
+   * `done` panes one level up: two copies of the map would each clear their own
+   * half, and the badge would go on counting the pane you are looking at.
+   */
+  seen: SeenMap
   /** The pane this tab is pinned to, from the terminal's status. */
   activePane: string | null
   /** The base session this tab is attached to. */
@@ -124,6 +133,7 @@ export interface AppSidebarProps {
 
 export function AppSidebar({
   snapshot,
+  seen,
   activePane,
   activeSession,
   onSelectPane,
@@ -131,10 +141,7 @@ export function AppSidebar({
   onIntent,
   connection = null,
 }: AppSidebarProps) {
-  const { groups, loaded, serverStart, rows } = snapshot
-  // This device's memory of which finished runs it has already been shown, and
-  // the write that clears one: looking at a pane is what marks it seen.
-  const seen = useSeenPanes(serverStart, activePane, rows)
+  const { groups, loaded, serverStart } = snapshot
 
   return (
     // The tooltips on the collapsed rail are this component's, so the provider
@@ -353,7 +360,7 @@ function WindowItem({
           {window.panes.map((pane) => (
             <SidebarMenuSubItem key={pane.paneId}>
               <RowMenu
-                target={{ kind: 'pane', session, window, windowId: NO_WINDOW_ID, pane }}
+                target={{ kind: 'pane', session, window, pane }}
                 activeSession={activeSession}
                 onIntent={onIntent}
               >

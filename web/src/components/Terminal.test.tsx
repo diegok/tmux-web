@@ -214,6 +214,9 @@ function row(over: Partial<SnapshotRow> & Pick<SnapshotRow, 'sessionName'>): Sna
     paneIndex: 0,
     appOwned: false,
     label: '',
+    // `@N`, derived from the index so that a fixture varying `windowIndex`
+    // still describes two *different* windows -- the tree keys on the id.
+    windowId: `@${over.windowIndex ?? 0}`,
     windowIndex: 0,
     windowName: 'w',
     paneActive: true,

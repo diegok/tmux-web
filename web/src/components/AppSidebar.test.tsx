@@ -18,7 +18,7 @@ import { describe, expect, it } from 'vitest'
 
 import { AppSidebar } from './AppSidebar'
 import { SidebarProvider } from '@/components/ui/sidebar'
-import { groupRows } from '@/lib/useSnapshot'
+import { groupRows, readSeen, viewedSeen } from '@/lib/useSnapshot'
 import type { SnapshotRow, SnapshotState } from '@/lib/useSnapshot'
 
 function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
@@ -30,6 +30,9 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     paneIndex: 0,
     appOwned: false,
     label: '',
+    // `@N`, derived from the index so that a fixture varying `windowIndex`
+    // still describes two *different* windows -- the tree keys on the id.
+    windowId: `@${over.windowIndex ?? 0}`,
     windowIndex: 0,
     windowName: 'shell',
     paneActive: true,
@@ -72,10 +75,11 @@ function fromRows(rows: SnapshotRow[], over: Partial<SnapshotState> = {}): Snaps
 /**
  * Render with a `localStorage` this test controls.
  *
- * `useSeenPanes` reads it during the first render, which is the only part of it
- * `renderToStaticMarkup` runs -- and it is the part that decides which panes
- * read done. There is no such global under vitest's node environment, so this
- * installs one for the duration of a render rather than mocking the module.
+ * `seen` is App's, passed in as a prop, and `render` below derives it exactly
+ * as App does -- `readSeen` off this storage, then `viewedSeen` for the pane
+ * the tab is looking at, which is what decides which panes read done. There is
+ * no such global under vitest's node environment, so this installs one for the
+ * duration of a render rather than mocking the module.
  */
 function withSeen<T>(seen: Record<string, number>, fn: () => T): T {
   const items: Record<string, string> = {
@@ -109,11 +113,16 @@ function render(
   snapshot: SnapshotState,
   over: { activePane?: string | null; activeSession?: string | null } = {},
 ): string {
+  const activePane = over.activePane ?? null
   return renderToStaticMarkup(
     <SidebarProvider>
       <AppSidebar
         snapshot={snapshot}
-        activePane={over.activePane ?? null}
+        // What `useSeenPanes` hands the sidebar from App, spelled out here
+        // rather than called: a hook's first render is all `renderToStaticMarkup`
+        // runs, and this is that render's answer.
+        seen={viewedSeen(readSeen(), snapshot.serverStart, activePane, snapshot.rows)}
+        activePane={activePane}
         activeSession={over.activeSession ?? 'work'}
         onSelectPane={() => {}}
         onRefresh={() => {}}

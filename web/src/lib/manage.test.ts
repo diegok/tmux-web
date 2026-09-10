@@ -47,6 +47,9 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     paneIndex: 0,
     appOwned: false,
     label: '',
+    // `@N`, derived from the index so that a fixture varying `windowIndex`
+    // still describes two *different* windows -- the tree keys on the id.
+    windowId: `@${over.windowIndex ?? 0}`,
     windowIndex: 0,
     windowName: 'shell',
     paneActive: true,
@@ -322,7 +325,7 @@ describe('describeAction', () => {
 describe('rowMenu', () => {
   it('offers a pane rename, a window, two splits, a zoom and a kill', () => {
     const { session, window, pane } = tree([row({ paneId: '%3' }), row({ paneId: '%4', paneIndex: 1 })])
-    const entries = rowMenu({ kind: 'pane', session, window, windowId: '', pane }, 'work')
+    const entries = rowMenu({ kind: 'pane', session, window, pane }, 'work')
     expect(ids(entries)).toEqual([
       'label-pane',
       'new-window',
@@ -339,7 +342,7 @@ describe('rowMenu', () => {
 
   it('says out loud that a zoom reaches every client', () => {
     const { session, window, pane } = tree([row()])
-    const zoom = rowMenu({ kind: 'pane', session, window, windowId: '', pane }, 'work').find(
+    const zoom = rowMenu({ kind: 'pane', session, window, pane }, 'work').find(
       (e) => e.id === 'zoom',
     )
     // Zoom is a window property, so it moves the terminal on the host too.
@@ -352,12 +355,12 @@ describe('rowMenu', () => {
       row({ paneId: '%3', paneActive: false }),
       row({ paneId: '%4', paneIndex: 1, paneActive: true }),
     ])
-    const fromPane = rowMenu({ kind: 'pane', session, window, windowId: '', pane }, 'work')
+    const fromPane = rowMenu({ kind: 'pane', session, window, pane }, 'work')
     expect(fromPane.find((e) => e.id === 'split-right')?.intent).toEqual({
       kind: 'run',
       action: { verb: 'split', pane: '%3', direction: 'right' },
     })
-    const fromWindow = rowMenu({ kind: 'window', session, window, windowId: '' }, 'work')
+    const fromWindow = rowMenu({ kind: 'window', session, window }, 'work')
     // tmux's active pane for that window -- the same pane clicking the row
     // navigates to, so the split lands where the click would have taken you.
     expect(fromWindow.find((e) => e.id === 'zoom')?.intent).toEqual({
@@ -366,19 +369,25 @@ describe('rowMenu', () => {
     })
   })
 
-  it('leaves out the window rename and kill while the snapshot carries no window id', () => {
-    const { session, window } = tree([row(), row({ paneId: '%1', paneIndex: 1 })])
-    // The daemon addresses windows by @N and validates the shape, and
-    // tmux.Format has no #{window_id} -- so there is nothing to send. A menu
-    // entry that cannot work is worse than one that is not there.
-    expect(ids(rowMenu({ kind: 'window', session, window, windowId: '' }, 'work'))).toEqual([
+  it('leaves out the window rename and kill when the wire carried no window id', () => {
+    // The daemon addresses windows by @N and validates the shape, so a window
+    // the snapshot named no id for -- one from a daemon too old to send the
+    // field -- has nothing to send. A menu entry that cannot work is worse than
+    // one that is not there.
+    const none = tree([row({ windowId: '' }), row({ paneId: '%1', paneIndex: 1, windowId: '' })])
+    expect(ids(rowMenu({ kind: 'window', ...none }, 'work'))).toEqual([
       'new-window',
       'split-right',
       'split-down',
       'zoom',
     ])
-    // And with one, both come back with no other change.
-    const withId = rowMenu({ kind: 'window', session, window, windowId: '@7' }, 'work')
+    // And with one, both come back with no other change -- and both address the
+    // id off the row rather than the index or the name.
+    const { session, window } = tree([
+      row({ windowId: '@7', windowIndex: 2, windowName: 'api' }),
+      row({ paneId: '%1', paneIndex: 1, windowId: '@7', windowIndex: 2, windowName: 'api' }),
+    ])
+    const withId = rowMenu({ kind: 'window', session, window }, 'work')
     expect(ids(withId)).toEqual([
       'rename-window',
       'new-window',
@@ -391,6 +400,15 @@ describe('rowMenu', () => {
       kind: 'kill',
       plan: { action: { verb: 'kill-window', window: '@7' } },
     })
+    const rename = withId[0]
+    if (rename.intent.kind !== 'prompt') throw new Error('rename should open a prompt')
+    expect(rename.intent.prompt.build({ name: 'billing' })).toEqual({
+      verb: 'rename-window',
+      window: '@7',
+      name: 'billing',
+    })
+    // It opens showing the window's live name, as the session rename does.
+    expect(promptValues(rename.intent.prompt)).toEqual({ name: 'api' })
   })
 
   it('renames a session by its id, not by the group key tmux froze', () => {
@@ -423,7 +441,7 @@ describe('rowMenu', () => {
     const { session, window, pane } = tree([row({ sessionId: '$1', paneId: '%3' })])
     // Only ids cross the wire: the daemon resolves #{pane_current_path} for %3
     // itself, which is what keeps working directories out of the browser.
-    expect(newWindowAction({ kind: 'pane', session, window, windowId: '', pane })).toEqual({
+    expect(newWindowAction({ kind: 'pane', session, window, pane })).toEqual({
       verb: 'new-window',
       session: '$1',
       name: '',
@@ -440,7 +458,7 @@ describe('rowMenu', () => {
 
   it('names a pane through the label option, and lets an empty name clear it', () => {
     const { session, window, pane } = tree([row({ paneId: '%3', label: 'reviewer' })])
-    const entry = rowMenu({ kind: 'pane', session, window, windowId: '', pane }, 'work').find(
+    const entry = rowMenu({ kind: 'pane', session, window, pane }, 'work').find(
       (e) => e.id === 'label-pane',
     )
     if (entry?.intent.kind !== 'prompt') throw new Error('label should open a prompt')
@@ -455,10 +473,9 @@ describe('rowMenu', () => {
 describe('rowTargetForWindow', () => {
   it('treats a single-pane window row as the pane it is', () => {
     const { session, window } = tree([row({ paneId: '%3' })])
-    // The row already shows that pane's badge and that pane's agent mark. It
-    // also has to be able to kill it: killing the *window* needs a `@N` the
-    // snapshot does not carry, so a window target would leave a lone pane with
-    // no kill on any row it has.
+    // The row already shows that pane's badge and that pane's agent mark, and
+    // it has to be able to kill it: a window target would offer to kill the
+    // window instead, leaving the pane itself with no kill on any row it has.
     expect(rowTargetForWindow(session, window)).toMatchObject({
       kind: 'pane',
       pane: { paneId: '%3' },
@@ -467,10 +484,21 @@ describe('rowTargetForWindow', () => {
   })
 
   it('treats a split window row as the window', () => {
-    const { session, window } = tree([row({ paneId: '%3' }), row({ paneId: '%4', paneIndex: 1 })])
+    const { session, window } = tree([
+      row({ paneId: '%3', windowId: '@7' }),
+      row({ paneId: '%4', paneIndex: 1, windowId: '@7' }),
+    ])
     // Its panes have rows of their own underneath, and those carry the pane
     // menus.
     expect(rowTargetForWindow(session, window).kind).toBe('window')
+    // And it keeps the window's id, or the one row that stands for the window
+    // would be the one row that cannot rename or kill it.
+    const entries = rowMenu(rowTargetForWindow(session, window), 'work')
+    expect(ids(entries)).toContain('rename-window')
+    expect(entries.at(-1)?.intent).toMatchObject({
+      kind: 'kill',
+      plan: { action: { verb: 'kill-window', window: '@7' } },
+    })
   })
 })
 
@@ -483,14 +511,14 @@ describe('planKill', () => {
       row({ paneId: '%2', paneIndex: 1, windowName: 'api' }),
       row({ paneId: '%3', paneIndex: 2, windowName: 'api' }),
     ])
-    const plan = planKill({ kind: 'window', session, window, windowId: '@7' }, 'other')
+    const plan = planKill({ kind: 'window', session, window }, 'other')
     expect(plan?.title).toBe('kill window "api"')
     expect(plan?.detail).toBe('3 panes, one running claude')
   })
 
   it('counts a lone pane and a lone window in the singular', () => {
     const { session, window } = tree([row({ windowName: 'api' })])
-    expect(planKill({ kind: 'window', session, window, windowId: '@7' }, 'other')?.detail).toBe(
+    expect(planKill({ kind: 'window', session, window }, 'other')?.detail).toBe(
       '1 pane',
     )
     expect(planKill({ kind: 'session', session }, 'other')?.detail).toBe('1 window, 1 pane')
@@ -501,7 +529,7 @@ describe('planKill', () => {
       row({ paneId: '%5', paneIndex: 1, windowName: 'api', command: 'claude', agentState: 'idle' }),
       row({ paneId: '%6', paneIndex: 2, windowName: 'api' }),
     ])
-    const plan = planKill({ kind: 'pane', session, window, windowId: '', pane }, 'other')
+    const plan = planKill({ kind: 'pane', session, window, pane }, 'other')
     expect(plan?.title).toBe('kill pane 1 of "api"')
     // The id and the command: a row 1.5s old is exactly the case where "pane 1"
     // alone is not enough to know which one is about to die.
@@ -509,17 +537,25 @@ describe('planKill', () => {
   })
 
   it('has nothing to kill for a window with no id, or an app-owned group', () => {
-    const { session, window } = tree([row()])
-    expect(planKill({ kind: 'window', session, window, windowId: '' }, 'work')).toBeNull()
+    const { session, window } = tree([row({ windowId: '' })])
+    expect(planKill({ kind: 'window', session, window }, 'work')).toBeNull()
     const app = tree([row({ appOwned: true })])
     expect(planKill({ kind: 'session', session: app.session }, 'work')).toBeNull()
   })
 
   it('carries the id the daemon addresses, per kind', () => {
-    const { session, window, pane } = tree([row({ sessionId: '$3', paneId: '%5' })])
-    expect(planKill({ kind: 'pane', session, window, windowId: '', pane }, 'work')?.action).toEqual({
+    const { session, window, pane } = tree([
+      row({ sessionId: '$3', paneId: '%5', windowId: '@7', windowIndex: 2 }),
+    ])
+    expect(planKill({ kind: 'pane', session, window, pane }, 'work')?.action).toEqual({
       verb: 'kill-pane',
       pane: '%5',
+    })
+    // @N, never the index: tmux renumbers those, and the daemon rejects
+    // anything that is not an @N anyway.
+    expect(planKill({ kind: 'window', session, window }, 'work')?.action).toEqual({
+      verb: 'kill-window',
+      window: '@7',
     })
     expect(planKill({ kind: 'session', session }, 'work')?.action).toEqual({
       verb: 'kill-session',
@@ -560,7 +596,7 @@ describe('killWarnings', () => {
       row({ paneId: '%1' }),
       row({ paneId: '%2', paneIndex: 1 }),
     ])
-    expect(killWarnings({ kind: 'pane', session, window, windowId: '', pane }, 'work')).toEqual([])
+    expect(killWarnings({ kind: 'pane', session, window, pane }, 'work')).toEqual([])
   })
 
   it('says the window closes with its last pane', () => {
@@ -568,7 +604,7 @@ describe('killWarnings', () => {
       row({ windowIndex: 0, windowName: 'api' }),
       row({ paneId: '%9', windowIndex: 1, windowName: 'notes' }),
     ])
-    const warnings = killWarnings({ kind: 'pane', session, window, windowId: '', pane }, 'work')
+    const warnings = killWarnings({ kind: 'pane', session, window, pane }, 'work')
     expect(warnings).toHaveLength(1)
     expect(warnings[0]).toContain('the window closes too')
   })
@@ -578,14 +614,14 @@ describe('killWarnings', () => {
     // window destroys the whole group, this app's own member included, which
     // drops the socket of every attached tab.
     const { session, window, pane } = tree([row({ windowName: 'api' })])
-    const warnings = killWarnings({ kind: 'pane', session, window, windowId: '', pane }, 'work')
+    const warnings = killWarnings({ kind: 'pane', session, window, pane }, 'work')
     expect(warnings.join(' ')).toContain('the session closes with it')
     expect(warnings.at(-1)).toContain('this tab disconnects')
   })
 
   it('warns about somebody else is tab when this one is elsewhere', () => {
     const { session, window } = tree([row({ groupKey: 'other', windowName: 'api' })])
-    const warnings = killWarnings({ kind: 'window', session, window, windowId: '@7' }, 'work')
+    const warnings = killWarnings({ kind: 'window', session, window }, 'work')
     expect(warnings.at(-1)).toContain('Any tab attached to that session disconnects')
     expect(warnings.join(' ')).not.toContain('this tab disconnects')
   })

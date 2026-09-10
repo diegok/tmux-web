@@ -43,7 +43,7 @@ import {
   CommandSeparator,
   CommandShortcut,
 } from '@/components/ui/command'
-import { NO_WINDOW_ID, newSessionPrompt, rowMenu } from '@/lib/manage'
+import { newSessionPrompt, rowMenu } from '@/lib/manage'
 import type { MenuEntry, MenuIntent, RowTarget } from '@/lib/manage'
 import { findPane } from '@/lib/useSnapshot'
 import type { SessionNode } from '@/lib/useSnapshot'
@@ -198,7 +198,7 @@ export function actionEntries(
   const located = findPane(groups, activePane)
   if (located) {
     const { session, window, pane } = located
-    const target: RowTarget = { kind: 'pane', session, window, windowId: NO_WINDOW_ID, pane }
+    const target: RowTarget = { kind: 'pane', session, window, pane }
     const where = `pane ${pane.paneIndex} · ${pane.paneId}`
     for (const entry of rowMenu(target, activeSession)) {
       entries.push({

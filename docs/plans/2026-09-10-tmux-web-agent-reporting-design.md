@@ -1,17 +1,114 @@
 # tmux-web v3 — agent-side reporting
 
 Date: 2026-09-10
-Status: design, not agreed. Revision 4, written against a third adversarial
-review whose verdict was "not ready for a plan, but this is the last design round
-it needs": four blockers and one false plank, all of them in revision 3's own new
-material, none of them needing a new mechanism. See "Revision 4", and the two
-revision sections below it for the rounds they answer.
+Status: design, not agreed. Revision 5, written against **a measurement rather
+than a review**: 88 turns across the three agents, 44 of them with the agent's
+own turn-end event wired up, and 1,440 replays of the 1.5s poll grid at every
+phase offset. It confirms revision 4's derivation, fixes `N_idle` at a measured
+value, and finds two things no review had: a late repaint that can re-light a
+cleared badge, and mid-turn stillness that makes the classifier agree with an
+idle report before the turn has ended. See "Revision 5"; the four revision
+sections below it are the rounds they answer.
 Follows: `2026-09-10-tmux-web-v2-design.md` (v2), which it partly supersedes.
 Depends on: the hardening of `internal/tmux/snapshot.go` against hostile
 `@wterm_label` values, **committed as `f25e066`** — in history, not pending, and
 not a thing this design is waiting on. It is a prerequisite, it answers one of
 the questions this document opened with, and it constrains the transport more
 than expected — see "The hazard" and "Why the report is not a fourteenth field".
+
+## Revision 5
+
+Revision 4 left `N_idle` explicitly pending a measurement and named what that
+measurement had to be. It landed, and the first thing to say about it is that
+its method matched this document's assumptions rather than approximating them:
+an isolated tmux server per agent, panes at 194x54, the capture and the hash
+taken exactly as `Client.Capture` and `Client.Run` take them (`capture-pane -p
+-J`, `TrimRight`, FNV-64a over the **whole** capture, no tail slicing), `Observe`
+reimplemented line for line with `settleAfter = 2`, and `pipe-pane` logging
+per-write wall-clock times so that repaint instants are known to the millisecond
+instead of quantised to the sampling grid. The 1.5s poll grid was then replayed
+at **every phase offset**, because the daemon's grid has arbitrary phase against
+a turn end and a single phase is not a result. Most important of all: **the
+turn-end event was measured, not assumed** — Claude Code's `Stop`, opencode's
+`session.idle` and pi's `agent_end` were each wired to a log and each fired
+reliably, so "polls to settle" is counted from the instant the integration would
+have written its report rather than from a proxy for it.
+
+Four things it settles, then the two it opens.
+
+- **`N_idle = 4`, and the floor revision 4 derived is now also a measured
+  relationship.** Polls-to-settle from the agent's own turn-end event was **3 or
+  4 in every one of the replays** — claude 471×3 / 9×4, opencode 469×3 / 11×4,
+  pi 477×3 / 3×4 — and *every* turn on *every* agent had at least one poll phase
+  at which it took 4. The 3-versus-4 split is purely where the grid lands. The
+  mechanism is the thing revision 4 could not have known: **the turn-end event
+  fires 7–52 ms before the agent's last repaint** (claude 13–39, opencode 15–52,
+  pi 7–11). A poll landing in that gap is spent on the pre-final screen, the
+  repaint lands on window poll 2, and `settleAfter = 2` then needs polls 3 and 4.
+  So `R = 1` is a measurement rather than an inspection, `N_idle = settleAfter +
+  2 = 4`, and `N = 3` would silently discard about 1 turn end in 50 on claude and
+  opencode and 1 in 170 on pi — invisibly, because the badge would just fall back
+  to the classifier's slower verdict. Revision 4's `settleAfter + 1` reasoning
+  was sound and rested on a false premise: that the report and the last repaint
+  are simultaneous. They are not, and **the report always comes first**. See
+  "Reports are checked against the screen"; question 3 closes for `N_idle` and
+  survives only for `N_blocked`, which the measurement does not touch.
+- **Revision 2's rule-3 variant is refuted empirically, not just argued
+  against.** Revision 3 rejected "drop the idle report on *any* `working` verdict
+  inside the window" by inspection and wrote that nobody had measured how often
+  it would fire. It would have fired on **100% of all 88 turns**: every
+  post-report sequence begins `W W`. That is now a number in the text rather than
+  a worry.
+- **The classifier's premise holds, measured.** About 580 seconds of post-turn
+  idle across ten runs — 150 s per agent plus seven shorter tails — produced
+  **zero hash changes and zero pane output** on all three agents. No spinner,
+  clock or animation survives a turn; pi's powerbar and opencode's context panel
+  are static when idle; cursor blink is invisible to `capture-pane`. Every place
+  this document leans on "an idle screen is static" now cites that rather than
+  assuming it — including the places where it is *bad* news, since a static
+  screen is exactly what makes a false resting badge unclearable.
+- **`N_blocked` is untouched by all of this and stays `settleAfter + 1`.** Rule 1
+  drops anything that moves before rule 2 sees it, so rule 2 never has to absorb
+  a repaint and the measurement bears on it not at all. Nobody should read
+  "`N_idle` measured at 4" as "N is 4".
+- **Finding A: a late repaint can re-light a cleared badge.** On 2 of 30 claude
+  turns a single line near the input box repainted **5.0 s and 9.0 s after
+  everything else had stopped** — both on a "write a file, then reply done"
+  prompt, not periodic, not reproducible on demand. It does not stop the turn
+  settling, but through the classifier it produces a second working→idle edge and
+  a fresh `finishedAt` about 13 s after the real turn end. **It cannot reach
+  `finishedAt` on a pane whose report is the authority**, for two independent
+  reasons, so it is not a defect this design introduces; it is a v2 classifier
+  defect this design inherits wherever it hands a pane back to the classifier.
+  The scoping, the reason no hash-level rule can separate it from a genuinely
+  short turn, and the minimum mitigation are in "A late repaint re-lights a
+  cleared badge".
+- **Finding B: an idle verdict inside the window corroborates, it does not
+  verify.** On 4 of 88 turns the screen sat still long enough *while the agent
+  waited on the model* that the classifier reported `idle` **before the turn
+  ended**. Rule 3 accepts an idle report on exactly that verdict, so rule 3 is a
+  backstop with a measured leak rather than a proof. Two consequences: the rule
+  now states its own limit, and **revision 4's provisional rule-3 tombstone is
+  withdrawn**, because mid-turn stillness can clear a rejection that was correct
+  and the measurement has emptied the case the provisional clearing was built
+  for. See "Reports are checked against the screen" and "What "dropped" means".
+
+One thing worth noting about what the measurement did *not* find: in 88 turns
+across three agents it met **none** of the four screens question 10 is waiting on
+and did not provoke them. That is not an answer to question 10, but it is
+evidence about how rare those screens are, and it is recorded there.
+
+**Where that leaves the document.** Nothing here is now waiting on a measurement
+in order to be built. The one number this design could not choose has been
+chosen; the two findings are one scoping answer and one withdrawal, neither of
+which adds a mechanism; and every remaining open question is either a value that
+biases a guess (2, 13), a promotion path that needs a screen nobody has (10, and
+`N_blocked` in 3), or a hazard recorded rather than solved (9, 11), which is the
+same standing they had when revision 4 was told this was the last design round it
+needed. Two things the plan inherits as tasks rather than as questions: the
+`state.go` dwell of finding A, which is separable and should not gate anything,
+and the sizing of `N_blocked`, which is a constant expressed against
+`settleAfter` and changeable by editing one line.
 
 ## Revision 4
 
@@ -36,7 +133,10 @@ it next, and they will extend it to the cases it was never checked on.
   fewer and made them permanent. Fixed three ways — the floor as a relationship,
   the classifier baseline for a capture-skipped pane specified, and rule-3
   rejections made provisional. See "Reports are checked against the screen" and
-  "What "dropped" means".
+  "What "dropped" means". **The third of those three is withdrawn by revision 5**,
+  on a measurement that empties the case it was built for and a finding that gives
+  its trigger a failure mode; the first two stand and the first is now a measured
+  relationship as well as a derived one.
 - **"Promoted later by a data change to `blockedRules`" was false, and the test
   written to stop round two's blocker recurring could not fail for it.**
   `blockedRules` is `map[string]dialog` — one grammar per agent, and claude's
@@ -753,7 +853,13 @@ timestamp, it is not an error. The asymmetry that settles this:
   Still the cheap direction; not the free one.
 - Defaulting an unknown notification to `blocked` costs a *permanent false
   badge*. `blocked` is a resting state, so it never expires; if the screen is
-  static, the changed-hash escape hatch never fires either.
+  static, the changed-hash escape hatch never fires either. **"If" is now
+  "when":** about 580 s of post-turn idle across ten runs produced zero hash
+  changes and zero pane output on all three agents, so an idle agent's screen is
+  measured to be perfectly still — no spinner, no clock, no animation survives a
+  turn, pi's powerbar and opencode's context panel are static, and cursor blink
+  is invisible to `capture-pane`. The escape hatch does not merely *risk* never
+  firing on a false resting badge; on a finished agent it cannot fire.
 
 `idle_prompt` still deserves its own note, and it now has its own section,
 because revision 2's treatment of it was wrong in a way that is invisible until
@@ -1047,7 +1153,7 @@ The cases:
 | --- | --- | --- |
 | fresh `working` | (not taken) | The report. The capture is skipped, so this pane costs no forks at all |
 | fresh `idle`, outside the verification window | (not taken) | The report. Capture skipped |
-| fresh `idle`, inside the verification window | captured | The report, unless the classifier fails to report `idle` even once within the window — see evidence rule 3. `N_idle` polls, then the capture stops |
+| fresh `idle`, inside the verification window | captured | The report, unless the classifier fails to report `idle` even once within the window — see evidence rule 3. At most `N_idle` polls, and the window closes at the first `idle` verdict rather than running out the count: measured, that is three polls in about 98% of poll phases |
 | fresh `blocked` | captured | The report, unless the screen churns or settles with no dialog on it — evidence rules 1 and 2. Captured for as long as the report stands |
 | stale or absent | available | The classifier, exactly as v2 |
 | stale or absent | not available (no client connected) | Empty, exactly as v2 |
@@ -1134,14 +1240,63 @@ there is no screen to check and the report is the only authority there is:
    else. `N_blocked` polls rather than one because the first capture after a reconnect
    can catch a repaint mid-frame and the grammars are deliberately strict.
 
+   The premise under "has stopped moving" is measured rather than assumed as of
+   revision 5: an agent that has finished a turn produces a byte-identical
+   capture indefinitely (about 580 s across ten runs, zero hash changes, all
+   three agents). Rule 2 is therefore adjudicating a screen that really is final,
+   not one that is between frames — with the single caveat finding A supplies,
+   that "final" was violated twice in 30 claude turns by a repaint arriving up to
+   9 s late. Composed with rule 1 that is survivable rather than free: a late
+   repaint on a pane reporting `blocked` is a changed hash, so rule 1 drops the
+   report and tombstones it. The badge does not go with it, because a dropped
+   report hands the pane to the grammars and the dialog is still on the screen
+   for `IsBlocked` to match positively. Both rules require a connected client, so
+   there is no case where the drop happens and the grammar is not there to catch
+   it.
+
 3. **A reported `idle` is dropped if the screen never settles**, over a
    verification window of `N_idle` polls after the report arrives. Within the window
    the pane is still captured. The report **stands** if the classifier — the same
    code, the same hash, the same rules — says `idle` at any poll inside the
-   window. It is **dropped** only if the classifier says `working` for the whole
+   window, and the window **closes at that verdict**: the report is accepted, the
+   derivation happens, and the captures stop rather than running out the count.
+   It is **dropped** only if the classifier says `working` for the whole
    of it, and then the pane goes back to the classifier with no `finishedAt`
    derived. That is the unfiltered-subagent case caught by evidence rather than
    by a discriminator holding.
+
+   **The limit of this rule, measured, and it is not a small one: an `idle`
+   verdict inside the window is *corroboration*, not verification.** On **4 of 88
+   measured turns** the screen sat still long enough *while the agent was waiting
+   on the model* that the classifier reported `idle` **before that turn's
+   turn-end event fired** — in one opencode turn, at 31 of 60 poll phases, with a
+   run of two consecutive `idle` verdicts, which is about six seconds of a
+   perfectly static screen on an agent that had not finished. So the verdict rule
+   3 accepts on does not mean "the turn ended"; it means "the screen was still
+   for `settleAfter` polls", and those are different claims. Everything rule 3 is
+   asked to carry has to be sized against that:
+
+   - **The rule is a backstop with a measured leak, not a proof.** A subagent's
+     false `idle` survives rule 3 whenever the root's own mid-turn stillness
+     happens to fall inside the window. The measured rate at which a turn offers
+     such a window at all is about 1 in 20; the rate at which one *coincides*
+     with a false report is smaller and is not measured.
+   - **This is the argument against padding `N_idle`.** A longer window is not
+     free caution: it accepts more mid-turn stillness as corroboration, so
+     widening `N` trades one failure for another rather than buying safety. That
+     is the reason `N_idle` is set at exactly the measured `settleAfter + 2` and
+     not at `settleAfter + 2` plus a margin, and the reason finding A is
+     explicitly *not* answered by widening it — that would take `N ≈ 8`.
+   - **It is also why the rule-3 rejection is no longer provisional.** Revision 4
+     had a rejection clear "the moment the classifier reports `idle`"; under this
+     finding, mid-turn stillness clears a rejection that was correct. See "What
+     "dropped" means".
+   - **No sustained-idle threshold turns corroboration into verification.** The
+     tempting repair — require the classifier to stay idle for *k* polls — is a
+     rule derived from the example that provoked it. Waiting on a model has no
+     upper bound, and neither does a silent tool call, which is question 2's
+     case; a threshold that separates the four turns this run caught says
+     nothing about the fifth.
 
    *Revision 3 rewrote this rule, because revision 2's version fired on ordinary
    turn ends.* Revision 2 dropped the report if the classifier said `working` at
@@ -1152,14 +1307,23 @@ there is no screen to check and the report is the only authority there is:
    write. So revision 2's rule would have dropped a large fraction of *true* idle
    reports whenever a client was connected, quietly handing `finishedAt` back to
    the classifier's `now`-stamp — in exactly the case anybody would be watching.
-   Nobody has measured how often; the point is that the rule as written could not
-   have been measured green, and the per-section test it implied would have
-   passed.
+   Revision 3 wrote that nobody had measured how often. **It is measured now, and
+   the fraction is all of it: revision 2's rule would have discarded 100% of all
+   88 measured turns on all three agents**, because every post-report poll
+   sequence begins `W W` — the pre-final screen, then the repaint. The point
+   revision 3 made without the number stands and is sharper with it: the rule as
+   written could not have been measured green, and the per-section test it
+   implied would have passed.
 
    The rewrite borrows the project's own noise threshold instead of inventing a
    second one: one repaint is noise, `settleAfter` consecutive identical captures
    is stillness, and a working agent does not go still — `state.go`'s own comment
-   is that "a working agent redraws its spinner and elapsed-time".
+   is that "a working agent redraws its spinner and elapsed-time". **That last
+   clause is the one the measurement qualifies**: an *idle* screen is now
+   measured to be perfectly static (about 580 s of post-turn idle across ten
+   runs, zero hash changes, zero pane output, all three agents), but a *working*
+   screen is not measured to be perfectly animated — see the corroboration limit
+   below.
 
    **Revision 3 then got the floor wrong by one, in the direction that breaks the
    property it advertises.** Read `Observe` (`internal/tmux/state.go`): a changed
@@ -1179,18 +1343,54 @@ there is no screen to check and the report is the only authority there is:
    turn end, and that write races a fire-and-forget report — so the floor for the
    "one repaint is noise" property this document advertises is `settleAfter + 2`,
    which at `settleAfter = 2` is **four polls, about six seconds**, not three.
-   **`N_idle` is pending the turn-end settle measurement** in open question 3,
-   which is being run against all three agents; `settleAfter + R + 1` is the
-   value, `settleAfter + 2` is the floor below which the advertised property is
-   false, and only the number changes when the measurement lands.
 
-   **`N_blocked` is a different number and does not need `R`.** Rule 2's
-   precondition is a screen that has stopped moving, and anything that moves is
-   dropped by rule 1 first — so rule 2 never has to absorb a repaint and its
-   floor is `settleAfter + 1`, three polls. Revision 3 guessed that the two rules
-   "may want two constants rather than one"; they do, and the reason is now a
-   derivation rather than a hunch. Both are expressed against `settleAfter` in
-   code, not written as literals.
+   > **`N_idle = settleAfter + 2`. Measured, not floored: `R = 1`.**
+
+   This is both the derived floor and a measured relationship, and it should be
+   cited as both, because they are two different claims that happen to agree.
+   88 turns across the three agents, 44 of them counted from the agent's own
+   turn-end event, replayed at every phase of the 1.5s grid: **polls-to-settle
+   was 3 or 4 and never anything else** — claude 471×3 / 9×4 (1.9%), opencode
+   469×3 / 11×4 (2.3%), pi 477×3 / 3×4 (0.6%) — and every turn on every agent had
+   at least one poll phase at which it took 4. The 3-versus-4 split is not a
+   property of the agent, it is where the grid lands.
+
+   **The mechanism is what revision 4 could not have known, and it is why the
+   `settleAfter + 1` reasoning was sound and still wrong.** The turn-end event
+   fires **7–52 ms before the agent's last repaint** — claude 13–39 ms, opencode
+   15–52 ms, pi 7–11 ms — so the report is written to a screen that is not yet
+   final. Revision 4 assumed the report and the last repaint are simultaneous;
+   they are not, and **the report always comes first**. A poll landing in that
+   gap is spent on the pre-final screen, the repaint lands on window poll 2, and
+   `settleAfter` then needs polls 3 and 4. `R >= 1` is therefore not a property
+   of *some* turns but of every one measured, and the cost of getting it wrong is
+   the invisible kind: `N = 3` discards about 1 true turn end in 50 on claude and
+   opencode and 1 in 170 on pi, and discards it silently, because the badge
+   merely falls back to the classifier's slower verdict rather than failing.
+
+   Two details of the replay, because they are what make it a measurement of
+   *this* design rather than of a similar one. It reimplemented `Observe` line for
+   line at `settleAfter = 2` and hashed the whole `capture-pane -p -J` output the
+   way `Client.Capture` does, so the numbers are this classifier's numbers. And
+   it was run both ways round the first-sight question — a classifier created
+   fresh at the first window poll, which is this design's capture-skipped
+   baseline rule, and one carrying a retained baseline from before the report —
+   with **identical histograms**. The claim two subsections down, that the floor
+   is the same either way, is checked rather than argued.
+
+   **`N_blocked` is a different number, does not need `R`, and this measurement
+   does not bear on it at all.** Rule 2's precondition is a screen that has
+   stopped moving, and anything that moves is dropped by rule 1 first — so rule 2
+   never has to absorb a repaint and its floor is `settleAfter + 1`, three polls.
+   Nothing measured here changes that, and nobody should read "`N_idle` measured
+   at 4" as "N is 4": the two constants are separate, and `N_blocked` remains a
+   derived floor with an unmeasured value, in question 3. Revision 3 guessed that
+   the two rules "may want two constants rather than one"; they do, and the
+   reason is now a derivation for one of them and a measurement for the other.
+   Both are expressed against `settleAfter` in code, not written as literals —
+   which matters more now, not less: a literal `4` would survive a change to
+   `settleAfter` and be wrong, and it would also read as a number somebody chose
+   rather than one two independent arguments arrived at.
 
    **A capture-skipped pane's classifier baseline is dropped, not kept.** This is
    the thing revision 3 never specified and on which its arithmetic silently
@@ -1218,12 +1418,21 @@ there is no screen to check and the report is the only authority there is:
    The hole this leaves, stated rather than left for the next reviewer: a
    subagent's false `idle` survives if the root's screen happens to go still for
    `settleAfter` polls inside the window — about three seconds of a static screen
-   on an agent that is working. All three agents animate while working, which is
-   what makes that unlikely; it is not what makes it impossible.
+   on an agent that is working. Revision 3 wrote that "all three agents animate
+   while working, which is what makes that unlikely; it is not what makes it
+   impossible". **The measurement withdraws the first clause.** Agents animate
+   while they are *drawing*; they do not animate while they are *waiting on the
+   model*, and 4 of 88 turns went still for long enough during that wait for the
+   classifier to say `idle` before the turn had ended. So the hole is not
+   improbable, it is merely uncorrelated: it needs a false report standing at the
+   moment a mid-turn still window opens, and the still windows are measured at
+   about 1 in 20 turns. This is finding B, it is stated with the rule above, and
+   it is the reason the rule-3 rejection stopped being provisional.
 
-`N_idle` and `N_blocked` are floored as above and are otherwise guesses of the
-same kind as the 60-second window, flagged as such. The floors are relationships
-against `settleAfter`; the values are pending open question 3.
+`N_idle` is **measured**, at `settleAfter + 2`. `N_blocked` is floored as above at
+`settleAfter + 1` and is otherwise a guess of the same kind as the 60-second
+window, flagged as such and still in open question 3. Both are relationships
+against `settleAfter` in code, never literals.
 
 **Why `idle` gets a window and `blocked` does not.** This is the asymmetry the
 review asked to see argued or removed, and it is real:
@@ -1237,8 +1446,10 @@ review asked to see argued or removed, and it is real:
   the `finishedAt` stamp, because a `done` badge that has landed on three
   devices does not un-land. So the window covers exactly the moment the stamp is
   derived, and stops.
-- **The cost is bounded and shaped correctly.** Rule 3 costs `N_idle` captures
-  per turn end on a reporting pane, against one capture per poll forever without
+- **The cost is bounded and shaped correctly.** Rule 3 costs at most `N_idle`
+  captures per turn end on a reporting pane — measured, three of them in about
+  98% of poll phases, because the window closes at the verdict rather than
+  running out the count — against one capture per poll forever without
   the integration. Rule 2 costs captures only while a `blocked` report stands,
   which is the state where the user is waiting anyway.
 
@@ -1274,8 +1485,9 @@ accepted the moment the screen settles again. Specified:
   One slot each rather than a set — the option holds exactly one value, so the
   only report that can be re-seen is the current one.
 - **A report whose timestamp matches the rejection slot is re-rejected without
-  re-evaluating the evidence** — *when the rule that condemned it was rule 1 or
-  rule 2*. The evidence that condemned it was a screen that has since moved on;
+  re-evaluating the evidence**, whichever rule condemned it — revision 4 split
+  this per rule and revision 5 puts it back, for a measured reason below. The
+  evidence that condemned it was a screen that has since moved on;
   re-running the test against a screen that has since settled is exactly how a
   dropped report comes back to life.
 - **A rejection does not advance the ordering filter.** A dropped report was
@@ -1284,51 +1496,74 @@ accepted the moment the screen settles again. Specified:
   independent, and a test says so.
 - **A newer value clears the rejection slot.** It is a different report and earns
   its own verdict.
-- **The slot records which rule condemned the report, because rules 1 and 2 and
-  rule 3 do not mean the same thing by "dropped".** This is revision 4's fix, and
-  the composition revision 3 relocated rather than repaired.
+- **The slot has one semantic for all three rules, and revision 4's second one is
+  withdrawn.** This is the one place where the measurement overturns a decision
+  rather than confirming it, so both halves are worth keeping on the page.
 
-  For **rules 1 and 2** the tombstone is right as written and its justification
-  is the one above: the report claims the agent is waiting at a dialog, the
-  evidence is a screen that moved or a settled screen with no form on it, and
-  nothing the screen does later makes that claim true again. Later settling is
-  resurrection noise. Cleared only by a newer value.
+  For **rules 1 and 2** the tombstone was always right and its justification is
+  the one above: the report claims the agent is waiting at a dialog, the evidence
+  is a screen that moved or a settled screen with no form on it, and nothing the
+  screen does later makes that claim true again. Later settling is resurrection
+  noise. Cleared only by a newer value.
 
-  For **rule 3 it is exactly backwards.** Rule 3 drops a resting `idle` for want
-  of a settle inside the window, and the screen settling afterwards **is the
-  confirmation the report was missing**. "Do not re-evaluate the evidence" turns
-  a window that was one poll too short into a permanent loss of that turn's
-  `finishedAt`. And revision 3's stated escape — "a newer value clears the
-  slot" — is closed by its own other new mechanism: `idle_prompt` at T+60 reads
-  the **standing option**, sees `idle`, agrees with it, and writes nothing. The
-  writer consults tmux; the rejection lives in the daemon; the two disagree about
-  what "standing" means, so the repair never fires and `finishedAt` is never
-  derived from that turn's report at all. Revision 2 dropped true idles
-  transiently; revision 3 dropped fewer and made them permanent.
+  **Revision 4 made rule 3's rejection provisional** — cleared "the moment the
+  classifier reports `idle` for that pane" — and the argument was good against
+  the premises it had. Rule 3 drops a resting `idle` for want of a settle inside
+  the window; a later settle looks like the confirmation the report was missing;
+  and at `N = 3` a window one poll too short was going to happen often, with
+  revision 3's stated escape ("a newer value clears the slot") closed by the
+  `idle_prompt` re-assertion, which reads the standing *option*, sees `idle`,
+  agrees and writes nothing while the rejection sits unreachable in the daemon.
 
-  **So a rule-3 rejection is provisional: it clears the moment the classifier
-  reports `idle` for that pane**, at which point the standing report is accepted
-  and `finishedAt` is derived from its own timestamp. No new machinery and no
-  extra captures — a pane whose report was dropped is back on the classifier,
-  which means it is being captured every poll anyway. What it preserves is the
-  protection: in the case rule 3 exists for, a subagent's false `idle` on a root
-  that is genuinely working, the screen keeps churning, the classifier never says
-  `idle`, the rejection never clears and the badge never lands. The rejection
-  lasts exactly as long as the agent keeps working — which is the property that
-  was wanted all along, and which a fixed window was only ever a proxy for.
+  **Both premises are gone, and one of them has been replaced by its opposite.**
 
-  Two consequences, both bounded and both better stated here than found later.
-  The eventually-accepted report's timestamp can be **earlier than the true
-  finish** — it is the subagent's finish, not the root's — so a badge that lands
-  this way is dated early; in practice the root's own turn end writes a newer
-  report first and the ordering filter takes that instead, clearing the slot by
-  the newer-value rule, so the early stamp only survives when the root's turn-end
-  event never arrived, which is the missed-`Stop` case that has a repair of its
-  own. And the writer/daemon disagreement about "standing" is harmless in the
-  other direction: a `blocked` rejected by rule 1 or 2 is seen by a re-assertion
-  event as a state it *disagrees* with, so it writes, and the newer value clears
-  the slot the ordinary way. The tombstone earns its keep on rules 1 and 2 and
-  nowhere else.
+  - *The case it was built for is measurably empty.* At the measured `N_idle =
+    settleAfter + 2`, polls-to-settle from the agent's own turn-end event was 3
+    or 4 in **every one of 1,440 exact-timing phase replays** and never 5. The
+    "window one poll too short" that provisional clearing exists to repair did
+    not occur once. It is not impossible — finding A supplies the shape of an
+    `R = 2` turn, where a late repaint lands on the fourth window poll of a
+    4-poll phase — but that needs two measured rarities to coincide, where
+    revision 4 had to assume a routine one.
+  - *Clearing on a classifier `idle` is no longer a safe trigger.* Finding B:
+    4 of 88 turns went still long enough while waiting on the model for the
+    classifier to report `idle` **before the turn ended**. That verdict is
+    exactly what revision 4 made the clearing key on, so mid-turn stillness on a
+    root that is genuinely working can clear a rejection that was **correct** —
+    resurrecting the subagent's false `idle`, deriving `finishedAt` from it, and
+    landing the false done badge this whole rule exists to prevent. The trigger
+    the provisional clearing chose is the one signal finding B showed to be
+    unreliable.
+
+  **So a rule-3 rejection is cleared only by a newer value, like the other
+  two.** What that costs is much less than revision 4 feared, and the reason is
+  worth stating because revision 4 missed it: **a rejected report hands the pane
+  back to the classifier, and the classifier is an authority that can stamp a
+  finish.** For rule 3 to have fired at all the screen must have churned through
+  the whole window, which sets `everChanged`; when it does settle, `Observe`
+  stamps `finishedAt = now` in the ordinary way. So a wrongly-dropped true turn
+  end does not lose its badge — it gets one dated by when the daemon noticed
+  instead of by when the agent finished, a few seconds late and from the weaker
+  authority. Revision 4 wrote "a permanent loss of that turn's `finishedAt`";
+  the accurate version is "that turn's finish is dated by the classifier".
+  That is the ordinary v2 degradation, which is the floor this whole design
+  degrades to everywhere else, and it is a far better thing to spend than a
+  false badge.
+
+  Two consequences, both better stated here than found later. The rejection is
+  not permanent in the sense that word usually carries: the **next turn's start**
+  writes `working`, which is an edge and writes unconditionally, which is a newer
+  value, which clears the slot. So a rejection lasts until the agent next does
+  anything, and never longer. And the writer/daemon disagreement about what
+  "standing" means is harmless in the direction that remains: a `blocked`
+  rejected by rule 1 or 2 is seen by a re-assertion event as a state it
+  *disagrees* with, so it writes, and the newer value clears the slot the
+  ordinary way.
+
+  One thing the plan should not do: reintroduce the split as a "small
+  improvement". The slot is one field, the difference was a flag on it, and the
+  flag is now known to have a measured failure mode rather than merely an
+  unproven one.
 
 **Across a restart both slots are empty, and revision 2's answer to that is
 withdrawn.** Revision 2 said a report that arrived before the restart "is almost
@@ -1592,6 +1827,114 @@ generation, so it is still there to answer.
   report" — which makes this the one reader-side invariant in the design that
   rests on writer-side behaviour. Named, rather than left to compose quietly with
   the next thing somebody adds.
+
+### A late repaint re-lights a cleared badge, and it cannot reach a reported finish
+
+New in revision 5, from the measurement, and it is round one's badge storm
+arriving through a door this document had not counted: not through a report and
+not through a re-assertion, but through the classifier.
+
+**What was measured.** On 2 of 30 claude turns, a single line near the input box
+repainted **5.0 s and 9.0 s after everything else on the screen had stopped**.
+Both were on a "write a file, then reply done" prompt; it is not periodic and it
+does not reproduce on demand. It does not stop the turn settling — the classifier
+had already said idle. What it does is produce a **second working→idle edge and a
+fresh `finishedAt` stamp about 13 s after the real turn end**: the repaint at
++9.0 s, plus `settleAfter` polls, plus wherever the grid lands. Since
+`finishedAt` is compared against each browser's stored `seen` *value*, a stamp
+13 s later than the one a device was shown re-lights a done badge the user has
+already cleared. That is a badge-integrity failure independent of `N`, and
+widening `N` is not the answer: covering a 9 s late repaint takes `N ≈ 8`, and a
+window that wide starts accepting mid-turn stillness as corroboration, which is
+finding B.
+
+**First the question that decides whose problem this is: can it reach
+`finishedAt` on an integrated pane?** It cannot, and the two reasons are
+independent, which is worth having because either alone would be a coincidence.
+
+- **A fresh report outranks the classifier for the derivation.** A pane whose
+  accepted report is a resting `idle` has `finishedAt` equal to *that report's
+  own timestamp*. `idle` is a resting state and does not expire, so the report
+  stays the authority until a newer report, the command check, or pane death.
+  Whatever the classifier computes underneath is not what the row carries.
+- **The capture is skipped, so the classifier does not even see it.** Outside the
+  verification window a fresh report suppresses the capture entirely. A repaint
+  at +5.0 s or +9.0 s on a pane whose window has closed is not observed at all,
+  and the pane's `paneState` entry has already been dropped by `Retain` — it was
+  not captured, so it was not retained.
+
+**And the one boundary where it could have leaked is already closed, by
+machinery this document already has.** Inside the verification window the pane
+*is* captured, so a late repaint at +5.0 s can land on window poll 3 or 4. It
+cannot stamp anything, because a capture-skipped pane's classifier baseline is
+dropped and window poll 1 is therefore a **first sight**, which leaves
+`everChanged` false — and `everChanged` is precisely the flag that licenses a
+`time.Now()` stamp. That rule was written for a different reason (a retained hash
+does not answer the question `Observe` asks) and it turns out to cover this one.
+Of the four candidate mechanisms, that is the only one that applies: the
+**ordering filter** works on report timestamps and a classifier edge has none;
+the **rejection slot** needs a report to reject and the panes this bites have
+none; and the browser's **`seen`** is not a defence here, it is the thing being
+defeated, since `isDone` is `finishedAt > seen` and a fresh stamp is strictly
+greater than the value the device stored.
+
+**So this bites where the classifier is the authority**, which is: a pane with no
+integration at all — the common case, and pure v2 — and a pane whose report is
+not in force, which this design creates in three places it already documents (a
+report dropped by an evidence rule, a `working` report expired after a missed
+turn-end event, and a `notification_type` demoted for want of a grammar). **It is
+a v2 defect this design inherits rather than one it introduces**, and the
+inheritance is deliberate: the classifier is kept precisely so that a pane
+without a report still gets a state. So it is recorded here and **scoped as its
+own task** rather than folded into the reporting mechanism: the fix is a change
+to `state.go`'s stamping rule, this design otherwise does not touch that file,
+and its constant is a number nobody has measured yet (question 13). A design that
+is otherwise ready should not wait on it.
+
+**The reason it cannot be fixed by looking harder at the hash, which is the thing
+to write down so nobody tries.** The obvious repair is to require *more* movement
+before arming an edge — a run of changed polls rather than a single one, by
+symmetry with `settleAfter`. It does not work, and the same measurement refutes
+it: **a genuinely short turn presents exactly one changed poll too.** In 29 of 72
+claude turn-phase replays and 19 of 72 opencode ones, the entire turn — prompt
+echo, answer, prompt box redrawn — changed the screen at exactly one poll of the
+1.5s grid before settling. A late repaint and a two-second turn are the same
+signal at the hash level, and any threshold that discards the first discards the
+second. That is not a limitation of the threshold; it is what the classifier is:
+**it dates our noticing, where a report dates the finish.** Finding A is
+therefore one more argument for the integration rather than a defect in it.
+
+**The minimum that closes it, and it is one conjunct.** The stamp guard in
+`Observe` already reads `p.still == settleAfter && p.everChanged && !blocked`. Add
+a **re-stamp dwell**: do not stamp a new finish within `lateRepaintDwell` of the
+one already recorded on that pane.
+
+- It needs no new state — `p.finishedAt` is already there — and no clock inside
+  the classifier, because `now` is already a parameter and the purity rule holds.
+- It is not symmetric with the other guards and should not be described as one:
+  the others decide whether *this* run earned an edge; this one decides whether a
+  second edge so soon after the first can be a different finish at all.
+- **The constant is a guess, flagged as one, of the same kind as the 60-second
+  window.** It is floored by the measurement — the second edge landed 12 to 13.5 s
+  after the first — and the sample behind that floor is **two events**, which is
+  a bound and not a distribution. 15 s is the value to start from, biased long,
+  and question 13 is the measurement it wants.
+- **Biasing long has a cost and it is the right one to pay.** Two genuine
+  finishes inside the dwell collapse to a single badge — the user would have to
+  have looked at the pane between them, and then walked away within seconds, for
+  that to lose anything. Against that, the failure it prevents was measured at 2
+  of 30 claude turns.
+- **It applies to the classifier's stamp only, never to a report's derivation.**
+  A report dates its own finish, and a resting state is never re-asserted with a
+  later timestamp (writer-side, "Re-assertion is not a report"), so there is
+  nothing there for a dwell to protect against and adding one would silently
+  swallow a genuine second turn end.
+
+The plan should carry this as its own small task against `state.go`, separable
+from everything else here and testable on its own: a fixture of one turn's worth
+of changed captures, a settle, a stamp, then a single changed capture and a
+second settle, asserting the second stamp does not happen — and its sibling, two
+real runs separated by more than the dwell, asserting that it does.
 
 ## What crosses the wire
 
@@ -1858,7 +2201,12 @@ analysis is per *event*, not per agent:
   window, and is now floored by `settleAfter` so an ordinary repaint does not
   trigger it. **With no client connected, a subagent false-idle on pi or opencode
   is undefended.** That is the true state of it. It is not two independent
-  mechanisms; it is one mechanism that only runs when somebody is watching.
+  mechanisms; it is one mechanism that only runs when somebody is watching — and
+  since revision 5, one mechanism that leaks at a measured rate even then, because
+  a root waiting on the model goes still often enough for the classifier to
+  corroborate a false idle on about 1 turn in 20. Finding B does not change what
+  should be built here; it changes how much this backstop is worth, and therefore
+  how much the writer-identity field below is worth.
 
 Two things follow rather than being asserted. First, the fixtures that matter
 most are a real `agent_settled` and a real `session.idle` captured *while a
@@ -2119,9 +2467,11 @@ which is what the v2 design already does, and this document continues.
 | A subagent's turn-end event, pi or opencode | Filtered on `ctx.mode` (presence-coded, fails closed) and `parentID` (absence-coded, **fails open**). Behind the opencode filter there is only evidence rule 3, which needs a connected client. **With no client connected this is undefended**, which revision 2 obscured by calling the filter and the rule "two independent mechanisms" |
 | A `Notification` whose `notification_type` we do not recognise | Ignored. No write, no state change, no timestamp refresh. Revision 1 would have written `blocked` — a permanent false badge on a resting state |
 | `Notification(idle_prompt)`, ~60s after every turn | A **re-assertion** event: the writer reads the standing option and writes only if it disagrees. Standing `idle` — silence, no newer timestamp, no badge. Standing `working` (a missed `Stop`) — writes `idle` and repairs the pane from the agent. Revision 1 reported `blocked` here; revision 2 reported `idle` unconditionally and thereby re-badged every device once per turn, because `finishedAt` is derived from the report's own timestamp and `seen` stores the value it was shown |
-| A report dropped on evidence, still standing in the option next poll | Re-rejected from the per-pane rejection slot without re-evaluating the evidence. A rejection never advances the ordering filter; a newer value clears the slot. See "What "dropped" means" |
-| A true turn end whose repaint races the `Stop` write | Rule 3 does not drop it **provided `N_idle >= settleAfter + R + 1`**. The report stands if the classifier says `idle` at any poll inside the window; only a screen that never settles for the whole window drops it. Revision 2 dropped on a single changed hash, which is what `settleAfter` exists to call noise; revision 3 fixed that and then set a window too short to contain the settle it had just required, so at `N = 3` this row was false whenever the repaint landed after the first window capture. The floor is a relationship now and the value is pending question 3's measurement |
-| Rule 3 drops a **true** idle anyway — the window was one poll too short | The rejection is **provisional**: it clears the moment the classifier reports `idle`, and the standing report is then accepted with `finishedAt` derived from its own timestamp. Rules 1 and 2 keep the do-not-re-evaluate tombstone; rule 3 cannot have it, because for rule 3 the later settle *is* the missing evidence. Revision 3 gave all three the same tombstone and thereby made a false drop permanent, with the `idle_prompt` repair unable to reach it because the writer reads tmux and the rejection lives in the daemon |
+| A report dropped on evidence, still standing in the option next poll | Re-rejected from the per-pane rejection slot without re-evaluating the evidence, whichever rule condemned it. A rejection never advances the ordering filter; a newer value clears the slot — and the next turn's `working` write is one, so a rejection lasts until the agent next does anything and never longer. See "What "dropped" means" |
+| A true turn end whose repaint races the turn-end write | Rule 3 does not drop it, at `N_idle = settleAfter + 2`. **Measured rather than reasoned**: the turn-end event fires 7–52 ms *before* the agent's last repaint, so a poll can be spent on the pre-final screen, and polls-to-settle was 3 or 4 in every one of 1,440 exact-timing phase replays across 88 turns and never 5. Every turn on every agent had some poll phase at which it took 4, so `N = 3` would discard ~1 true turn end in 50 on claude and opencode and ~1 in 170 on pi — silently, since the badge just falls back to the classifier. Revision 2 dropped on a single changed hash, which would have discarded 100% of the 88 turns; revision 3 fixed that and set the window one poll too short |
+| Rule 3 drops a **true** idle anyway — the window was one poll too short | The report stays rejected until a newer value, like a rule-1 or rule-2 drop; revision 4's provisional clearing is **withdrawn** in revision 5. The badge is not lost: a rejected report hands the pane to the classifier, which churned all through the window and so has `everChanged` set, and stamps its own `finishedAt` when the screen settles. The turn's finish is dated by when the daemon noticed instead of by when the agent finished — ordinary v2 degradation. Measured: 0 of 1,440 replays needed a fifth poll |
+| Mid-turn stillness makes the classifier agree with an idle report before the turn ended | **Finding B, measured at 4 of 88 turns.** Rule 3's `idle` verdict is corroboration, not verification, so a subagent's false `idle` survives whenever the root's own model-wait stillness falls inside the window. Not fixed — sized. It is the reason `N_idle` is not padded above the measured value, and the reason a rule-3 rejection is no longer cleared by a classifier `idle` verdict |
+| A late repaint 5–9 s after a turn has visibly ended | **Finding A, measured on 2 of 30 claude turns.** On a pane whose report is in force it reaches nothing: the report outranks the classifier for `finishedAt`, and the capture is skipped so the classifier never sees the repaint; inside the verification window it cannot stamp either, because window poll 1 is a first sight and `everChanged` is false. On a pane the classifier owns — no integration, or a report dropped, expired or demoted — it stamps a second finish about 13 s late and re-lights a cleared badge. A v2 defect this design inherits; the minimum fix is a re-stamp dwell in `Observe`, and no hash-level rule can do better, because a two-second turn presents the same single changed poll |
 | Two writes landing out of order (a delayed `working` after a `blocked`) | The daemon refuses a report whose timestamp is not strictly newer than the last it accepted. Ordinary scheduling jitter, not a broken integration, and revision 1 did not account for it |
 | Claude and pi in the same pane (an agent run inside another agent's shell) | **Not handled.** Both integrations see the same `TMUX_PANE` and write the same option, and the last writer wins with no way to tell whose turn ended. See the open questions |
 | A report containing `0x1f` or a newline | Impossible from our writer, which strips control characters. From a hostile writer, tmux substitutes both to spaces before Go sees them, and the report is the only variable field in its own format string, so a survivor costs one report and never a pane |
@@ -2202,15 +2552,19 @@ tests that catch a composition are the ones that assert two sections' outputs
   The off-by-one is still the point; it is no longer the only point.
 - **The idle verification window** (rule 3), and specifically the turn-end race
   that revision 2's version failed *and revision 3's window was too short to
-  survive*. The fixture is a first sight, then one changed capture, then
-  `settleAfter` identical ones — `settleAfter + 2` polls in total — which
-  **keeps** the report and derives `finishedAt` from its timestamp. Written
+  survive*. The fixture is the measured one: a first sight, then one changed
+  capture — the last repaint, which the turn-end event precedes by 7–52 ms — then
+  `settleAfter` identical ones, `settleAfter + 2` polls in total, which **keeps**
+  the report and derives `finishedAt` from its timestamp. Written
   against the constants and never against literals: the same fixture at
   `N_idle = settleAfter + 1` drops the report, which is exactly the off-by-one
   revision 3 shipped, so a test hard-coding `3` and `4` would pass through the
   next change to `settleAfter`. Also: a screen that changes at every poll for the
-  whole window drops it and derives nothing; and with no client connected the
-  derivation is immediate, because there is nothing to verify.
+  whole window drops it and derives nothing; the window **closes at the verdict**
+  rather than running out the count, asserted on the captures the poller makes
+  and not only on the state it ends with, since a report accepted at poll 3 and
+  one accepted at poll 4 look identical from the outside; and with no client
+  connected the derivation is immediate, because there is nothing to verify.
 - **The classifier baseline for a capture-skipped pane is dropped.** A pane whose
   capture is skipped for several polls and then enters a verification window is a
   **first sight** to `Observe` — asserted by the poller passing only the panes it
@@ -2218,14 +2572,31 @@ tests that catch a composition are the ones that assert two sections' outputs
   window poll, so no `time.Now()` finish edge can be stamped inside the window.
   This is the premise rule 3's arithmetic rests on and revision 3 never stated
   it, which is how the floor came out wrong in two different ways at once.
-- **A rule-3 rejection is provisional and a rule-1/2 rejection is not.** Same
-  standing report, two rules, two behaviours: after a rule-3 drop, one poll at
-  which the classifier reports `idle` clears the rejection, accepts the standing
-  report and derives `finishedAt` from its timestamp; after a rule-1 or rule-2
-  drop, a screen that settles later changes nothing and the report stays
-  rejected until a newer value arrives. Assert both in one test, because the
-  slot is one field and the difference is a flag on it that a refactor will
-  helpfully simplify away.
+- **A rejection means the same thing whichever rule made it, and a classifier
+  `idle` does not clear one.** This is the test that holds revision 5's
+  correction of revision 4 in place, and it has to be written as the negative:
+  after a rule-3 drop, a later poll at which the classifier reports `idle`
+  changes nothing — the report stays rejected and no `finishedAt` is derived from
+  it — and the same is true after a rule-1 or rule-2 drop. What *does* clear the
+  slot is a newer value, and the fixture for that is the next turn's `working`
+  write. Assert the three rules in one test: the slot is one field, and the
+  behaviour revision 4 wanted is exactly the kind a reader will re-add as an
+  improvement unless the test says why it is wrong.
+- **A rule-3 rejection does not cost the badge**, which is the claim that makes
+  the rule above affordable. Same fixture, continued: the pane is back on the
+  classifier, the classifier's `everChanged` is set because the screen churned
+  through the whole window, and when the screen finally settles the classifier
+  stamps its own `finishedAt`. Assert that it lands, and that it is dated `now`
+  rather than the report's timestamp — the two are different facts and the test
+  should be able to tell which one it got.
+- **The late-repaint dwell in `Observe`** (finding A), against `state.go`
+  directly and independent of everything else here: a run of changed captures, a
+  settle, a stamp; then a **single** changed capture and a second settle, which
+  must **not** re-stamp; then the same again beyond `lateRepaintDwell`, which
+  must. Written against the constant, and paired with the test that keeps the
+  obvious wrong fix out — a turn whose whole visible life is one changed capture
+  followed by a settle **does** stamp, because a short turn and a late repaint
+  are the same signal and only the dwell separates them.
 - **The ordering filter and the rejection slot, together**: a report older than
   the last accepted one is refused and the previously accepted state stands; a
   strictly newer one is taken; a report rejected on evidence is re-rejected on
@@ -2300,11 +2671,10 @@ a different threat model.
 Revision 1 listed seven, one of them already answered. Revision 2 closed most of
 question 1 on the documentation and added two. Revision 3 changed what question 1
 *decides*, floored question 3, promoted the writer-identity idea out of question
-9, and added two more. Revision 4 adds no new questions and sharpens three:
-question 3 now carries the corrected floor and is the measurement `N_idle` is
-explicitly pending; question 9 and question 11 gain the `TMUX_PANE` inheritance
-measurement for teammates, background sessions and nested CLIs; and question 10
-is waiting on four screen captures rather than three.
+9, and added two more. Revision 4 added no new questions and sharpened three.
+**Revision 5 closes half of question 3 with a measurement, records what the same
+run says about question 10's rarity, and adds one question that finding A brought
+with it.**
 
 1. **`PreToolUse`'s per-call cost, and nothing else about it.** Revision 1 asked
    three things here — the payload shape, the cost, and whether `"async"` exists
@@ -2329,24 +2699,33 @@ is waiting on four screen captures rather than three.
    2 sharpens what to measure: the failure of expiring early is a false `idle` on
    a quiet screen, not merely an extra fork, so the case to measure is **a single
    long tool call that emits no sub-events, with no client connected**. The
-   number is still a guess biased short.
-3. **`N_idle` and `N_blocked`, and the turn-end settle measurement `N_idle` is
-   pending.** Revision 3 floored this at `N >= settleAfter + 1`, which is the
-   floor for a window containing **zero** repaints; the arithmetic in `Observe`
-   gives `N_idle >= settleAfter + R + 1`, where `R` is the number of polls inside
-   the window at which the capture differs from the one before it. `R >= 1` by
-   inspection, so `settleAfter + 2` — four polls, about six seconds — is the
-   floor below which the "one repaint is noise" property this document advertises
-   is simply false. **The value is pending a measurement now in flight**: how
-   many polls a real turn end takes to settle on each of the three agents, after
-   `Stop`, `agent_settled` and `session.idle`. Whatever `R` comes back as,
-   `N_idle = settleAfter + R + 1` and only the number changes. `N_blocked` needs
-   no `R` — anything that moves is dropped by rule 1 before rule 2 sees it — so
-   its floor is `settleAfter + 1`. Revision 3 guessed the two rules "may want two
-   constants"; they do, for a derived reason. The remaining trade is unchanged
-   and applies to `N_blocked`: too small and rule 2 drops true `blocked` on
-   slow-repainting screens, too large and the overnight case takes longer to
-   correct itself.
+   number is still a guess biased short. Revision 5 adds one data point from the
+   other end and it is not reassuring: finding B measured screens sitting
+   perfectly still for about six seconds *while the agent was waiting on the
+   model*, which is the same silence this question is about, arriving from a
+   cause nobody had listed. Six seconds is far inside the window; the question is
+   what the tail looks like, and it is the same tail both questions want.
+3. ~~`N_idle`~~ **`N_blocked` — and `N_idle` is answered.** `N_idle =
+   settleAfter + 2`, **measured**: 88 turns across the three agents, 44 counted
+   from the agent's own turn-end event, 1,440 exact-timing replays of the poll
+   grid at every phase, polls-to-settle 3 or 4 and never 5, with every turn on
+   every agent showing some phase at which it took 4. `R = 1` is a measurement
+   now rather than an inspection, and the mechanism is that the turn-end event
+   fires 7–52 ms *before* the agent's last repaint, so a poll can be spent on the
+   pre-final screen. Revision 4's `settleAfter + 1` reasoning was sound on a
+   false premise — that the report and the last repaint are simultaneous — and
+   `N = 3` would have discarded about 1 true turn end in 50 on claude and
+   opencode, silently. Recorded in "Reports are checked against the screen"; the
+   value is expressed as `settleAfter + 2` in code and never as `4`.
+
+   **What remains is `N_blocked` alone, and the measurement says nothing about
+   it.** Rule 2 never has to absorb a repaint, because rule 1 drops anything that
+   moves before rule 2 sees it, so `N_blocked` needs no `R` and its floor stays
+   `settleAfter + 1`. Nobody should carry `4` across from `N_idle`. The trade is
+   unchanged: too small and rule 2 drops true `blocked` on slow-repainting
+   screens, too large and the overnight case takes longer to correct itself.
+   Measuring it needs the thing question 10 is also waiting on — real dialog
+   screens — which is why it is still open.
 4. ~~Whether tmux can strip control bytes at read time.~~ **Answered by
    `f25e066`**, and left here because the answer is a trap rather than a yes.
    Three ways to get it wrong: `[[:cntrl:]]` blanks every value including good
@@ -2407,6 +2786,15 @@ is waiting on four screen captures rather than three.
     need an MCP server that asks for something, and the setup question needs a
     teammate. Until then those four waits are invisible to both authorities,
     which is the largest single hole in this feature's coverage.
+
+    **Unchanged by revision 5's measurement, and that is itself the datum.** A
+    3-agent, 88-turn run met **none** of the four screens and did not provoke
+    them — no quota banner, no elicitation of either kind, no teammate setup
+    question. That is not an answer and it does not shrink the hole: it is
+    evidence that these screens are rare enough that ordinary use will not
+    capture them by accident, which means somebody has to go and manufacture each
+    one deliberately. Anyone budgeting this work should assume that rather than
+    hoping a screenshot turns up.
 11. **Cross-agent nesting**, which nobody had considered until the second review:
     Claude running inside a pi pane, or any agent started from another agent's
     shell. Both integrations see the same `TMUX_PANE`, both write `@wterm_agent`,
@@ -2435,3 +2823,17 @@ is waiting on four screen captures rather than three.
     documented as closed, which is why the whitelist's default is "ignore". If it
     ever becomes closed, the default could tighten — but the default is cheap
     enough that this is curiosity rather than a blocker.
+13. **How late a late repaint can be — the constant behind finding A's dwell.**
+    Two observations, 5.0 s and 9.0 s after the screen had otherwise stopped,
+    both on one claude prompt shape ("write a file, then reply done"), both on 2
+    of 30 turns of one run. That is a bound, not a distribution, and the
+    `lateRepaintDwell` proposed in "A late repaint re-lights a cleared badge" is
+    floored by it at about 13.5 s and set at 15 s biased long. What to measure:
+    whether the tail is a property of that prompt shape, of file writes, of
+    claude's input box specifically, or of terminal apps generally; and whether
+    any agent produces one beyond ten seconds. The measurement is cheap — it is
+    the same harness with a longer idle watch and a per-line diff — and until it
+    is done the dwell is a guess of the same standing as the 60-second window in
+    question 2. It is also the reason the dwell is a separable task rather than
+    part of this design: a constant nobody has measured should not be able to
+    hold up the mechanism it protects.

@@ -17,18 +17,17 @@
  * selectors here are the ones that exist.
  */
 
-import { BASE_SESSION, BASE_WINDOW, enroll, expect, focusTerminal, pill, test } from './harness'
-import type { Page, Locator } from '@playwright/test'
-
-/** `session › window › command`. */
-function breadcrumb(page: Page): Locator {
-  return page.getByRole('navigation', { name: 'Location' })
-}
-
-/** The sidebar row for a window, labelled `<index>: <name>`. */
-function windowRow(page: Page, name: string): Locator {
-  return page.getByRole('button', { name: new RegExp(`\\d+: ${name}`) })
-}
+import {
+  BASE_SESSION,
+  BASE_WINDOW,
+  breadcrumb,
+  enroll,
+  expect,
+  focusTerminal,
+  pill,
+  test,
+  windowRow,
+} from './harness'
 
 test('enrolls a browser and round-trips a keystroke through real tmux', async ({ page, wterm }) => {
   // The core promise, and four things at once that no unit test covers: the

@@ -72,6 +72,11 @@ export interface Wterm {
   /** Run a tmux command against this test's private server. */
   tmux(...args: string[]): string
   /**
+   * A copy of `cat` named `name`, so a pane running it reads as that agent.
+   * Returns the absolute path to it.
+   */
+  fakeAgent(name: string): string
+  /**
    * Stop the daemon and start another on the same port and state. The nearest
    * thing to "the network went away and came back" that a browser can actually
    * be made to see -- see the note on `setOffline` in terminal.spec.ts.
@@ -144,6 +149,13 @@ class Harness implements Wterm {
       // this suite by hand. $TMUX makes tmux refuse to nest, and a browser tab
       // is not a nested client.
       TMUX: undefined,
+      // What a session created from the browser runs. tmux takes default-shell
+      // from the environment of whoever started the server, so without this a
+      // `POST /api/sessions` here would launch the developer's login shell and
+      // source their real ~/.zshrc inside the test -- slow, noisy, and not
+      // isolation. `sh` also gives the short, colourless prompt the terminal
+      // assertions in this suite are written against.
+      SHELL: '/bin/sh',
     }
   }
 
@@ -251,11 +263,55 @@ class Harness implements Wterm {
     this.cli('revoke', id)
   }
 
+  /**
+   * One tmux command against this test's private server.
+   *
+   * stderr is captured rather than inherited, for the reason `cli` gives: a
+   * test may ask tmux something whose answer is a refusal -- "no server
+   * running" after a `kill-server`, say -- and inheriting it prints a line that
+   * reads like a failure into the middle of a passing run. It goes into the
+   * exception instead, which is where it is worth reading.
+   */
   tmux(...args: string[]): string {
-    return execFileSync(this.#realTmux, ['-L', this.#tmuxSocket, '-f', '/dev/null', ...args], {
-      env: { ...process.env, TMUX_TMPDIR: this.#tmuxTmp, TMUX: undefined },
-      encoding: 'utf8',
-    }).trimEnd()
+    const argv = ['-L', this.#tmuxSocket, '-f', '/dev/null', ...args]
+    try {
+      return execFileSync(this.#realTmux, argv, {
+        // The same SHELL as the daemon's: this is usually the call that starts
+        // the server, and default-shell is fixed at that moment for every pane
+        // tmux opens afterwards, whoever asks for it.
+        env: { ...process.env, TMUX_TMPDIR: this.#tmuxTmp, TMUX: undefined, SHELL: '/bin/sh' },
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trimEnd()
+    } catch (err) {
+      const stderr = (err as { stderr?: string }).stderr ?? ''
+      throw new Error(`tmux ${args.join(' ')} failed: ${stderr.trim() || String(err)}`)
+    }
+  }
+
+  /**
+   * A copy of `cat` named `name`.
+   *
+   * tmux reports `#{pane_current_command}` from the kernel's idea of a
+   * process's name, which is the basename of the file that was exec'd -- so a
+   * copy of `cat` named "claude" is a pane the daemon cannot tell from a real
+   * one, and the real `tmux.Agents` list is what decides. It also behaves the
+   * way the classifier needs: it holds the pane open, and echoes whatever is
+   * sent to it, so a `send-keys` is a redraw.
+   *
+   * This is `internal/tmux/testutil.FakeAgent` in TypeScript, and for the same
+   * reason: the alternative is requiring a coding agent to be installed on the
+   * machine running the suite.
+   */
+  fakeAgent(name: string): string {
+    const dest = path.join(this.#dir, 'bin', name)
+    if (!fs.existsSync(dest)) {
+      const cat = execFileSync('sh', ['-c', 'command -v cat'], { encoding: 'utf8' }).trim()
+      if (cat === '') throw new Error('cat is not on PATH')
+      fs.copyFileSync(cat, dest)
+      fs.chmodSync(dest, 0o755)
+    }
+    return dest
   }
 
   log(): string {
@@ -305,6 +361,39 @@ export { expect } from '@playwright/test'
  */
 export function pill(page: Page): Locator {
   return page.locator('[role="status"][aria-live="polite"]')
+}
+
+/** `session › window › command`, in the header. */
+export function breadcrumb(page: Page): Locator {
+  return page.getByRole('navigation', { name: 'Location' })
+}
+
+/** The sidebar row for a window, labelled `<index>: <name>`. */
+export function windowRow(page: Page, name: string): Locator {
+  return page.getByRole('button', { name: new RegExp(`\\d+: ${name}`) })
+}
+
+/**
+ * The sidebar's group heading for a session, which is also its context menu.
+ *
+ * `data-sidebar` rather than the `data-slot` every other row is found by:
+ * shadcn writes both, and `SidebarGroupLabel` spreads its props *after* them,
+ * so the `ContextMenuTrigger` this row is wrapped in overwrites `data-slot`
+ * with its own. `data-sidebar` is the one that survives.
+ */
+export function sessionLabel(page: Page, name: string): Locator {
+  return page.locator('[data-sidebar="group-label"]').filter({ hasText: name })
+}
+
+/**
+ * The agent state dot on a row, if it has one.
+ *
+ * `data-agent-state` is the only thing about the dot that is not a colour, and
+ * it is what the vitest suite asserts on too -- so a row with no dot is
+ * `toHaveCount(0)` here rather than a colour that happens not to be there.
+ */
+export function stateDot(row: Locator): Locator {
+  return row.locator('[data-agent-state]')
 }
 
 /**

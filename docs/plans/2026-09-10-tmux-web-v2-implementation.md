@@ -972,6 +972,35 @@ Extend `e2e/`:
   group-key bug
 - the roll-up: a blocked pane makes its window and session read blocked
 
+Four things this took that are not obvious from the list above, recorded because
+each of them is a test that passes for the wrong reason if you get it wrong:
+
+1. **The agent is a copy of `cat`, not of `sh`,** and it is named for an agent
+   already on `Agents` -- `internal/tmux/testutil.FakeAgent`'s trick, in
+   TypeScript, on the harness. `cat` holds the pane open and echoes what is sent
+   to it, so a `send-keys` is a redraw; adding a fake name to `Agents` for the
+   duration of a test races the poll goroutine, which is why that list is left
+   alone.
+2. **The first observation of a pane always reports working** -- there is
+   nothing to compare it against -- so "create an agent pane, see working" is
+   vacuous. The test waits for *idle* first, then churns, then waits for the
+   state to come back. Only that order proves a capture was taken twice and
+   compared.
+3. **`window-size latest` sizes windows from the most recent client on the
+   server, whatever session it is attached to.** A session created with `-x/-y`
+   and never attached to still gets resized to the headless browser's terminal
+   the moment a tab connects, and a 31-row approval box in a 10-row pane has
+   scrolled off the screen `capture-pane` returns -- so the pane reads idle and
+   the roll-up test quietly tests nothing. The blocked test sets
+   `window-size manual` and resizes the window itself.
+4. **A reload wipes the daemon's `finishedAt`.** The classifier is emptied
+   whenever the last browser disconnects, so a single-tab reload clears a `done`
+   badge whether or not anything was persisted. The persistence test keeps a
+   second tab open in the same browser context -- same localStorage, its own
+   sessionStorage -- so the daemon never sees zero clients and the badge's
+   absence after the reload can only come from `useSeenPanes` having written the
+   map.
+
 ## Definition of done
 
 - `make test` and `make test-e2e` pass.

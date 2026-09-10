@@ -148,8 +148,8 @@ func (c *Client) SelectPane(ctx context.Context, session, paneID string) error {
 	// unset pane id would quietly navigate the tab somewhere arbitrary instead
 	// of failing. The ids come from the frontend, where "no selection yet" is
 	// one bug away from being the empty string.
-	if !isPaneID(paneID) {
-		return fmt.Errorf("select pane: %q is not a tmux pane id", paneID)
+	if err := ValidatePaneID(paneID); err != nil {
+		return fmt.Errorf("select pane: %w", err)
 	}
 	if session == "" {
 		return fmt.Errorf("select pane %s: no session given", paneID)
@@ -164,19 +164,6 @@ func (c *Client) SelectPane(ctx context.Context, session, paneID string) error {
 	}
 	_, err = c.Run(ctx, "select-pane", "-t", paneID)
 	return err
-}
-
-// isPaneID reports whether s is a tmux pane id, e.g. "%3".
-func isPaneID(s string) bool {
-	if len(s) < 2 || s[0] != '%' {
-		return false
-	}
-	for _, r := range s[1:] {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 // KillSession removes a throwaway session explicitly. destroy-unattached is the

@@ -1,0 +1,32 @@
+  @devkade/pi-plan:src, @juanibiapina/pi-extension-settings:src,                                    
+@juanibiapina/pi-powerbar:node_modules/@juanibiapina/pi-usage,                                      
+@juanibiapina/pi-powerbar:src/powerbar, @juanibiapina/pi-powerbar:src/powerbar-context,             
+@juanibiapina/pi-powerbar:src/powerbar-git, @juanibiapina/pi-powerbar:src/powerbar-model,           
+@juanibiapina/pi-powerbar:src/powerbar-provider, @juanibiapina/pi-powerbar:src/powerbar-sub,        
+@juanibiapina/pi-powerbar:src/powerbar-tokens, @plannotator/pi-extension:,                          
+@saccolabs/pi-claude-cli@0.6.1, @tmustier/pi-ralph-wiggum, @tmustier/pi-raw-paste,                  
+@tmustier/pi-usage-extension, davebcn87/pi-autoresearch:pi-autoresearch,                            
+obra/superpowers:.pi/extensions/superpowers.ts, pi-add-dir:pi-add-dir, pi-ask-user, pi-btw:btw.ts,  
+pi-interactive-shell, pi-mcp-adapter, pi-prompt-template-model, pi-simplify:dist, pi-slopchop:src,  
+pi-subagents, pi-web-access, tintinweb/pi-manage-todo-list:src, VandeeFeng/pi-memory-md             
+
+[Themes]                                                                                            
+  adventure, adwaita-dark, arcoiris, arthur, atom, aura, black-metal-bathory, black-metal-burzum,   
+black-metal-khold, box, brogrammer, carbonfox, catppuccin-mocha, citruszest, cursor-dark, cutie-pro,
+dark-modern, dark-pastel, dimmed-monokai, doom-peacock, dracula-plus, earthsong,                    
+everforest-dark-hard, fahrenheit, flatland, flexoki-dark, front-end-delight, fun-forrest, galizur,  
+github-dark-colorblind, github-dark-high-contrast, glacier, gruber-darker, gruvbox-dark,            
+gruvbox-dark-hard, gruvbox-material, guezwhoz, hackerman, hackerman-ultra, hacktober, hardcore,     
+havn-skumring, ic-orange-ppl, iterm2-smoooooth, iterm2-tango-dark, japanesque, jellybeans,          
+kanagawa-wave, kurokula, later-this-evening, lovelace, material-darker, matte-black, mellow, miasma,
+nvim-dark, popping-and-locking, sea-shells, sleepy-hollow, smyck, terminal, terminal-tinted,        
+tomorrow-night, tomorrow-night-bright, tomorrow-night-burns, twilight, vague, vesper, xcode-dark-hc 
+
+
+ Warning: tmux extended-keys is off. Modified Enter keys may not work. Add `set -g extended-keys    
+ on` to ~/.tmux.conf and restart tmux.                                                              
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+                                                                                                    
+────────────────────────────────────────────────────────────────────────────────────────────────────
+                    0%                                                    zai │ glm-5.3-flash · high

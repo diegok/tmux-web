@@ -1,0 +1,32 @@
+ PostgreSQL, SQLite, MySQL/MariaDB, MongoDB.                                                        
+                                                                                                    
+ One╭─ ask_user ───────────────────────────────────────────────────────────────────────────────╮    
+    │  Which database should this project use?                                                 │    
+ Per│                                                                                          │:   
+ cur│  Context:                                                                                │    
+ con│  No code exists yet (the working directory only holds captured terminal frame            │— I 
+ sho│  snapshots), so there's no existing stack or schema to constrain the choice. This is an  │    
+ loc│  architectural decision that shapes schema, queries, and deployment, so I'm collecting   │orm 
+ han│  an explicit decision before writing any code.                                           │    
+    │                                                                                          │    
+ Ask│  Quick trade-off summary:                                                                │    
+    │  - PostgreSQL: strongest for relational integrity, complex queries, concurrent writes;   │    
+ Evi│    standard production default.                                                          │    
+ fil│  - SQLite: zero-config, single-file, great for local tools/prototypes/small datasets;    │    
+ fil│    weak for concurrent writers.                                                          │    
+    │ ↓  - MySQL/MariaDB: battle-tested relational option; common in Perl/legacy stacks.       │    
+ Ste│                                                                                          │    
+ amb│ Filter: type to filter              │ PostgreSQL                                         │    
+    │ → 1. PostgreSQL                     │                                                    │    
+    │   2. SQLite                         │ Production-grade relational; rich SQL, strong      │    
+ ask│   3. MySQL / MariaDB                │ concurrency and integrity                          │    
+   4│   4. MongoDB                        │                                                    │    
+ Wai│     Type something. — Enter a       │ ────────────────────────────────────────────────── │    
+    │     custom response                 │                                                    │    
+    │                                     │ Press Enter to select this option.                 │    
+ ⠋ W│  type filter • PgUp/PgDn prompt • backspace erase • ↑↓ navigate • alt+o hide • enter     │    
+    │  select • esc clear/cancel • ctrl+c cancel                                               │    
+────╰──────────────────────────────────────────────────────────────────────────────── v0.15.0 ─╯────
+                                                                                                    
+────────────────────────────────────────────────────────────────────────────────────────────────────
+↑4.1k ↓1.1k R70k CH97.5% $0.00 │ ▂                   3%                   zai │ glm-5.3-flash · high

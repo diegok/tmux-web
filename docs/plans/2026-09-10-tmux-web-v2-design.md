@@ -96,19 +96,42 @@ it.
 **The signal that is actually there is the screen.** A working agent redraws at
 least once a second: the spinner cycles and the elapsed-seconds counter
 increments. So for a **known agent pane**, each poll captures the pane and hashes
-its tail:
+**the whole visible capture**, not a tail:
 
 - Hash changed since the last poll → `working`.
 - Hash identical for N consecutive polls → `idle`. N=2, so ~3s at the current
   interval.
 
 The 1.5s poll cannot alias against a per-second counter, which is what made the
-title-churn threshold fragile.
+title-churn threshold fragile. Verified on both edges: a working pane's capture
+differed at every 1.5s sample (spinner cycling, counter ticking
+`16m 48s → 50s → 51s`), and four idle panes -- three Claude Code, one opencode --
+hashed identical across eight consecutive polls.
+
+**The whole capture rather than a tail**, because a tail needs a size nobody can
+justify, a wrapped footer can push the activity line out of one that is too
+small, the blocked matcher wants the full screen anyway, and the full-screen hash
+was verified exactly as stable as a tail hash when idle. Hashing 54 lines instead
+of 12 is free next to the fork.
+
+Two caveats, stated rather than assumed. opencode has never been *observed
+working*, so its busy screen is unverified -- worth confirming the first time one
+is seen running. And a TUI that animates only colour would evade this, since
+`capture-pane -p` without `-e` drops attributes; Claude Code animates glyphs, so
+it is unaffected.
 
 This is the cost the design deliberately accepts, and it is the cost the owner
 scoped: **only known agents, only while a client is connected.** Three agent
 panes is two forks a second. Non-agent panes — zsh, nvim, a build — are never
 captured and never classified.
+
+"A client is connected" means **the registry holds at least one live terminal
+socket** — not that anyone is viewing that particular pane, which would make the
+sidebar useless for exactly the panes you are not looking at. With no client,
+captures stop and `AgentState` reports **empty**, not a frozen last value: stale
+state presented as current is worse than none. When a client connects the
+per-pane map starts empty, so states settle over the first two polls (~3s) and
+stamp no finish edge — the same rule as a daemon restart.
 
 ### Blocked comes from the same capture
 
@@ -138,6 +161,13 @@ as blocked within one poll (~1.5s). Reaching idle still takes N=2 polls (~3s).
 
 Captured text is matched in memory and discarded — never written to the state
 file, never logged, never in an error message.
+
+### The upgrade path, when forks stop being free
+
+A read-only `tmux -C` control-mode sidecar — already named in v1 as the poller's
+eventual upgrade — would deliver `%output` push-based, giving churn with no forks
+at all. Capture-hashing degrades into it cleanly, since both answer the same
+question. Not worth building now: three panes at two forks a second is nothing.
 
 ### Ship order
 
@@ -199,8 +229,10 @@ never decides what counts.
 
 ### Server state
 
-The poller gains one in-memory map keyed by pane id: previous title, unchanged
-count, last working→idle timestamp. Pane ids are unique per server and stable
+The poller gains one in-memory map keyed by pane id: **the previous
+capture hash**, how many consecutive polls it has been unchanged, and the last
+working→idle timestamp. (Revision 1 stored the previous *title* here; that is the
+machine this revision exists to remove.) Pane ids are unique per server and stable
 for a pane's life. The map is pruned to whatever the current snapshot contains,
 so a closed pane's entry disappears on the next poll.
 
@@ -286,10 +318,24 @@ reason to block the action — the owner asked for it — but the dialog must sa
 behaviour for "the session I was attached to no longer exists": report it and
 offer the session list, rather than retrying against a group that is gone.
 
-**The working directory never crosses the wire.** The browser sends "split
+**Pane paths never cross the wire.** The browser sends "split
 `%6`"; the daemon resolves `#{pane_current_path}` for `%6` itself and passes it
 as `-c`. New windows and splits therefore open where you were working, without
 paths appearing in the snapshot — preserving v1's decision to keep them out.
+
+The one path that does cross is the optional `path` on session create, typed by
+the owner in the dialog. That is not the snapshot leak the rule guards against,
+but it gets the same treatment as `split -c`: the daemon stats it first and
+reports a missing directory rather than letting tmux land silently in `$HOME`.
+
+### When a management call fails
+
+A stale id targets nothing and tmux exits 1 — the safety property — but that says
+nothing about what the owner sees. Failures surface as a `sonner` toast naming
+what was attempted and tmux's own message ("can't find pane: %7"), and the
+sidebar refreshes immediately rather than waiting for the next poll, so a row
+that no longer exists disappears along with the error. Nothing is retried: a
+failed kill that silently succeeded on retry is worse than one that failed.
 
 ### Pane labels
 
@@ -362,6 +408,7 @@ resets the toggle.
 | Rename or kill racing the poll | Panes, windows and sessions all have ids, so a stale row targets nothing |
 | Killing the last pane or window | Cascades to the session and the whole group, disconnecting attached tabs. The dialog says so; reconnect reports it rather than retrying |
 | A label containing control bytes | Rejected on write; a row that still arrives malformed is dropped and counted, as v1 does |
+| A resize, or a zoom | Changes the capture once, so the pane reads working for one poll and settles in ~3s. Cosmetic and self-healing; do not "fix" it by excluding rows |
 | Daemon restart | Every agent settles from working to idle in ~3s and stamps no finish edge, so no badge storm |
 | tmux server restart | Pane ids restart at `%0`; `seen` keys carry the server generation so old entries cannot suppress new badges |
 | `split-window -c` on a deleted directory | tmux silently succeeds and lands in `$HOME`. The daemon resolves the path itself, so it stats first and reports rather than surprising you |
@@ -372,8 +419,9 @@ Following v1:
 
 - **Integration against real tmux** for every management verb, including that a
   kill refuses an `@wterm_web` session and that `=` prevents prefix matching.
-- **Table tests for classification**, driven by recorded title sequences and
-  captured screens, so a rule change is a data change.
+- **Table tests for classification**, driven by recorded capture
+  sequences -- a working pane's successive screens and an idle pane's identical
+  ones -- so a rule change is a data change.
 - **Playwright** for the two-step kill, the roll-up, and the tab badge.
 - **A regression test for the restart badge storm** — restart the poller with
   agent panes present and assert no finish edge is stamped.

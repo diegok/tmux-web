@@ -490,3 +490,60 @@ func TestAgentWithNoRulesIsNeverBlocked(t *testing.T) {
 		}
 	}
 }
+
+// The request, exactly, and no choices at all.
+//
+// Asserting "not nil" would pass for a parser that quoted the header, the diff
+// preview or the key hints. The empty Choices is the deliberate half of this:
+// opencode's options share their row with "⇆ select  enter confirm" and nothing
+// but a wider run of spaces separates them, on the one capture that exists.
+func TestExtractQuestionOpencode(t *testing.T) {
+	q := ExtractQuestion("opencode", readFixture(t, "opencode-blocked.txt"))
+	if q == nil {
+		t.Fatal("no question extracted from a screen that IsBlocked matches")
+	}
+	if want := "Edit fixture.txt"; q.Text != want {
+		t.Errorf("Text = %q, want %q", q.Text, want)
+	}
+	if len(q.Choices) != 0 {
+		t.Errorf("Choices = %q, want none: the option row cannot be told from the "+
+			"key hints beside it, and no choices beats wrong ones", q.Choices)
+	}
+}
+
+// Extraction failing must not take the state with it -- and unlike Claude Code,
+// opencode has a screen that shows it. Its badge comes from the header and its
+// quote from the request line below, so losing the second leaves the first
+// standing: the blocked-but-unquotable capture the plan called for and the
+// Claude fixture could not produce.
+//
+// The composed screen also carries an arrow inside the file preview, which is
+// what a grammar that read past the request line would quote in its place.
+func TestExtractQuestionOpencodeFailureKeepsTheState(t *testing.T) {
+	dialog := readFixture(t, "opencode-blocked.txt")
+	restyled := dropGutterLine(t, dialog, "→ Edit fixture.txt")
+	restyled = strings.Replace(restyled, "1 + hello", "1 + → an arrow in the file", 1)
+
+	for _, tc := range []struct {
+		name    string
+		screen  string
+		blocked bool
+	}{
+		// A restyled arrow, or a capture landing mid-redraw. The header is
+		// untouched, so the badge is untouched.
+		{"no request line", restyled, true},
+		// An answered box above a live input box. Extraction reads the same
+		// bottommost block the detector does, so it quotes nothing here.
+		{"a box already answered", dialog + readFixture(t, "opencode-idle.txt"), false},
+	} {
+		if tc.screen == dialog {
+			t.Fatalf("%s: transform changed nothing", tc.name)
+		}
+		if got := IsBlocked("opencode", tc.screen); got != tc.blocked {
+			t.Errorf("%s: IsBlocked = %v, want %v", tc.name, got, tc.blocked)
+		}
+		if q := ExtractQuestion("opencode", tc.screen); q != nil {
+			t.Errorf("%s: want no question rather than a wrong one, got %+v", tc.name, q)
+		}
+	}
+}

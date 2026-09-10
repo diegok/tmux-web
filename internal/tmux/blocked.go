@@ -44,8 +44,9 @@ var blockedRules = map[string]dialog{
 		question:     regexp.MustCompile(`\?$`),
 	},
 	"opencode": opencodeDialog{
-		gutter: "┃",
-		header: regexp.MustCompile(`^\W*Permission required$`),
+		gutter:  "┃",
+		header:  regexp.MustCompile(`^\W*Permission required$`),
+		request: regexp.MustCompile(`^→\s+(\S.*)$`),
 	},
 }
 
@@ -263,11 +264,9 @@ func dialogRegion(screen, rules string) ([]string, bool) {
 // opencodeDialog matches opencode's permission box, which says outright what
 // Claude Code's only implies: its first line is "Permission required".
 //
-// So there is nothing here counting options. There could not be: opencode lays
-// its choices out sideways -- "Allow once   Allow always   Reject" -- on the
-// same row as the key hints that follow them, and no honest rule separates the
-// two. Nor is there anything matching a question mark; opencode's box asks
-// nothing, it announces.
+// So there is nothing here counting options, and nothing matching a question
+// mark: opencode's box asks nothing, it announces. (The options are not
+// countable anyway -- see extractQuestion.)
 //
 // What the header alone cannot say is which box on the screen it belongs to,
 // and that is what the structure is for: it must be the first line of the
@@ -283,6 +282,13 @@ type opencodeDialog struct {
 	// and none is required. Anchored at both ends because a title is the whole
 	// line: the same words inside a sentence are prose.
 	header *regexp.Regexp
+	// request is the line naming what is being asked for -- "→ Edit foo.txt".
+	// The arrow is matched literally and anchored, because unlike the header's
+	// "△" it is not decoration next to the claim: it is the only thing that
+	// says this line is the request rather than the file preview below it. If
+	// opencode restyles it the quote goes and the badge stays, which is the
+	// trade the whole extractor is built on.
+	request *regexp.Regexp
 }
 
 // isBlocked matches a header at the top of the bottommost guttered block.
@@ -297,25 +303,44 @@ type opencodeDialog struct {
 // these words would otherwise light the badge from inside a preview. A title is
 // the first thing in the block; blank rows above it are just the gutter.
 func (d opencodeDialog) isBlocked(screen string) bool {
-	block, ok := gutterBlock(screen, d.gutter)
-	if !ok {
-		return false
-	}
-	return d.header.MatchString(firstContent(block))
+	return d.header.MatchString(firstContent(gutterBlock(screen, d.gutter)))
 }
 
-// extractQuestion reads nothing yet: opencode's box is detected but not quoted.
+// extractQuestion returns the requested action -- "Edit fixture.txt" -- and no
+// choices at all.
+//
+// Not because they are hard to find but because they cannot be told apart from
+// the chrome beside them: opencode lays its options out sideways and puts the
+// key hints on the same row, "Allow once   Allow always   Reject" and then
+// "ctrl+f fullscreen  ⇆ select  enter confirm", separated by nothing but a
+// wider run of spaces on the one capture anybody has. A column threshold read
+// off a single screen is not a grammar, and matching the words themselves would
+// read this permission type only and quote key hints as options on the next.
+// Choices is omitempty for exactly this: the text is a convenience and half of
+// it beats a wrong half.
+//
+// The first arrow line of the live block is the request. Like the Claude Code
+// extractor, this does not re-check what isBlocked checked -- the caller has
+// just run the authoritative copy -- so a screen it was never meant to see
+// yields nil rather than a guess.
 func (d opencodeDialog) extractQuestion(screen string) *Question {
+	for _, line := range gutterBlock(screen, d.gutter) {
+		if m := d.request.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			return &Question{Text: m[1]}
+		}
+	}
 	return nil
 }
 
 // gutterBlock returns the bottommost run of consecutive guttered lines with the
-// gutter stripped, and whether there was one.
+// gutter stripped. A screen with no gutter on it has no block, and gets nil --
+// which no header matches and no request line is found in, so neither caller
+// has a case for it.
 //
 // A line without the gutter ends the block, blank ones included: opencode draws
 // the gutter down every row of a box, its empty rows too, so a gap really is
 // the end of one block and not a hole in it.
-func gutterBlock(screen, gutter string) ([]string, bool) {
+func gutterBlock(screen, gutter string) []string {
 	lines := strings.Split(screen, "\n")
 	last := -1
 	for i, line := range lines {
@@ -324,7 +349,7 @@ func gutterBlock(screen, gutter string) ([]string, bool) {
 		}
 	}
 	if last < 0 {
-		return nil, false
+		return nil
 	}
 	first := last
 	for first > 0 {
@@ -338,7 +363,7 @@ func gutterBlock(screen, gutter string) ([]string, bool) {
 		body, _ := guttered(line, gutter)
 		block = append(block, body)
 	}
-	return block, true
+	return block
 }
 
 // guttered returns what a line holds to the right of its gutter, and whether it

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -209,6 +210,55 @@ func TestRefreshCapturesOnlyKnownAgents(t *testing.T) {
 		if got := stateOf(t, p, id); got.AgentState != "" {
 			t.Errorf("pane %s = %q, want no state: it is not a known agent", id, got.AgentState)
 		}
+	}
+}
+
+// pi is the case that hazard was written for, and it is worth pinning on its
+// own screen rather than trusting the argument.
+//
+// pi's spinner keeps animating BEHIND the overlay while the question waits, so
+// every capture differs from the last and churn never settles: a detector gated
+// on idle would leave this pane reading "working" for as long as it waited,
+// which is the whole failure. The frames here are pi's own, substituted into
+// the real capture at the column the capture has them in -- so this also pins
+// that a screen changing behind the box does not disturb reading the box.
+func TestRefreshBlockedOverridesChurnForPi(t *testing.T) {
+	overlay := readFixture(t, "pi-blocked.txt")
+	if !strings.Contains(overlay, "⠋") {
+		t.Fatal("the capture no longer carries the spinner this test animates")
+	}
+	rows := []Row{{PaneID: "%1", Command: "pi"}}
+	screens := map[string]string{"%1": overlay}
+	captures := 0
+	connected := true
+	p := agentPoller(&rows, screens, &captures, &connected)
+	ctx := context.Background()
+
+	// Long enough that a pane which settled would have settled several times
+	// over: settleAfter is small, and the point is that it never gets there.
+	for _, frame := range []string{"⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇"} {
+		p.refresh(ctx)
+		next := strings.Replace(overlay, "⠋", frame, 1)
+		if next == overlay {
+			t.Fatal("the spinner substitution changed nothing")
+		}
+		screens["%1"] = next
+		if got := stateOf(t, p, "%1"); got.AgentState != StateBlocked {
+			t.Fatalf("a screen churning behind the overlay = %q, want blocked", got.AgentState)
+		}
+	}
+	// And no finish edge underneath it: nothing has finished, and an edge would
+	// outlive the overlay as a done badge on a pane that never ran to an end.
+	if got := stateOf(t, p, "%1").FinishedAt; got != 0 {
+		t.Errorf("a waiting overlay stamped a finish edge at %d", got)
+	}
+
+	// The overlay goes away: whatever churn says is what the pane reads, which
+	// is what makes the assertions above a decision rather than a constant.
+	screens["%1"] = readFixture(t, "pi-idle.txt")
+	p.refresh(ctx)
+	if got := stateOf(t, p, "%1").AgentState; got == StateBlocked {
+		t.Error("the overlay is gone and the pane still reads blocked")
 	}
 }
 

@@ -443,44 +443,70 @@ func TestIsBlockedOpencodeWantsTheWholeLine(t *testing.T) {
 	}
 }
 
-// Each agent's rules stay on that agent's screen. Run either fixture through
-// the other's grammar and nothing must match -- which is the whole reason the
+// Each agent's rules stay on that agent's screen. Run any fixture through
+// another's grammar and nothing must match -- which is the whole reason the
 // detector keeps a table per agent instead of one heuristic broad enough to
-// cover both shapes, and broad enough to fire on prose.
+// cover every shape, and broad enough to fire on prose.
+//
+// Every ordered pair, not a chosen few: pi's overlay carries 319 of the rune
+// Claude Code draws its rules with, and opencode's request line begins with the
+// arrow pi highlights an option with, so the pairs that could plausibly cross
+// are not the ones that look alike from a distance.
 func TestBlockedRulesDoNotCrossAgents(t *testing.T) {
-	claude := readFixture(t, "claude-blocked.txt")
-	opencode := readFixture(t, "opencode-blocked.txt")
-	if !IsBlocked("claude", claude) || !IsBlocked("opencode", opencode) {
-		t.Fatal("both fixtures must match their own agent, or this test proves nothing")
+	agents := []string{"claude", "opencode", "pi"}
+	screens := map[string]string{}
+	for _, a := range agents {
+		screens[a] = readFixture(t, a+"-blocked.txt")
+		if !IsBlocked(a, screens[a]) {
+			t.Fatalf("%s-blocked.txt does not match its own agent, so this test proves nothing", a)
+		}
 	}
-	if IsBlocked("opencode", claude) {
-		t.Error("IsBlocked(opencode, claude-blocked.txt) = true: that is a guess, not a match")
+	for _, a := range agents {
+		for _, b := range agents {
+			if a == b {
+				continue
+			}
+			if IsBlocked(a, screens[b]) {
+				t.Errorf("IsBlocked(%s, %s-blocked.txt) = true: that is a guess, not a match", a, b)
+			}
+			if q := ExtractQuestion(a, screens[b]); q != nil {
+				t.Errorf("ExtractQuestion(%s, %s-blocked.txt) = %+v, want nil", a, b, q)
+			}
+		}
 	}
-	if IsBlocked("claude", opencode) {
-		t.Error("IsBlocked(claude, opencode-blocked.txt) = true: that is a guess, not a match")
-	}
-	if q := ExtractQuestion("opencode", claude); q != nil {
-		t.Errorf("ExtractQuestion(opencode, claude-blocked.txt) = %+v, want nil", q)
-	}
-	if q := ExtractQuestion("claude", opencode); q != nil {
-		t.Errorf("ExtractQuestion(claude, opencode-blocked.txt) = %+v, want nil", q)
+	// The idle captures too: an agent sitting at its prompt is not blocked
+	// under anybody's rules, and pi's idle screen carries 200 of Claude Code's
+	// rule rune.
+	for _, file := range []string{"claude-idle.txt", "opencode-idle.txt", "pi-idle.txt"} {
+		screen := readFixture(t, file)
+		for _, a := range agents {
+			if IsBlocked(a, screen) {
+				t.Errorf("IsBlocked(%s, %s) = true on an idle screen", a, file)
+			}
+		}
 	}
 }
 
-// An agent on the known list with no rules entry is never blocked.
+// A command with no rules entry is never blocked.
 //
-// `pi` is that agent: it is not installed on this machine, so no dialog of its
-// has been captured, so it has no rules -- deliberately, because inventing a
-// grammar for an unseen dialog is the failure this whole table avoids. It reads
-// working or idle, and the day someone captures its box the entry is a data
-// change. This pins both halves: that the gap is real, and that it is harmless.
+// `pi` used to be the case this test was written for: it had no capture, so it
+// had no rules. It has both now, so what remains is the general property --
+// nothing that is not in the table can ever be reported blocked, whatever is on
+// its screen.
+//
+// Every agent on the Agents list must have an entry or be named here, so that
+// an agent added to that list without rules is a decision somebody makes rather
+// than a badge that silently never lights.
 func TestAgentWithNoRulesIsNeverBlocked(t *testing.T) {
-	if _, ok := blockedRules["pi"]; ok {
-		t.Error("pi has rules now: capture-backed rules are welcome, but this test " +
-			"and blocked.go's comment about the gap both need updating")
+	for _, agent := range Agents {
+		if _, ok := blockedRules[agent]; !ok {
+			t.Errorf("%s is a known agent with no blocked rules: it can never report "+
+				"blocked. That may be right -- inventing a grammar for an uncaptured "+
+				"screen is worse -- but it should be a deliberate gap, not a surprise.", agent)
+		}
 	}
-	for _, agent := range []string{"pi", "zsh", "nvim", ""} {
-		for _, file := range []string{"claude-blocked.txt", "opencode-blocked.txt"} {
+	for _, agent := range []string{"zsh", "nvim", "claude-helper", ""} {
+		for _, file := range []string{"claude-blocked.txt", "opencode-blocked.txt", "pi-blocked.txt"} {
 			screen := readFixture(t, file)
 			if IsBlocked(agent, screen) {
 				t.Errorf("IsBlocked(%q, %s) = true, want false: no rules exist for %q", agent, file, agent)
@@ -618,5 +644,151 @@ func TestExtractQuestionOpencodeIsTruncated(t *testing.T) {
 	}
 	if !utf8.ValidString(q.Text) {
 		t.Errorf("Text is not valid UTF-8: the cut fell inside a rune")
+	}
+}
+
+// --- pi ---------------------------------------------------------------------
+
+// pi is different in kind from the other two: it has no permission dialog at
+// all. It asks through a tool, and the tool renders a two-pane selector overlay
+// -- a closed box, a filter, a numbered list on the left and a description of
+// the highlighted option on the right.
+//
+// Measured over the three captures, no two agents share a structural signal:
+//
+//	          corners  rules ─  gutter ┃  box │  numbered
+//	claude          0      100          0       0          3
+//	opencode        0        0         18       0          0
+//	pi              4      319          0      60          4
+//
+// pi is the only one that draws corners, and the only one drawing a closed box;
+// claude's 100 rules and pi's 319 are the same rune doing different jobs. That
+// is why the detector keeps one rule set per agent rather than one heuristic.
+func TestIsBlockedPi(t *testing.T) {
+	for _, tc := range []struct {
+		file string
+		want bool
+	}{
+		{"pi-idle.txt", false},
+		{"pi-blocked.txt", true},
+	} {
+		if got := IsBlocked("pi", readFixture(t, tc.file)); got != tc.want {
+			t.Errorf("IsBlocked(pi, %s) = %v, want %v", tc.file, got, tc.want)
+		}
+	}
+}
+
+// Each marker is load-bearing: take one away from the real capture and the
+// badge must go out. The screens are the capture with lines removed or one
+// substitution made, never lines invented.
+func TestIsBlockedPiRequiresEveryMarker(t *testing.T) {
+	overlay := readFixture(t, "pi-blocked.txt")
+
+	// The walls without the corners. Every interior line survives -- the
+	// filter, the numbered list, the cursor, the key hints -- and pi draws
+	// │ down the side of a box that is not this one, so on its own it says
+	// nothing.
+	noBox := dropGutterLine(t, dropGutterLine(t, overlay, "╭"), "╰")
+	// A box whose top is off the screen is not a box this detector reads. It
+	// is also what the bottom half of a scrolled overlay looks like.
+	noTop := dropGutterLine(t, overlay, "╭")
+	noBottom := dropGutterLine(t, overlay, "╰")
+	// A list with nothing highlighted is not a menu awaiting a keystroke. The
+	// column is preserved so that nothing else on the line moves.
+	noCursor := strings.Replace(overlay, "→ 1. PostgreSQL", "  1. PostgreSQL", 1)
+	oneChoice := dropGutterLine(t, dropGutterLine(t, dropGutterLine(t,
+		overlay, "2. SQLite"), "3. MySQL / MariaDB"), "4. MongoDB")
+	twoChoices := dropGutterLine(t, dropGutterLine(t, overlay, "3. MySQL / MariaDB"), "4. MongoDB")
+
+	for _, tc := range []struct {
+		name   string
+		screen string
+		want   bool
+	}{
+		{"the capture itself", overlay, true},
+		{"walls but no corners", noBox, false},
+		{"no top border", noTop, false},
+		{"no bottom border", noBottom, false},
+		{"no selection cursor", noCursor, false},
+		{"a single option", oneChoice, false},
+		// Two is a real question -- yes/no is the commonest shape there is --
+		// so the cursor line has to count as an option or those are missed.
+		{"two options", twoChoices, true},
+	} {
+		if tc.name != "the capture itself" && tc.screen == overlay {
+			t.Fatalf("%s: transform changed nothing", tc.name)
+		}
+		if got := IsBlocked("pi", tc.screen); got != tc.want {
+			t.Errorf("%s: IsBlocked = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The key hints are chrome, not the signal.
+//
+// "type filter • ↑↓ navigate • esc clear/cancel" is the most style-volatile
+// line in the overlay and the most tempting thing to match, and matching it
+// anywhere on the screen would light the badge on any pane whose output quotes
+// pi's own help -- pi's own README, this repository's design document, a
+// terminal recording being reviewed. The words are here with the box taken
+// away, and with the box present but nothing highlighted.
+func TestIsBlockedPiDoesNotMatchTheKeyHints(t *testing.T) {
+	hints := "  type filter • PgUp/PgDn prompt • backspace erase • ↑↓ navigate • alt+o hide • enter\n" +
+		"  select • esc clear/cancel • ctrl+c cancel"
+	for _, screen := range []string{
+		hints,
+		"→ 1. PostgreSQL\n  2. SQLite\n" + hints,
+		readFixture(t, "pi-idle.txt") + "\n" + hints,
+	} {
+		if IsBlocked("pi", screen) {
+			t.Errorf("false positive on a screen quoting the key hints: %q", screen)
+		}
+	}
+}
+
+// The overlay pi draws is the only closed box on its screen, and it is the box
+// that is the signal -- not the rune it is drawn with. pi's status bar carries
+// a │ of its own, its output routinely carries table borders, and neither is a
+// question being asked.
+func TestIsBlockedPiIsStrict(t *testing.T) {
+	for _, screen := range []string{
+		"",
+		"just some output\nnothing to see",
+		// Walls and numbered options, no corners: a table, or wrapped output.
+		"│ → 1. PostgreSQL │\n│   2. SQLite     │",
+		// Corners and options but no cursor: a menu with nothing selected, and
+		// what an answered overlay looks like on its way out.
+		"╭──────╮\n│ 1. PostgreSQL │\n│ 2. SQLite │\n╰──────╯",
+		// A box drawn around prose that happens to number things.
+		"╭─ notes ─╮\n│ 1. write the parser │\n│ 2. write the tests │\n╰─────────╯",
+		// Numbers referred to INSIDE a sentence, one of them after an arrow.
+		// A line is an option when the whole line is one, not when it mentions
+		// one -- which is why both patterns are anchored. Unanchored, this box
+		// reads as a menu with two options and a cursor on the second.
+		"╭─ notes ─╮\n│ step 1. install the deps │\n│ then → 2. run the tests │\n╰─────────╯",
+	} {
+		if IsBlocked("pi", screen) {
+			t.Errorf("false positive on %q", screen)
+		}
+	}
+}
+
+// The bottommost box is the live one, for the reason the other two agents have
+// the same rule: a screen can hold a box that has been answered above the one
+// that has not.
+//
+// Composed from the two real captures: pi's idle screen has no box at all, so
+// the overlay stacked above it is the shape of an overlay that is gone.
+func TestIsBlockedPiWantsTheBottommostBox(t *testing.T) {
+	idle := readFixture(t, "pi-idle.txt")
+	// The idle capture with a box drawn at the bottom of it, so that the
+	// screen holds two: the answered overlay above, a boxed thing below.
+	below := "╭─ notes ─╮\n│ nothing to decide │\n╰───────────────────╯"
+	answered := readFixture(t, "pi-blocked.txt") + idle + "\n" + below
+	if !strings.Contains(answered, "→ 1. PostgreSQL") {
+		t.Fatal("composed screen lost the overlay it is supposed to contain")
+	}
+	if IsBlocked("pi", answered) {
+		t.Error("an overlay above a later box is answered, not blocked")
 	}
 }

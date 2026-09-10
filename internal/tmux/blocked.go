@@ -12,14 +12,23 @@ import (
 // dialog is a data change rather than a code change, and so that rules proven
 // against one agent's screen are never applied to another's.
 //
-// It is an interface rather than one table of fields because the two captured
-// dialogs share no structure at all. Claude Code draws a region delimited by
+// It is an interface rather than one table of fields because the three captured
+// screens share no structure at all. Claude Code draws a region delimited by
 // horizontal rules, holding numbered choices under a line that ends in a
 // question mark, and needs all three signals together to be strict. opencode
 // draws a left-guttered block whose first line says "Permission required"
-// outright. Bending the second through machinery written for the first would
-// mean loosening that machinery until it fit -- and a rule broad enough to
-// cover both shapes is broad enough to fire on prose.
+// outright. pi has no permission dialog: it asks through a tool, which renders
+// a closed box holding a two-pane selector. Measured over the three captures,
+// no two share a structural signal:
+//
+//	          corners  rules ─  gutter ┃  box │  numbered
+//	claude          0      100          0       0          3
+//	opencode        0        0         18       0          0
+//	pi              4      319          0      60          4
+//
+// Bending any of them through machinery written for another would mean
+// loosening that machinery until it fit -- and a rule broad enough to cover all
+// three shapes is broad enough to fire on prose.
 type dialog interface {
 	// isBlocked reports whether this screen shows a prompt waiting on the user.
 	isBlocked(screen string) bool
@@ -30,11 +39,11 @@ type dialog interface {
 
 // blockedRules is the whole of the detector's knowledge, per agent.
 //
-// Claude Code and opencode have been captured, so those two can be recognised.
-// pi has not -- it is not installed here -- so it has no entry, reports working
-// or idle and is never blocked, which is exactly what v1 showed. That is the
-// honest state of things, and it is preferable to guessing at a dialog nobody
-// has seen; the day one is captured, the entry is a data change.
+// One entry per agent whose screen has been captured. An agent with no entry --
+// any command on the Agents list that nobody has recorded asking a question --
+// reports working or idle and is never blocked, which is preferable to guessing
+// at a dialog nobody has seen. The day one is captured, the entry is a data
+// change.
 var blockedRules = map[string]dialog{
 	"claude": claudeDialog{
 		rules:        "─╌",
@@ -47,6 +56,14 @@ var blockedRules = map[string]dialog{
 		gutter:  "┃",
 		header:  regexp.MustCompile(`^\W*Permission required$`),
 		request: regexp.MustCompile(`^→\s+(\S.*)$`),
+	},
+	"pi": piDialog{
+		top:          regexp.MustCompile(`╭.*╮`),
+		bottom:       regexp.MustCompile(`╰.*╯`),
+		wall:         "│",
+		cursorChoice: regexp.MustCompile(`^→ \d+\. `),
+		choice:       regexp.MustCompile(`^(?:→ )?\d+\. `),
+		minChoices:   2,
 	},
 }
 
@@ -428,3 +445,140 @@ func firstContent(block []string) string {
 	}
 	return ""
 }
+
+// --- pi ----------------------------------------------------------------------
+
+// piDialog matches pi's question overlay: a closed box holding a numbered list
+// with one option highlighted.
+//
+// pi is different in kind from the other two. It has no permission dialog at
+// all -- it asks through a tool, and the tool renders a two-pane selector: a
+// filter, the options on the left, a description of the highlighted one on the
+// right, key hints along the bottom. So there is nothing here matching a header
+// and nothing requiring a question mark; what says a question is being asked is
+// that a menu is open with something selected in it.
+//
+// Two consequences of that worth stating outright:
+//
+// A picker the operator opened themselves -- a model list, a theme list --
+// renders through the same widget and lights the badge too. That is accepted
+// rather than worked around: the pane really is waiting on a keystroke, and the
+// only thing that would separate the two is the tool name pi writes into the
+// box's top border. This capture says "ask_user", the extension that draws it
+// is called "pi-ask-user" and the design document calls it "ask_question", so
+// matching that name would miss every question raised by a tool named
+// differently -- a badge missed for a question that was really asked is the
+// expensive direction.
+//
+// Nothing here looks at the key hint line. It is the most style-volatile line
+// in the overlay and it adds nothing over the cursor, so requiring it would buy
+// no strictness and cost every restyle a missed badge -- and matching it
+// loosely would fire on any pane whose output quotes pi's own help.
+type piDialog struct {
+	// top and bottom match the box's border lines. The corners are the whole
+	// signal: pi is the only one of the three agents that draws a closed box,
+	// and its overlay is the only closed box on its own screen. They are
+	// regexps rather than runes because pi writes into both borders -- the tool
+	// name into the top, its version into the bottom.
+	top    *regexp.Regexp
+	bottom *regexp.Regexp
+	// wall is the rune down the box's sides, and also the rune splitting the
+	// selector from the description beside it. It delimits a line's content; it
+	// never signals anything by itself, because a table, a wrapped log line and
+	// pi's own status bar all carry it.
+	wall string
+	// cursorChoice is the highlight sitting on a numbered option. This is the
+	// load-bearing signal, exactly as it is for Claude Code: a list with nothing
+	// highlighted is a list, and a list with something highlighted is a menu
+	// waiting for a keystroke.
+	cursorChoice *regexp.Regexp
+	// choice is any numbered option, highlighted or not, and minChoices of them
+	// are required because a question has alternatives. The unnumbered "Type
+	// something" entry pi offers below the list is deliberately not one: it is
+	// not numbered, so it is neither counted here nor quoted later.
+	choice     *regexp.Regexp
+	minChoices int
+}
+
+// isBlocked looks for the menu inside the bottommost fully drawn box.
+//
+// Bottommost because that is the live one, the same rule the other two agents
+// get for the same reason. Fully drawn -- both borders -- because the box is
+// the region: without the top there is nothing bounding it above, and the
+// overlay is drawn complete, with its own scroll indicator when the prompt is
+// taller than the box, so it does not run off the top of the screen.
+func (d piDialog) isBlocked(screen string) bool {
+	box, ok := d.box(screen)
+	if !ok {
+		return false
+	}
+	var choices int
+	var cursor bool
+	for _, line := range box {
+		body := strings.TrimSpace(d.column(line))
+		if body == "" {
+			continue
+		}
+		if d.cursorChoice.MatchString(body) {
+			cursor = true
+		}
+		if d.choice.MatchString(body) {
+			choices++
+		}
+	}
+	return cursor && choices >= d.minChoices
+}
+
+// box returns the lines between the bottommost bottom border and the nearest
+// top border above it, and whether there was such a pair.
+//
+// Shared by detection and extraction so the two can never disagree about which
+// box on the screen they are reading.
+func (d piDialog) box(screen string) ([]string, bool) {
+	lines := strings.Split(screen, "\n")
+	bottom := -1
+	for i, line := range lines {
+		if d.bottom.MatchString(line) {
+			bottom = i
+		}
+	}
+	if bottom < 0 {
+		return nil, false
+	}
+	for top := bottom - 1; top >= 0; top-- {
+		if d.top.MatchString(lines[top]) {
+			return lines[top+1 : bottom], true
+		}
+	}
+	return nil, false
+}
+
+// column returns what a box line holds in its first column: the text between
+// the left wall and whichever wall comes next.
+//
+// The overlay is drawn over the transcript rather than replacing it, so a line
+// carries the text it covers on both sides of the box -- half a sentence to the
+// left of the wall, half a word to the right. Reading the whole line would put
+// that background text through the same rules as the box's own content, and the
+// spinner still turning behind the overlay is in it.
+//
+// The first column is where both the prompt and the options are: a full-width
+// line has one column, and where the selector splits the box in two, the
+// options are on the left and the description of the highlighted one on the
+// right. Nothing needs the description, so nothing reads it.
+func (d piDialog) column(line string) string {
+	open := strings.Index(line, d.wall)
+	end := strings.LastIndex(line, d.wall)
+	if open < 0 || end <= open {
+		return ""
+	}
+	inner := line[open+len(d.wall) : end]
+	if next := strings.Index(inner, d.wall); next >= 0 {
+		inner = inner[:next]
+	}
+	return inner
+}
+
+// extractQuestion is deliberately absent for now: pi reports blocked, and the
+// tooltip stays empty until a grammar for the overlay's text is proven.
+func (d piDialog) extractQuestion(string) *Question { return nil }

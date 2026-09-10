@@ -1,14 +1,76 @@
 # tmux-web v3 — agent-side reporting
 
 Date: 2026-09-10
-Status: design, not agreed. Revision 2, rewritten against an adversarial review
-that found three broken compositions and several errors of fact; see "Revision 2".
+Status: design, not agreed. Revision 3, rewritten against a second adversarial
+review that found four blockers — every one of them in the material revision 2
+wrote to close round one — and four corrections; see "Revision 3", and
+"Revision 2" below it for the round it answers.
 Follows: `2026-09-10-tmux-web-v2-design.md` (v2), which it partly supersedes.
 Depends on: the hardening of `internal/tmux/snapshot.go` against hostile
 `@wterm_label` values, **committed as `f25e066`** — in history, not pending, and
 not a thing this design is waiting on. It is a prerequisite, it answers one of
 the questions this document opened with, and it constrains the transport more
 than expected — see "The hazard" and "Why the report is not a fourteenth field".
+
+## Revision 3
+
+Revision 2 was reviewed adversarially a second time and found **not ready for a
+plan**. All four blockers were in the material revision 2 had just written to
+close round one, which is the pattern worth naming before the list: closing a
+contradiction by adding a mechanism relocates the contradiction into the new
+mechanism unless the new mechanism is composed against everything the old one
+touched. Revision 2 congratulated itself on hunting compositions and then made
+four more.
+
+- **The badge storm was moved, not defeated.** Stateless `finishedAt` derivation,
+  plus `idle_prompt` reporting `idle`, plus `seen` storing the `finishedAt`
+  *value* a device was shown, compose into: every device that saw a finish
+  re-badges sixty seconds after every Claude turn. "A no-op re-assertion" is
+  false under this document's own derivation rule. Fixed at the writer — see
+  "Re-assertion is not a report".
+- **Evidence rule 2 nullified most of the whitelist.** Four of the five
+  `notification_type`s revision 2 mapped to `blocked` have no screen form
+  `blocked.go` can match, and rule 2 deletes a reported `blocked` the grammar
+  cannot confirm. The whitelist guaranteed membership in the set rule 2 erases,
+  so those badges would have stood only until a client connected. The whitelist
+  and the grammars are one decision now — see "Which event means which state".
+- **"Every one of these filters fails closed" was unimplementable.** For Claude
+  and opencode the root session is coded by the *absence* of a field, so "missing
+  means silence" silences all normal reporting. Restated per filter, and the
+  residual protection re-derived honestly — see "Subagents leak into hooks".
+- **"Dropped" was undefined against a transport that never forgets.** Now a
+  per-pane tombstone with specified semantics across a restart, and revision 2's
+  "almost certainly a real turn end" re-acceptance is withdrawn. Related, and
+  found in the same place: **evidence rule 3 as written fired on ordinary turn
+  ends**, because `state.go` reports `working` on a *single* changed hash and a
+  real turn end repaints. Rule 3 now uses the project's own noise threshold --
+  see "Reports are checked against the screen" and "What "dropped" means".
+
+Four corrections in the same pass:
+
+- **A false plank** in the whitelist's fail-closed argument, and a second
+  instance of the same error six paragraphs away: at a permission wait the
+  standing report is a fresh `working` from `PreToolUse`, so the capture is
+  skipped and the screen grammar is **not** running. Both sentences said it was.
+- **A comparison the document never made.** Installing the integration makes
+  Claude's connected-case blocked detection *slower* — about six seconds against
+  about 1.5 — because that same fresh `working` suppresses the capture that
+  `IsBlocked` would have read. The trade is now argued rather than omitted.
+- **The printed bracket set is uncopyable.** Rendered with a two-character `\n`
+  it leaves a real newline alive and turns every lowercase `n` into a space
+  (`SECOnD` → `SECO D`). The document now points at `labelField`
+  (`internal/tmux/snapshot.go:108`) as the thing to copy, from source.
+- **The rule-2 test as specified was vacuous**, testing a counter over a premise
+  the whitelist made false. Fixed with the rule.
+
+One fact in the design's favour that revision 2 missed, and a new installer
+constraint that arrives with it: a command hook registered `"async": true` has
+its **exit code ignored, including exit 2**, unless it also sets
+`"asyncRewake": true` — the docs give "exit code 2 wakes Claude" as what
+`asyncRewake` adds, and the timeout section says enforcement is skipped for an
+async command hook. That is documented *adjacent* rather than verbatim, so it is
+belt to the exit-0 rule's braces and not a replacement for it. The constraint:
+**`asyncRewake` is never set**, on any hook this project installs.
 
 ## Revision 2
 
@@ -186,9 +248,11 @@ So integrations write a **new** per-pane option, `@wterm_agent`, and never touch
 
 ### The value
 
-One option, one write, one fork per event. Not three options, because every write
-happens inside a hook the agent is waiting on (see "Writes must never block") and
-three forks is three times the exposure.
+One option, one write, one fork per event — with one exception, added in
+revision 3 and confined to the two events that would otherwise lie about when a
+turn ended: see "Re-assertion is not a report". Not three options, because every
+write happens inside a hook the agent is waiting on (see "Writes must never
+block") and three forks is three times the exposure.
 
 ```
 @wterm_agent = "1;working;1789075200000;running go test ./internal/tmux"
@@ -257,10 +321,17 @@ delete a pane from the sidebar" — and it gives `@wterm_label` three layers,
 verified against a real 3.7b server rather than assumed. They are worth
 restating because the report needs the same treatment and cannot have all of it:
 
-1. **tmux substitutes the two bytes out before Go sees them.**
-   `#{s/[\n\x1f]/ /:@wterm_label}`, with a literal `0x1f` inside the bracket set.
-   It replaces with a *space* rather than nothing, so `EV\x1fIL` reads as `EV IL`
-   — visibly tampered with, rather than as a label somebody chose.
+1. **tmux substitutes the two bytes out before Go sees them.** The pattern is
+   `labelField` at `internal/tmux/snapshot.go:108`, and **that source line is the
+   thing to copy — not the rendering in this document.** It is a bracket set
+   holding a literal newline byte and a literal `0x1f` byte, which prose has to
+   render as `#{s/[\n\x1f]/ /:@wterm_label}` and which a reader who copies that
+   rendering gets wrong twice: a two-character `\n` leaves a real newline alive,
+   *and* it puts a literal `n` in the set, so every lowercase `n` in a perfectly
+   good label becomes a space (`SECOnD` → `SECO D`). Measured in revision 3. The
+   committed Go works because `"\n"` in a Go string literal *is* the byte. The
+   substitution replaces with a *space* rather than nothing, so `EV\x1fIL` reads
+   as `EV IL` — visibly tampered with, rather than as a label somebody chose.
 2. **The field is last**, so a byte that survives layer 1 is bounded by
    arithmetic rather than by layer 1 holding: a surplus separator only adds
    fields past the end, which `ParseRows` rejoins into the label, and a newline
@@ -290,7 +361,11 @@ that silently blanks the field it was meant to protect would have passed every
 test that only checks hostile input. A range such as `[\x0a-\x1f]` compiles but
 depends on the locale's collation order, and the tmux server's locale is whatever
 started it. A set of two literal bytes has neither problem. Anyone extending this
-should copy the bracket set and not improve it.
+should copy `labelField` from `internal/tmux/snapshot.go:108` **verbatim and from
+the source file**, and not improve it. A third failure mode joins the two above
+and is the one this document itself walked into: a bracket set retyped from a
+rendered escape covers neither of the two bytes and silently mangles benign
+values, which — like the `[[:cntrl:]]` trap — no hostile-input test would see.
 
 Layer 1 is also the one that can fail **open**: a pattern that stopped compiling
 leaves tmux echoing the value untouched and exiting 0, measured with a
@@ -369,8 +444,13 @@ Verified on 3.7b:
 
 ```
 tmux list-panes -a -F "S<Sep>#{pane_id}<Sep>…twelve more…<Sep>#{label}" \
-   \; list-panes -a -F "A<Sep>#{pane_id}<Sep>#{s/[\n\x1f]/ /:@wterm_agent}"
+   \; list-panes -a -F "A<Sep>#{pane_id}<Sep>#{s/<two-byte set>/ /:@wterm_agent}"
 ```
+
+`<two-byte set>` is deliberately not spelled out here. It is `labelField`'s
+bracket set, built the same way from the same constants — a real newline byte
+and a real `0x1f` — and layer 1 of "The hazard" says what happens to somebody
+who copies a rendered `\n` instead.
 
 One fork, two blocks of output in command order, told apart by a literal tag
 field (`S` for snapshot, `A` for agent report) rather than by counting fields or
@@ -504,24 +584,54 @@ mean:
 | opencode | tool events, `session.status busy` | `permission.asked` | `session.idle` |
 | claude | `UserPromptSubmit`, `PreToolUse` | some `Notification`s | `Stop` |
 
-**Claude's `Notification` is a whitelist on `notification_type`.** The
-documented values, and what each one reports:
+**Claude's `Notification` is a whitelist on `notification_type`, and the
+whitelist is not free to say `blocked`.** Revision 2 mapped five types to
+`blocked`. Four of them have no screen form any grammar in `blocked.go` matches
+— an MCP form, a URL request, a press-Enter banner, and a question from
+somewhere that is not this pane's session — and evidence rule 2 exists precisely
+to delete a reported `blocked` the grammar cannot confirm. Two sections written
+to close two different round-one findings, each correct alone, cancelling each
+other: those four badges would have stood exactly until a client connected, then
+been erased about 4.5 seconds later while Claude was still waiting. Revision 3
+makes them one decision.
+
+**A whitelist entry may map to `blocked` only if a `blocked.go` grammar can
+confirm it.** The whitelist and the grammars are one claim seen from two sides —
+the event says the agent is waiting, the grammar says the screen shows it
+waiting — and a resting claim for which no evidence can exist does not get to
+rest indefinitely. An entry whose screen form nobody has captured is *ignored*
+until somebody captures it: the same fail-closed direction as the unknown-type
+default, and promoted later by a data change to `blockedRules`, which is the
+extension path that map's own comment already describes.
+
+The documented values, and what each one reports **today**:
 
 | `notification_type` | Reports | Why |
 | --- | --- | --- |
-| `permission_prompt` | `blocked` | "Claude needs you to approve a tool use or a sandboxed command's network request, and the prompt has waited about six seconds" |
-| `elicitation_dialog` | `blocked` | an MCP server has opened a form and is waiting on the user |
-| `elicitation_url_dialog` | `blocked` | an MCP server is asking the user to open a URL |
-| `agent_needs_input` | `blocked` | a background session or a teammate setup question is waiting on the user |
-| `quota_auto_resume_stale` | `blocked` | "waits for you to press Enter instead of continuing" — the user has to act |
-| `idle_prompt` | `idle` | "Claude finished responding about 60 seconds ago and you haven't typed since" |
-| `quota_auto_resume_disabled` | `idle` | the wait ended and the task was not continued |
+| `permission_prompt` | `blocked` | "Claude needs you to approve a tool use or a sandboxed command's network request, and the prompt has waited about six seconds" — and it is the dialog `blocked.go`'s claude grammar was written against, so rule 2 can adjudicate it rather than merely erase it |
 | `quota_auto_resume_fired` | `working` | Claude Code is continuing the task |
+| `idle_prompt` | `idle`, **as a repair only** | "Claude finished responding about 60 seconds ago and you haven't typed since". It re-asserts what `Stop` already said, so the writer suppresses it unless the standing report disagrees — see "Re-assertion is not a report" |
+| `quota_auto_resume_disabled` | `idle`, **as a repair only** | the wait ended and the task was not continued. Same suppression, same reason |
+| `quota_auto_resume_stale` | *ignored, pending a capture* | "waits for you to press Enter instead of continuing" — a true root-session block drawn on the root screen, and no grammar has been written for that banner. Promotes to `blocked` the day one is |
+| `elicitation_dialog` | *ignored, pending a capture* | an MCP server has opened a form and is waiting on the user. On the root screen; no grammar |
+| `elicitation_url_dialog` | *ignored, pending a capture* | an MCP server is asking the user to open a URL. Same |
+| `agent_needs_input` | *ignored*, and not pending anything | "a background session or a teammate setup question" — which is not this pane's root session, and **"a report must only ever describe the root session in its pane"** is a rule this document already has. Revision 2 kept it and reassured itself that "both evidence rules still apply", when rule 2 is the mechanism that would have deleted it |
 | `auth_success` | *ignored* | not a state of the session |
 | `elicitation_complete` | *ignored* | bookkeeping between Claude and an MCP server |
 | `elicitation_response` | *ignored* | as above |
 | `agent_completed` | *ignored* | "a background session finishes or fails" — **not** this session's turn end. Reported as `idle` it is a false `done` badge on a working agent, which is v2's central failure arriving through yet another door |
 | **anything else** | ***ignored*** | the default, and it matters more than the table |
+
+**What the demotions cost, plainly.** Three of the four are real waits the screen
+cannot currently see, and demoting them means an MCP elicitation form or a quota
+banner left overnight produces **no badge at all**: the pane reads `working`
+until the 60-second expiry and then nothing, because with no client connected
+there is no classifier either. That is v2's behaviour, which is the floor this
+whole design degrades to elsewhere. It is worse than revision 2 *claimed* to
+offer and identical to what revision 2 would actually have delivered from the
+moment anyone opened the app. What buys them back is three screen captures and
+three `blockedRules` entries — named in the open questions rather than assumed
+into existence by a table row.
 
 **The default is the decision here, not the enumeration.** The list above is
 what the docs currently carry; it is not documented as closed, it has plainly
@@ -529,42 +639,144 @@ grown before, and it will grow again. So an unrecognised `notification_type`
 **writes nothing at all** — it does not change the state, it does not refresh the
 timestamp, it is not an error. The asymmetry that settles this:
 
-- Ignoring a notification that *should* have meant `blocked` costs a late
-  badge. The screen grammar is still running (a fresh `blocked` report is not in
-  play, so the pane is captured normally), and positively matching a dialog on
-  screen is the one thing v2's classifier is genuinely good at.
+- Ignoring a notification that *should* have meant `blocked` costs a badge that
+  is late and may never come. Revision 2 said it costs only a late badge,
+  "because the screen grammar is still running (a fresh `blocked` report is not
+  in play, so the pane is captured normally)" — and that is **false**, for a
+  reason its own precedence table supplies: at a permission wait the standing
+  report is a fresh `working` from `PreToolUse`, which fires *before* the
+  permission is evaluated, and a fresh `working` skips the capture. `IsBlocked`
+  is not run at all. The true cost is up to 60 seconds of `working` expiry and
+  then whatever the grammar can do, which for an uncaptured dialog is nothing.
+  Still the cheap direction; not the free one.
 - Defaulting an unknown notification to `blocked` costs a *permanent false
   badge*. `blocked` is a resting state, so it never expires; if the screen is
   static, the changed-hash escape hatch never fires either.
 
-`idle_prompt` deserves its own note, because it is the one that would have
-destroyed the feature. It fires about sixty seconds after a turn ends, on a pane
-that `Stop` has already reported idle. Mapping it to `idle` therefore makes it a
-no-op re-assertion in the normal case — and a **repair** in the abnormal one:
-the attested reason herdr gave up on Claude hooks is that they "do not cover the
-whole lifecycle" and events can be missed, and a missed `Stop` leaves a pane
-stuck on `working` until the 60s expiry hands it to the classifier. `idle_prompt`
-puts it back, from the agent, exactly once. An event that was revision 1's worst
-bug turns out to be a small piece of the answer to herdr's objection.
+`idle_prompt` still deserves its own note, and it now has its own section,
+because revision 2's treatment of it was wrong in a way that is invisible until
+three sections are read together. See "Re-assertion is not a report".
 
-Two consequences worth stating rather than discovering:
+Two consequences worth stating rather than discovering, and the second is a cost
+revision 2 never put on the page at all:
 
 - **Claude's event-sourced `blocked` is about six seconds late by
   construction**, because `permission_prompt` waits about six seconds before
-  firing. That is four polls. It is acceptable, and it is bounded, because it
-  fails towards the screen: during those six seconds the pane's last report is a
-  fresh `working` from `PreToolUse`, so the badge is late rather than wrong.
-  It is also an argument against ever raising the `working` window on the theory
-  that "the event will arrive".
-- **`agent_needs_input` is the one whitelist entry that can describe something
-  other than the root session in the pane.** It is kept, because "something in
-  this pane wants your input" is true and is what the badge means, and because
-  both evidence rules below still apply to it.
+  firing. That is four polls. Revision 2 called it "bounded, because it fails
+  towards the screen", and the second half is the same error as the bullet above:
+  during those six seconds the standing report is a fresh `working` from
+  `PreToolUse`, and a fresh `working` **skips the capture**, so the screen is not
+  being read. The bound is real but it comes from the six seconds themselves and
+  from nothing else, and for those six seconds the row says `working` about a
+  pane that is waiting. It remains an argument against ever raising the `working`
+  window on the theory that "the event will arrive".
+- **Installing the integration makes Claude's blocked detection *slower* in the
+  connected case.** With a client attached, a non-integrated Claude pane is
+  captured every poll and `IsBlocked` matches the permission dialog within one
+  poll, about 1.5 seconds. An integrated one takes about six, because that same
+  fresh `working` suppressed the capture that would have found it. The trade is
+  accepted: the integration's genuine value is the **disconnected** case, where
+  it is the only source of anything at all, and 4.5 seconds on a wait that lasts
+  until the user acts is not what the badge is for. But it is a trade, it was
+  never stated, and it has a lever — the state-only fallback for Claude removes
+  `PreToolUse`, which restores the 1.5-second connected-case badge and costs the
+  activity line. That makes open question 1 a design question and not only a
+  fork count.
 
 The whitelist lives in `wterm-web report`, in Go, not in the hook configuration —
 which is the point of having one binary. It is a table, it is testable, and when
 the list grows it grows in one file rather than in three integrations and a
 `settings.json` the user owns.
+
+### Re-assertion is not a report
+
+This is revision 3's first blocker, and it is revision 1's badge storm relocated
+one layer up rather than defeated. Three sentences the document held at once:
+
+- `finishedAt` is **derived**, not stamped — "equal to that report's own
+  timestamp", recomputed from the current accepted report at every poll, with no
+  memory of a previous one;
+- `idle_prompt` reports `idle`, "a no-op re-assertion of what `Stop` already
+  said", and it fires on **every turn the user does not type into**;
+- each browser's `seen[paneId]` stores the `finishedAt` **value it was shown**,
+  not the time it looked — `web/src/lib/useSnapshot.ts`, where `isDone` is
+  `pane.finishedAt > (seen[key] ?? 0)`.
+
+Compose them. `Stop` at T writes `1;idle;T`; a device glances; `seen = T`; the
+badge clears. Sixty seconds later `idle_prompt` writes `1;idle;T+60`. It is
+strictly newer, so the ordering filter takes it. The screen has been settled for
+a minute, so evidence rule 3 has nothing to object to. Stateless derivation gives
+`finishedAt = T+60 > seen = T`. **Every device that saw the finish re-badges, one
+minute after every Claude turn**, and `quota_auto_resume_disabled` does it again.
+"No-op re-assertion" is false under this document's own derivation rule, and a
+badge that fires once per turn on a pane nothing happened to is the exact failure
+`blocked.go`'s comments call the worst one available: it teaches the owner to
+ignore the badge.
+
+The underlying error is semantic rather than mechanical. **The timestamp field
+means "when the agent entered this state", and a re-assertion's write time is not
+that.** `Stop`'s is. `idle_prompt`'s is sixty seconds late.
+
+**The fix is writer-side suppression, and it is the one that keeps the repair.**
+Every event an integration handles is one of two kinds:
+
+- an **edge** event — the agent has just changed state: `Stop`, `agent_settled`,
+  `session.idle`, `UserPromptSubmit`, `PreToolUse`, tool events,
+  `permission_prompt`, `permission.asked`, `ui_prompt_start`,
+  `quota_auto_resume_fired`. An edge event always writes, unconditionally.
+- a **re-assertion** event — the agent is describing a state it is already in:
+  `idle_prompt` and `quota_auto_resume_disabled`, and nothing else on any agent
+  today. A re-assertion **reads the standing option first** and writes only if
+  the standing report's state differs from the one it would write.
+
+In the normal case the re-assertion reads `1;idle;T`, sees `idle`, and does
+nothing: no write, no newer timestamp, no badge. In the case revision 2 wanted it
+for — a `Stop` that never landed, which is the attested reason herdr gave up on
+Claude hooks — it reads `1;working;T`, sees the disagreement, and writes
+`1;idle;T+60`, repairing the pane from the agent itself. The repair survives
+whole; only the no-op goes away. Note what the repair is worth, which revision 2
+never spelled out: a missed `Stop` leaves the pane on `working` until the
+60-second expiry, and with **no client connected** the expiry hands it to a
+classifier with no screen to read, so the pane shows nothing at all until the
+user next types. That is the overnight case, which is the case the app is for.
+
+The edge/re-assertion classification lives in `wterm-web report`, in Go, in the
+same table as the whitelist — not in the three integration files. One table, one
+test.
+
+**What it costs:**
+
+- **One extra `tmux show-options -p -v @wterm_agent` fork**, on re-assertion
+  events only. Today that is two `Notification` types on one agent, at most once
+  per turn. `PreToolUse` — the hot hook, and the whole subject of open question 1
+  — pays nothing; pi and opencode pay nothing at all, having no re-assertion
+  events.
+- **"One option, one write, one fork per event" is no longer exactly true**, and
+  that sentence in "The value" is amended rather than quietly left standing.
+- **A stale or buggy integration still storms.** The daemon cannot tell a
+  re-assertion from a genuine finish — both are `1;idle;<ts>` — so this is a
+  promise the writer keeps and the reader cannot check. It is the one place in
+  this design where a reader-side invariant rests on writer-side behaviour, and
+  it is stated here rather than discovered later.
+
+**Why not the other two candidates**, since each contradicts a sentence this
+document holds and the choice has to be explicit:
+
+- *Edge memory in the daemon* — remember the previous accepted report and collapse
+  a resting run to its first timestamp — works while the daemon lives and fails
+  on restart, where the memory is empty and the standing `1;idle;T+60` derives
+  `T+60` all over again. It converts one storm per turn into one storm per
+  restart, and it spends the restart story that stateless derivation was chosen
+  to buy. Rejected as a replacement, and not needed as a backstop: with
+  suppression the option never holds the later timestamp at all.
+- *Demoting `idle_prompt` to ignored* costs nothing to build and loses the repair
+  described above. Rejected because that repair is the answer to the one attested
+  objection anybody has raised against hook-sourced Claude state, and one fork
+  per turn is cheap for it.
+- *A fifth field carrying the finish time*, so a re-assertion could restate the
+  original timestamp instead of skipping, is the same mechanism in a costume: the
+  writer still has to read the standing report to learn what to restate. It adds
+  a wire field and buys nothing.
 
 ### The object of a tool call is not the whole argument
 
@@ -634,11 +846,20 @@ single number — per-call cost, and specifically fork *volume* under a burst
 rather than turn *latency*, since async takes the latency off the critical path
 by construction. That is a measurement, not an unknown design. So:
 
-**Claude ships with activity from `PreToolUse`, registered with `"async": true`,
-with state-only as the specified fallback** if the volume measurement comes out
-badly. The fallback is not a redesign — it is deleting one hook entry from the
-generated settings block, and every other Claude behaviour in this document is
-unchanged by it.
+**Claude ships with activity from `PreToolUse`, registered with `"async": true`
+and never `"asyncRewake"`, with state-only as the specified fallback** if the
+volume measurement comes out badly. The fallback is not a redesign — it is
+deleting one hook entry from the generated settings block, and every other Claude
+behaviour in this document is unchanged by it.
+
+Revision 3 adds a second reason the fallback might win, which is not a cost at
+all but a benefit: **`PreToolUse` is what makes Claude's connected-case blocked
+badge six seconds slow instead of 1.5**, because its fresh `working` suppresses
+the capture `IsBlocked` would have read. So the choice is not "activity line
+versus fork count" but "activity line in the disconnected case versus a
+four-and-a-half-second faster badge in the connected one". The recommendation
+still goes to `PreToolUse` — the disconnected case is the product — but the
+measurement in open question 1 now decides a trade rather than a threshold.
 
 This also collects the "happy accident" noted further down: `PreToolUse`'s state
 contribution is "still working", which is exactly what the 60-second window wants
@@ -667,7 +888,7 @@ The cases:
 | --- | --- | --- |
 | fresh `working` | (not taken) | The report. The capture is skipped, so this pane costs no forks at all |
 | fresh `idle`, outside the verification window | (not taken) | The report. Capture skipped |
-| fresh `idle`, inside the verification window | captured | The report, unless the classifier says `working` — see evidence rule 3. `N` polls, then the capture stops |
+| fresh `idle`, inside the verification window | captured | The report, unless the classifier fails to report `idle` even once within the window — see evidence rule 3. `N` polls, then the capture stops |
 | fresh `blocked` | captured | The report, unless the screen churns or settles with no dialog on it — evidence rules 1 and 2. Captured for as long as the report stands |
 | stale or absent | available | The classifier, exactly as v2 |
 | stale or absent | not available (no client connected) | Empty, exactly as v2 |
@@ -693,9 +914,15 @@ because the two evidence rules below buy some of it back on purpose.
 
 The residual is that skipping the capture also skips `IsBlocked`, which is the
 only thing that catches an approval box an integration failed to report. All
-three agents *do* report blocking by event, so **the failure mode is "blocked is
-late by the freshness window", not "blocked is missed."** That is the property
-the window is chosen against.
+three agents *do* report the blocking they can see, so for a dialog the agent
+raises itself **the failure mode is "blocked is late by the freshness window",
+not "blocked is missed"** — and on Claude "late" is now a measured six seconds
+against the screen path's 1.5, which is the comparison two sections up rather
+than a shrug. The exception is a wait reported through a `notification_type` the
+whitelist demotes for want of a grammar: there both authorities are blind and the
+badge is genuinely missed. That is the cost recorded under the whitelist, and it
+is deliberately the *same set* on both sides — the demoted types are exactly the
+ones rule 2 could not have adjudicated.
 
 Revision 1 then said this only bites "when the integration is wrong or dead",
 and that was incomplete. There is a third cause and it is ordinary: **scheduling
@@ -748,16 +975,44 @@ there is no screen to check and the report is the only authority there is:
    else. `N` polls rather than one because the first capture after a reconnect
    can catch a repaint mid-frame and the grammars are deliberately strict.
 
-3. **A reported `idle` on a churning screen is dropped**, during a verification
-   window of `N` polls after the report arrives. *New in revision 2.* Within
-   that window the pane is still captured, and if the **classifier** — the same
-   code, the same hash, the same rules — says `working`, the idle report is
-   contradicted, dropped, and the pane goes back to the classifier with no
-   `finishedAt` derived. That is the unfiltered-subagent case caught by evidence
-   rather than by a discriminator holding.
+3. **A reported `idle` is dropped if the screen never settles**, over a
+   verification window of `N` polls after the report arrives. Within the window
+   the pane is still captured. The report **stands** if the classifier — the same
+   code, the same hash, the same rules — says `idle` at any poll inside the
+   window. It is **dropped** only if the classifier says `working` for the whole
+   of it, and then the pane goes back to the classifier with no `finishedAt`
+   derived. That is the unfiltered-subagent case caught by evidence rather than
+   by a discriminator holding.
 
-`N = 3` (about 4.5s). It is a guess of the same kind as the 60-second window and
-is flagged as one.
+   *Revision 3 rewrote this rule, because revision 2's version fired on ordinary
+   turn ends.* Revision 2 dropped the report if the classifier said `working` at
+   **any** poll in the window — and `state.go` says `working` on a **single**
+   changed hash, which is precisely what `settleAfter = 2` exists to declare is
+   noise. A real turn end repaints at least once immediately after `Stop`: the
+   spinner clears, the prompt redraws, and that repaint races a fire-and-forget
+   write. So revision 2's rule would have dropped a large fraction of *true* idle
+   reports whenever a client was connected, quietly handing `finishedAt` back to
+   the classifier's `now`-stamp — in exactly the case anybody would be watching.
+   Nobody has measured how often; the point is that the rule as written could not
+   have been measured green, and the per-section test it implied would have
+   passed.
+
+   The rewrite borrows the project's own noise threshold instead of inventing a
+   second one: one repaint is noise, `settleAfter` consecutive identical captures
+   is stillness, and a working agent does not go still — `state.go`'s own comment
+   is that "a working agent redraws its spinner and elapsed-time". It also fixes
+   what `N` means. The window must be able to *contain* a settle, so `N >=
+   settleAfter + 1` is a floor, and `N = 3` against `settleAfter = 2` is now a
+   relationship rather than two independent guesses that happen to compose.
+
+   The hole this leaves, stated rather than left for the next reviewer: a
+   subagent's false `idle` survives if the root's screen happens to go still for
+   `settleAfter` polls inside the window — about three seconds of a static screen
+   on an agent that is working. All three agents animate while working, which is
+   what makes that unlikely; it is not what makes it impossible.
+
+`N = 3` (about 4.5s), floored by `settleAfter` as above and otherwise a guess of
+the same kind as the 60-second window. It is flagged as one.
 
 **Why `idle` gets a window and `blocked` does not.** This is the asymmetry the
 review asked to see argued or removed, and it is real:
@@ -776,14 +1031,70 @@ review asked to see argued or removed, and it is real:
   integration. Rule 2 costs captures only while a `blocked` report stands, which
   is the state where the user is waiting anyway.
 
-**What rule 2 costs, said plainly:** an agent genuinely blocked at a dialog whose
-*screen form* no grammar in `blocked.go` matches loses its reported `blocked`
-after `N` polls, and the classifier — which also cannot see the dialog — reads a
-static screen as idle. That is a downgrade of a true `blocked` to `idle`. It is
-bounded to dialogs we have not captured, which is the same set v2 already fails
-on for every non-integrated pane, and it gives `blocked.go` a second reason to be
-kept current as the agents' dialogs change. It is the price of not letting a
-dead integration pin a badge forever, and that trade goes this way.
+**What rule 2 costs, and what revision 2 got wrong about it:** an agent genuinely
+blocked at a dialog whose *screen form* no grammar in `blocked.go` matches loses
+its reported `blocked` after `N` polls, and the classifier — which also cannot
+see the dialog — reads a static screen as idle. That is a downgrade of a true
+`blocked` to `idle`.
+
+Revision 2 called that "bounded to dialogs we have not captured, the same set v2
+already fails on". The bound was real; the reassurance was not, because revision
+2's own whitelist **guaranteed membership in that set** for four of its five
+`blocked` mappings. A rule that deletes a class of report and a whitelist that
+manufactures exactly that class are not two independent decisions that happen to
+sit in one document. Revision 3 makes them one: an entry may claim `blocked` only
+if a grammar can confirm it, so by construction every reported `blocked` is one
+rule 2 can adjudicate. What remains inside the bound is what it always should
+have been — a dialog captured once and since restyled — which is a real risk, is
+the same risk `blocked.go` already carries for every non-integrated pane, and
+gives that file a second reason to be kept current. It is the price of not
+letting a dead integration pin a badge forever, and that trade goes this way.
+
+### What "dropped" means, against a transport that never forgets
+
+The evidence rules say a report is "dropped", and revision 2 never said what that
+means against an option that still holds the same report on the next poll. Left
+unspecified, the daemon re-reads it, re-evaluates it, and flips it back to
+accepted the moment the screen settles again. Specified:
+
+- **The daemon keeps two timestamps per pane**, in the map the ordering filter
+  already needs: the timestamp of the last report it **accepted**, and the
+  timestamp of the standing report if that report was **rejected on evidence**.
+  One slot each rather than a set — the option holds exactly one value, so the
+  only report that can be re-seen is the current one.
+- **A report whose timestamp matches the rejection slot is re-rejected without
+  re-evaluating the evidence.** The evidence that condemned it was a screen that
+  has since moved on; re-running the test against a screen that has since settled
+  is exactly how a dropped report comes back to life.
+- **A rejection does not advance the ordering filter.** A dropped report was
+  never accepted, so the next genuine report must still be strictly newer than
+  the last *accepted* one, not than the dropped one. The two slots are
+  independent, and a test says so.
+- **A newer value clears the rejection slot.** It is a different report and earns
+  its own verdict.
+
+**Across a restart both slots are empty, and revision 2's answer to that is
+withdrawn.** Revision 2 said a report that arrived before the restart "is almost
+certainly a real turn end" and re-derived `finishedAt` from it immediately —
+which resurrects precisely the subagent false-idle rule 3 exists to catch, with
+the word "almost" carrying the argument. Instead: **after a restart the standing
+report is a first sight, and a first sight is unverified.**
+
+- A standing resting `idle` **enters the verification window** rather than
+  skipping it. With a client connected the done badge is up to `N` polls late
+  after a restart; with no client there is nothing to verify and the derivation
+  is immediate, unchanged — which is the case the app exists for.
+- A standing `blocked` that had been dropped on evidence is accepted again and
+  re-adjudicated: rule 1 drops it on the next changed hash, rule 2 after `N`
+  settled polls. So a restart can re-show a false `blocked` badge for up to `N`
+  polls. That is the honest cost of holding the rejection in daemon memory rather
+  than in tmux: bounded, one-shot, and only on restart.
+
+The alternative — writing the rejection back into the option, so it survives with
+the report — is rejected on a rule this design has held since "Not
+`@wterm_label`": the daemon reads that option, it does not write it. A reader
+that edits the channel it reads cannot be reasoned about when two of them run,
+and nothing promises `wterm-web` is a singleton.
 
 ### Working expires; blocked and idle do not
 
@@ -884,7 +1195,10 @@ each one implied a test that would have passed:
   reports at all.
 
 The resolution, in one sentence: **turn end writes `1;idle;<ts>`, and the option
-is never unset as part of normal operation.**
+is never unset as part of normal operation.** Turn end is an *edge* event, so it
+writes unconditionally; the only events that check before writing are the two
+that re-assert a state the agent is already in, and they are a different thing
+with a different section — "Re-assertion is not a report".
 
 - Rung 4 is "no *text*", not "no report". The row falls back to the title; the
   state dot is still the agent's own.
@@ -932,7 +1246,10 @@ Three details that make this work rather than merely sound right:
 - **The per-pane timestamp is a filter, not state to be restored.** On a daemon
   restart it is empty and the first report read is accepted, whatever it is. That
   is correct: whatever is in the option is the last write that landed, and the
-  daemon has no better information.
+  daemon has no better information. *Accepted by this filter is not the same as
+  believed* — a first-sight resting report still has to earn its way past the
+  evidence rules, which after a restart it has not yet done. See "What
+  "dropped" means".
 - **The cost is one bounded window of wrongness after a restart.** If the
   out-of-order `working` was the last write to land, a restarted daemon accepts
   it and shows `working` on a blocked pane until the next event — bounded by the
@@ -1006,9 +1323,18 @@ generation, so it is still there to answer.
 - The idle verification window (rule 3 above) **suppresses the derivation while
   it is pending**, rather than stamping and retracting. With no client connected
   there is nothing to verify and the derivation is immediate — which is the case
-  the app exists for, so it is the right way round. On a restart mid-window the
-  report is re-derived immediately, which is the safe direction: a report that
-  arrived before the restart is almost certainly a real turn end.
+  the app exists for, so it is the right way round. On a restart the standing
+  report is a first sight and **enters the window rather than skipping it**.
+  Revision 2 re-derived immediately there, on the grounds that a pre-restart
+  report "is almost certainly a real turn end", which is the subagent false-idle
+  waved through by an adverb. See "What "dropped" means".
+- **Derivation is safe only because a resting state is never re-asserted with a
+  later timestamp.** `seen` stores the value a device was shown, so a second
+  `1;idle;<later>` on an unchanged pane re-badges every device that had already
+  looked. That is prevented at the writer and not here — "Re-assertion is not a
+  report" — which makes this the one reader-side invariant in the design that
+  rests on writer-side behaviour. Named, rather than left to compose quietly with
+  the next thing somebody adds.
 
 ## What crosses the wire
 
@@ -1068,7 +1394,9 @@ one security boundary, drifting apart, is not a thing to ship.
 
 **So all three integrations shell out to a new `wterm-web report` subcommand.**
 It reads the agent's hook payload on stdin (or takes flags), decides the state,
-sanitizes the text, and performs one `tmux set-option`. The integration files are
+sanitizes the text, and performs one `tmux set-option` — preceded, on the two
+events that can re-assert a resting state, by one `show-options -p -v` read; see
+"Re-assertion is not a report". The integration files are
 then ~30 lines of "map this event to these arguments", which is what makes them
 short enough for a user to read before trusting them — and reviewability is the
 whole of the trust model here.
@@ -1098,7 +1426,11 @@ Consequences worth stating:
   costs nothing. Every failure — no `$TMUX`, no `$TMUX_PANE`, tmux missing, pane
   gone, unparseable stdin, an unrecognised `notification_type` — is a silent
   no-op with status 0. Running an agent outside tmux is not an error, it is a
-  no-op.
+  no-op. And on the hook that fires most often the sharp edge is not even
+  reachable: with `"async": true` and no `"asyncRewake"`, Claude ignores the exit
+  code entirely. That is a reason to keep exiting 0 rather than a reason to stop
+  — two independent things would have to change before an exit code could hurt,
+  and the second one is a line in a file the user owns.
 - **The binary's path is resolved at install time** and written into the
   generated integration file, with a `PATH` lookup as fallback. If it is missing
   at run time, the integration does nothing and says nothing.
@@ -1119,10 +1451,24 @@ and all three agents were measured:
   **documented** field of the command-hook schema — it runs the hook in the
   background, and an async hook cannot block or control behaviour. Measured at
   2251ms, i.e. no measurable tax. Revision 1 called it undocumented twice and
-  built an argument on that; the argument is withdrawn below.
+  built an argument on that; the argument is withdrawn below. Revision 3 adds the
+  part that makes the exit-0 rule doubly safe: an async command hook's **exit
+  code is ignored, including exit 2**, unless it also sets `"asyncRewake": true`
+  — the docs give "exit code 2 wakes Claude" as the thing `asyncRewake` adds, and
+  the timeout section says enforcement is skipped for an async command hook.
+  Documented *adjacent* rather than verbatim, so it is belt to the exit-0 braces
+  and not a replacement for them, and it carries one hard installer rule:
+  **`asyncRewake` is never set**, on any hook this project writes.
 
 So: **fire and forget, everywhere.** Spawn, do not await. The spawn itself is a
 few milliseconds and that is the budget.
+
+The one place `report` does two tmux calls rather than one — the read before a
+re-assertion write — costs a second few-millisecond fork inside a hook nobody is
+waiting on: the two re-assertion events are `Notification`s, which fire while
+Claude is already idle, and the hook is registered async. It is not on any turn's
+critical path, and it does not apply to `PreToolUse`, which is the hook whose
+volume this section is actually about.
 
 **A single-slot queue in pi and opencode**, adopting herdr's shape: at most one
 `report` in flight per pane, and if a new state arrives while one is running,
@@ -1173,22 +1519,61 @@ differ per agent and each one is the agent's own:
   and their comment gives the reason: RPC reports `hasUI=true`, so `mode` is the
   reliable discriminator and `hasUI` is not.
 
-**Every one of these filters fails closed.** This is the rule that answers the
-review's objection that these are fragile discriminators on payloads we do not
-control, and that at least one of them will be plausibly wrong and test green:
-when the discriminator is missing, unexpected, or a shape the integration does
-not recognise, the integration **does not report**. It never falls through to
-"probably the root". The cost of failing closed is a missing report, which ages
-out into the classifier — v2's behaviour, which is the floor this whole design
-degrades to. The cost of failing open is a false `idle` on a working agent,
-which is a `done` badge on every device. The docs do not enumerate which events
-carry `agent_id`, which is exactly why the guard has to be "absent means root,
-anything else means silence" rather than a positive test for a subagent.
+**"Every one of these filters fails closed" was revision 2's claim, and it is not
+implementable.** It cannot be, and the reason is in the payloads: for two of the
+three agents the root session is coded by the **absence** of a field. Claude
+documents `agent_id` as "present only when the hook fires inside a subagent
+call"; opencode's root is the session with no `parentID`. For those two, "missing
+means silence" silences the root — which is all normal reporting. Revision 2 held
+that sentence and, three paragraphs from it, "absent means root, anything else
+means silence", which fails *open* on absence. Both stood. Restated per filter,
+because they are not the same kind of thing:
 
-Failing closed is a *filter*, not a *backstop*, and it is not the only defence:
-evidence rule 3 above catches a reported `idle` on a churning pane whichever
-filter let it through. Two independent mechanisms, because one filter on an
-undocumented field is not a thing to bet the badge on.
+| Filter | Coding | Failure direction |
+| --- | --- | --- |
+| pi: `ctx.mode === "tui"` | presence | **Closed.** A missing or unexpected `mode` reports nothing |
+| claude: `agent_id` absent | absence | **Open.** A payload that lost the field — renamed, nested, dropped in a refactor — reads as root |
+| opencode: no `parentID` | absence | **Open.** Same |
+
+An absence-coded filter can be *tightened* but not inverted. The integration can
+require that the payload parsed, that it is the shape it expects, and that the
+other fields it knows about are present, so that a wholesale schema change is
+caught rather than read as a root event. It cannot distinguish "this field is
+absent because this is the root" from "this field is absent because it moved."
+Nobody can, and a design that says otherwise is describing a filter it has not
+written.
+
+**So what actually protects the badge has to be re-derived, and honestly.** The
+only failure that matters is a subagent producing a resting `idle`: a subagent's
+`working` on a working root is true, and a subagent's `blocked` is off Claude's
+whitelist entirely now and adjudicated by rules 1 and 2 on the other two. So the
+analysis is per *event*, not per agent:
+
+- **claude's turn end is `Stop`, and the guard there is structural, not a field
+  test.** `SubagentStop` is a *different hook* and we do not register it. For a
+  subagent turn end to reach us, subagent completions would have to start firing
+  the `Stop` hook — a far larger break than a field moving. The `agent_id` guard
+  is a second pass over `PreToolUse`, `Notification` and `UserPromptSubmit`, and
+  it is worth having, but Claude's idle path does not rest on it.
+- **pi's is `agent_settled` and opencode's is `session.idle`, and those are field
+  tests that fail open.** Behind them there is exactly one thing: evidence rule
+  3, which needs a connected client, needs the pane to keep churning for a whole
+  window, and is now floored by `settleAfter` so an ordinary repaint does not
+  trigger it. **With no client connected, a subagent false-idle on pi or opencode
+  is undefended.** That is the true state of it. It is not two independent
+  mechanisms; it is one mechanism that only runs when somebody is watching.
+
+Two things follow rather than being asserted. First, the fixtures that matter
+most are a real `agent_settled` and a real `session.idle` captured *while a
+subagent is running*, which is why "Testing" names them specifically instead of
+asking for a subagent payload per agent in general. Second, the shape of a real
+fix is already in the open questions under another name: a **writer-identity
+field**, so a resting report can be refused when the standing `working` came from
+a different writer. It was raised for cross-agent nesting (question 9); it
+answers this too, and the read-before-write machinery added for re-assertions is
+already most of what it needs. Revision 3 hoists it and does not adopt it: "which
+session" needs defining per agent and measuring, and adopting it would put a
+second reader-side invariant on writer-side behaviour.
 
 One more pi-specific detail worth carrying over: pi re-derives activity as
 `ctx.isIdle() === false` on `session_start`, because a reload can replace the
@@ -1423,10 +1808,15 @@ which is what the v2 design already does, and this document continues.
 | Integration dies while its agent lives, mid-turn | The report ages out and the classifier resumes. State is *late*, not wrong. The authority switch stamps no `finishedAt` |
 | Integration dies while the agent is `blocked`, user then answers in the terminal, agent resumes visibly | Evidence rule 1: the capture keeps running for reported-blocked panes, and a changed hash is positive evidence the agent is running, which drops the report |
 | The same, but with **no client connected**, and the agent finishes before anyone reconnects | Evidence rule 2, new in revision 2. On reconnect the screen never changes, so rule 1 can never fire; a settled screen with no dialog grammar match over `N` polls drops the report. Revision 1 listed this row as handled when only the row above it was |
-| An agent genuinely blocked at a dialog no `blocked.go` grammar matches | Rule 2 drops the report after `N` polls and the classifier reads the static screen as idle. A true `blocked` downgraded to `idle` — the accepted cost of rule 2, bounded to dialog forms we have not captured, which v2 already fails on for every non-integrated pane |
-| A subagent's turn-end event | Two defences, deliberately independent. Filtered per agent (`parentID`, `agent_id`, `ctx.mode`), and every filter **fails closed** — an unrecognised payload reports nothing. If a filter is wrong anyway, evidence rule 3 catches a reported `idle` on a churning pane within the verification window and no `finishedAt` is derived |
+| An agent genuinely blocked at a dialog no `blocked.go` grammar matches | Rule 2 drops the report after `N` polls and the classifier reads the static screen as idle. A true `blocked` downgraded to `idle` — the accepted cost of rule 2. Revision 3 stops the whitelist from *manufacturing* this case: an entry may claim `blocked` only where a grammar can confirm it, so what is left inside the bound is a dialog captured once and since restyled |
+| An MCP elicitation form, or the quota press-Enter banner, waiting overnight | **No badge.** The type is demoted to *ignored* for want of a grammar, so the pane reads `working` until the 60s expiry and then nothing, with no client connected. This is a real loss against what revision 2 claimed and is identical to what revision 2 would have delivered once anyone opened the app. Three screen captures and three `blockedRules` entries buy it back |
+| `Notification(agent_needs_input)` | Ignored, permanently. It describes a background session or a teammate, not this pane's root session, and "a report must only ever describe the root session in its pane" is a rule this document already has |
+| A subagent's turn-end event, claude | Structural: `SubagentStop` is a different hook and is not registered. `Stop` is root-only. The `agent_id` guard is a second pass over the other three hooks and is not what the idle path rests on |
+| A subagent's turn-end event, pi or opencode | Filtered on `ctx.mode` (presence-coded, fails closed) and `parentID` (absence-coded, **fails open**). Behind the opencode filter there is only evidence rule 3, which needs a connected client. **With no client connected this is undefended**, which revision 2 obscured by calling the filter and the rule "two independent mechanisms" |
 | A `Notification` whose `notification_type` we do not recognise | Ignored. No write, no state change, no timestamp refresh. Revision 1 would have written `blocked` — a permanent false badge on a resting state |
-| `Notification(idle_prompt)`, ~60s after every turn | Reports `idle`, which is a no-op re-assertion of what `Stop` already said, and a repair when `Stop` was missed. Revision 1 reported `blocked` here, which turned every idle Claude pane into a permanent "needs you" badge one minute after every turn |
+| `Notification(idle_prompt)`, ~60s after every turn | A **re-assertion** event: the writer reads the standing option and writes only if it disagrees. Standing `idle` — silence, no newer timestamp, no badge. Standing `working` (a missed `Stop`) — writes `idle` and repairs the pane from the agent. Revision 1 reported `blocked` here; revision 2 reported `idle` unconditionally and thereby re-badged every device once per turn, because `finishedAt` is derived from the report's own timestamp and `seen` stores the value it was shown |
+| A report dropped on evidence, still standing in the option next poll | Re-rejected from the per-pane rejection slot without re-evaluating the evidence. A rejection never advances the ordering filter; a newer value clears the slot. See "What "dropped" means" |
+| A true turn end whose repaint races the `Stop` write | Rule 3 no longer drops it. The report stands if the classifier says `idle` at any poll inside the window; only a screen that never settles for the whole window drops it. Revision 2's version dropped on a single changed hash, which is what `settleAfter` exists to call noise |
 | Two writes landing out of order (a delayed `working` after a `blocked`) | The daemon refuses a report whose timestamp is not strictly newer than the last it accepted. Ordinary scheduling jitter, not a broken integration, and revision 1 did not account for it |
 | Claude and pi in the same pane (an agent run inside another agent's shell) | **Not handled.** Both integrations see the same `TMUX_PANE` and write the same option, and the last writer wins with no way to tell whose turn ended. See the open questions |
 | A report containing `0x1f` or a newline | Impossible from our writer, which strips control characters. From a hostile writer, tmux substitutes both to spaces before Go sees them, and the report is the only variable field in its own format string, so a survivor costs one report and never a pane |
@@ -1435,7 +1825,7 @@ which is what the v2 design already does, and this document continues.
 | A report with an unparseable timestamp | Discarded whole. A report we cannot date is a report we cannot age |
 | A report dated in the future | Discarded whole if it is more than a few seconds ahead, rather than treated as stale. A resting `idle` derives `finishedAt` from its own timestamp, and a future `finishedAt` is a `done` badge that `seen` can never catch up with |
 | An integration installed mid-run | The first report is a first sight. No `finishedAt` edge, so no badge storm |
-| Daemon restart | Reports are unaffected: they live in tmux, not in the daemon's memory, and `finishedAt` is *derived* from a resting `idle` report rather than stamped on an edge — so a finished agent still badges after a restart. That is better than v2, which has to reset the whole classifier map, and revision 1 claimed it while deriving `finishedAt` in a way that could not deliver it. Cost: the ordering filter and the idle verification window are also empty on restart, so the first report read for each pane is accepted unverified |
+| Daemon restart | Reports are unaffected: they live in tmux, not in the daemon's memory, and `finishedAt` is *derived* from a resting `idle` report rather than stamped on an edge — so a finished agent still badges after a restart. That is better than v2, which has to reset the whole classifier map. Cost, revised: the ordering filter **and** the rejection slot are empty, so the standing report is a first sight — accepted by the ordering filter and then **verified from scratch**. A resting `idle` enters the verification window instead of being re-derived immediately (revision 2's "almost certainly a real turn end" is withdrawn), and a `blocked` that had been dropped can re-badge for up to `N` polls before rule 1 or 2 drops it again |
 | tmux server restart | The options die with the panes. No generation-keyed state to reset, unlike the classifier's map |
 | `wterm-web` binary missing or moved after install | The integration spawns nothing and says nothing. The pane falls back to the classifier |
 | A hook that would fail | `report` exits 0 unconditionally. Exit code `2` specifically blocks a `PreToolUse` call (revision 1 said "nonzero"), and a reporting feature that can stop an agent working is worse than no reporting feature, so the belt-and-braces stands on a corrected premise |
@@ -1465,22 +1855,44 @@ tests that catch a composition are the ones that assert two sections' outputs
   value plus at least two invented ones, asserting the reported state — and
   asserting that an unrecognised value produces **no write at all**, not a write
   of the previous state.
+- **The whitelist and `blockedRules` asserted consistent**, which is the test
+  that would have caught revision 3's second blocker: every whitelist entry that
+  maps to `blocked` must name an agent with a `blockedRules` grammar, and the
+  test fails if somebody adds a `blocked` mapping without one. It is a
+  composition test on purpose — the two tables live in different files, each is
+  correct alone, and the contradiction is only visible from above.
+- **The edge/re-assertion table**: an edge event writes without reading; a
+  re-assertion event reads first and writes **nothing** when the standing report
+  already carries that state, and writes when it carries a different one. Assert
+  on the tmux calls made, not only on the value that ends up stored, because "no
+  write" and "a write of the same state with a newer timestamp" store values that
+  look alike and badge differently.
 - **The `working` expiry as a pure function with an injected clock.** 60 seconds
   is a number that will be changed; it should be changeable by editing one
   constant and re-reading one table, with no sleeping and no real time anywhere
   near it.
-- **The blocked-verification drops**, both of them: a changed hash drops a
-  reported `blocked` (rule 1), and `N` consecutive settled captures with no
-  dialog match drop one (rule 2) while `N-1` do not. The off-by-one is the
-  point.
-- **The idle verification window** (rule 3): a reported `idle` on a pane the
-  classifier reads as `working` is dropped within the window and derives no
-  `finishedAt`; the same report on a settled pane derives one; and with no client
-  connected it derives one immediately, because there is nothing to verify.
-- **The ordering filter**: a report older than the last accepted one is refused
-  and the previously accepted state stands; a strictly newer one is taken; and
-  after a simulated restart the first report read is accepted whatever its
-  timestamp.
+- **The blocked-verification drops**, both of them, and rule 2's test needs a
+  true premise rather than a counter. Revision 2 specified it as "`N` settled
+  captures drop, `N-1` do not", which tests the counter and cannot see the
+  blocker: its premise, that a reported `blocked` has a matchable dialog, was
+  false for four fifths of the whitelist. The fixtures are the **captured claude
+  permission screen** with the dialog present (does not drop, at any `N`) and the
+  same screen after the dialog is answered (drops at exactly `N`, not at `N-1`).
+  The off-by-one is still the point; it is no longer the only point.
+- **The idle verification window** (rule 3), and specifically the turn-end race
+  that revision 2's version failed: a single changed hash inside the window
+  followed by `settleAfter` identical captures **keeps** the report and derives
+  `finishedAt` from its timestamp; a screen that changes at every poll for the
+  whole window drops it and derives nothing; and with no client connected the
+  derivation is immediate, because there is nothing to verify. A test that only
+  asserts the churning case cannot see the bug that mattered.
+- **The ordering filter and the rejection slot, together**: a report older than
+  the last accepted one is refused and the previously accepted state stands; a
+  strictly newer one is taken; a report rejected on evidence is re-rejected on
+  the next poll **without the evidence being re-evaluated**, and does not advance
+  the accepted-timestamp; a newer value clears the slot; and after a simulated
+  restart the standing report is accepted by the ordering filter but a resting
+  `idle` enters the verification window rather than deriving immediately.
 - **Table tests for precedence**, over report present/absent × fresh/stale ×
   screen available/unavailable, asserting `AgentState`, `StateSource` **and**
   `FinishedAt` together. Asserting the state alone cannot see a precedence bug at
@@ -1498,10 +1910,13 @@ tests that catch a composition are the ones that assert two sections' outputs
   pass trivially, because the option is not in `Format` — and it is worth having
   precisely so that the day somebody appends it there, this goes red.
 - **A test that the report's format string round-trips a value containing a raw
-  `0x1f` and a newline as spaces**, against a real server. The `[[:cntrl:]]`
-  finding is the reason: a substitution pattern can fail by expanding to `""` for
-  every value, which no hostile-input test would catch. Assert on a *benign*
-  value surviving intact, not only on a hostile one being cleaned.
+  `0x1f` and a newline as spaces**, against a real server, with a **benign
+  fixture that contains a lowercase `n` and a real newline byte**. Both traps are
+  the reason and neither is hypothetical: `[[:cntrl:]]` expands to `""` for every
+  value, and a bracket set retyped from a rendered `\n` leaves the newline alive
+  while turning every `n` into a space. A benign fixture without an `n` in it
+  passes both. Assert on the benign value surviving byte-intact, not only on the
+  hostile one being cleaned.
 - **A test for the batched invocation**: one tmux call, two tagged blocks, split
   correctly; every pane present in the report block including panes with the
   option unset; and a hostile report value leaving the snapshot block byte-intact.
@@ -1519,10 +1934,14 @@ tests that catch a composition are the ones that assert two sections' outputs
   that says so: render the same row twice, once with `stateSource: "event"` and
   once with `"screen"`, and assert the rendered class lists are equal. Without
   it the prohibition in "What crosses the wire" is a sentence nobody runs.
-- **Recorded hook payloads as fixtures**, one file per agent per event, including
-  a subagent payload for each, and for Claude one payload per `notification_type`
-  in the whitelist. These do not exist yet and capturing them is part of
-  implementation, not of this design.
+- **Recorded hook payloads as fixtures**, one file per agent per event, and for
+  Claude one payload per `notification_type` in the table. Two of them carry more
+  weight than the rest and should be captured first: a real **`agent_settled`**
+  (pi) and a real **`session.idle`** (opencode) taken *while a subagent is
+  running*, because those are the two turn-end filters that fail open and the
+  only evidence anybody will ever have about what they actually contain. These
+  do not exist yet and capturing them is part of implementation, not of this
+  design.
 - **What cannot be tested in CI**: that a real agent, running a real integration,
   produces the events we mapped. That is a manual check per agent per upgrade,
   and the honest mitigation is that a wrong mapping degrades to no report, which
@@ -1538,9 +1957,12 @@ a different threat model.
 
 ## Open questions, as they now stand
 
-Revision 1 listed seven, one of them already answered. Revision 2 closes most of
-question 1 on the documentation, and adds two the review found nobody had
-considered.
+Revision 1 listed seven, one of them already answered. Revision 2 closed most of
+question 1 on the documentation and added two. Revision 3 changes what question 1
+*decides*, floors question 3 against `settleAfter`, promotes the writer-identity
+idea out of question 9 because it now answers two problems rather than one, and
+adds two more: the screen captures the whitelist demotions are waiting on, and
+the turn-end settle measurement that rule 3 was rewritten without.
 
 1. **`PreToolUse`'s per-call cost, and nothing else about it.** Revision 1 asked
    three things here — the payload shape, the cost, and whether `"async"` exists
@@ -1551,24 +1973,40 @@ considered.
    tmux client each. Latency is off the critical path by construction, so this is
    about whether a tight `Bash` loop makes the machine notice. If it does, Claude
    drops to state-only by deleting one hook entry.
+
+   **Revision 3 changes what this decides.** `PreToolUse` is also what makes
+   Claude's connected-case blocked badge about six seconds slow instead of about
+   1.5, because its fresh `working` suppresses the capture `IsBlocked` would read.
+   So the measurement no longer decides a threshold ("is the fork volume
+   tolerable") but a trade: the activity line and the disconnected-case keepalive
+   against a four-and-a-half-second faster badge whenever somebody is watching.
+   The recommendation still goes to `PreToolUse`; the fallback is now a
+   defensible position rather than a retreat.
 2. **The 60-second window for a transient `working` report.** Needs the
    distribution of inter-event gaps during real work on all three agents. Revision
    2 sharpens what to measure: the failure of expiring early is a false `idle` on
    a quiet screen, not merely an extra fork, so the case to measure is **a single
    long tool call that emits no sub-events, with no client connected**. The
    number is still a guess biased short.
-3. **`N`, the number of polls in the two new evidence rules.** Set at 3 (~4.5s)
-   by the same kind of guess as the 60 seconds, and it wants the same kind of
-   check: how many consecutive captures a settled agent screen actually produces
-   before something repaints, and how quickly a resumed agent starts churning
-   again. Too small and rule 2 drops true `blocked` reports on slow-repainting
-   screens; too large and the overnight case takes longer to correct itself.
+3. **`N`, the number of polls in the two evidence rules**, and the measurement
+   rule 3 was rewritten without. `N = 3` (~4.5s) is now floored rather than
+   free: the window has to be able to contain a settle, so `N >= settleAfter + 1`.
+   What still needs measuring is how many polls a **real turn end** takes to
+   settle on each agent — how many repaints follow `Stop`, `agent_settled` and
+   `session.idle` before the screen goes still. If a turn end routinely repaints
+   more than once, `N = 3` is too small and rule 3 drops true idle reports, which
+   is the failure revision 2 shipped by a different route. The other half is
+   unchanged: too small and rule 2 drops true `blocked` on slow-repainting
+   screens, too large and the overnight case takes longer to correct itself.
+   These pull against each other and may want two constants rather than one.
 4. ~~Whether tmux can strip control bytes at read time.~~ **Answered by
-   `f25e066`**, and left here because the answer is a trap rather than a yes:
-   `#{s/[\n\x1f]/ /:var}` works with a bracket set of the two literal bytes,
-   `[[:cntrl:]]` blanks every value including good ones, and a byte range is
-   locale-dependent. Recorded in "The hazard" so the next person does not
-   re-derive it the expensive way.
+   `f25e066`**, and left here because the answer is a trap rather than a yes.
+   Three ways to get it wrong: `[[:cntrl:]]` blanks every value including good
+   ones, a byte range is locale-dependent, and a bracket set retyped from a
+   rendered `\n` covers neither target byte while turning every `n` into a space.
+   What works is a set of the two *literal* bytes. Copy `labelField`
+   (`internal/tmux/snapshot.go:108`) from source. Recorded in "The hazard" so the
+   next person does not re-derive it the expensive way.
 5. **opencode's global plugin directory.** Whether `~/.config/opencode/plugin/`
    is auto-loaded. If it is, `--global` becomes available for opencode and the
    `.gitignore` consequence stops applying to client repos.
@@ -1585,19 +2023,39 @@ considered.
    integration and a working directory below it does too, or whether a parent
    directory's plugin is loaded at all. Two integrations writing one pane option
    is a race nobody has looked at.
-9. **Cross-agent nesting**, which nobody had considered until the review: Claude
-   running inside a pi pane, or any agent started from another agent's shell.
-   Both integrations see the same `TMUX_PANE`, both write `@wterm_agent`, and the
-   last writer wins — so the inner agent's turn end can report `idle` for a pane
-   whose outer agent is still working, which is the subagent failure again with
-   no `parentID` or `agent_id` available to filter on because the two processes
-   share nothing. The ordering rule does not help; both are legitimately fresh.
-   Worth noting that this configuration is not hypothetical in this repo's own
-   development. Nothing is proposed here beyond recording it: the candidates are
-   a writer-identity field in the value, refusing to report when the pane's
-   `pane_current_command` is not the agent doing the reporting, or accepting that
-   the innermost agent owns the pane. All three want measuring first.
-10. **Whether `notification_type`'s documented list is closed.** It is not
+9. **A writer-identity field, now wanted by two problems rather than one.**
+   Revision 3 promotes this out of the nesting question below, because the honest
+   re-derivation of the subagent filters left pi's and opencode's turn-end guards
+   failing open with only a client-dependent evidence rule behind them. A report
+   that said *which session wrote it* would let a resting report be refused when
+   the standing `working` came from somebody else — and the read-before-write
+   added for re-assertions is already most of the machinery. Not adopted: "which
+   session" has to be defined per agent and measured, it is a wire change, and it
+   would be the second reader-side invariant resting on writer-side behaviour.
+   What to measure first: whether pi, opencode and Claude each expose a stable
+   session identifier in the payloads the integrations already receive.
+10. **Three screen captures the whitelist is waiting on.** `quota_auto_resume_stale`,
+    `elicitation_dialog` and `elicitation_url_dialog` are demoted to *ignored*
+    because no `blocked.go` grammar can confirm them, and each promotes to
+    `blocked` the day somebody captures its screen and writes a `blockedRules`
+    entry. The quota banner is the cheapest to get (exhaust a quota) and the two
+    elicitation dialogs need an MCP server that asks for something. Until then
+    those three waits are invisible to both authorities, which is the largest
+    single hole in this feature's coverage.
+11. **Cross-agent nesting**, which nobody had considered until the second review:
+    Claude running inside a pi pane, or any agent started from another agent's
+    shell. Both integrations see the same `TMUX_PANE`, both write `@wterm_agent`,
+    and the last writer wins — so the inner agent's turn end can report `idle`
+    for a pane whose outer agent is still working, which is the subagent failure
+    again with no `parentID` or `agent_id` available to filter on because the two
+    processes share nothing. The ordering rule does not help; both are
+    legitimately fresh. Worth noting that this configuration is not hypothetical
+    in this repo's own development. Nothing is proposed here beyond recording it.
+    The candidates are the writer-identity field now standing as question 9,
+    refusing to report when the pane's `pane_current_command` is not the agent
+    doing the reporting, or accepting that the innermost agent owns the pane. All
+    three want measuring first.
+12. **Whether `notification_type`'s documented list is closed.** It is not
     documented as closed, which is why the whitelist's default is "ignore". If it
     ever becomes closed, the default could tighten — but the default is cheap
     enough that this is curiosity rather than a blocker.

@@ -93,31 +93,55 @@ func validateID(kind string, sigil byte, s string) error {
 // are identified by the @wterm_web option and never by name -- a user may
 // legitimately want that name, and taking it from them is the bug session.go
 // already warns about.
-func ValidateSessionName(name string) error {
+func ValidateSessionName(name string) error { return validateName("session", name) }
+
+// ValidateWindowName reports whether name is safe to give a window.
+//
+// A sibling rather than a reuse of ValidateSessionName, because the error text
+// reaches the owner in a toast and "invalid session name" on a window rename is
+// a lie about what went wrong. The rules themselves are shared: every hazard in
+// ValidateSessionName's list was re-probed against tmux 3.7b for windows and
+// found identical, and one of them is worse.
+//
+//   - Empty. `rename-window -t @1 ""` exits 0 and stores the empty string, so
+//     unlike a session -- which at least keeps its old name until something
+//     addresses it -- a window ends up with a blank sidebar row immediately.
+//     (`new-window -n ""` is quieter: automatic-rename fills a name in.)
+//   - ":" and "." are the same target separators, and a window is addressed as
+//     session:window, so `a:b` and `w.y` are both unaddressable by name.
+//   - A leading "-" is read as a flag in rename-window's positional slot.
+//   - C1 controls, 0x1f included, are stored verbatim: tmux rejected
+//     "A\x1fB" but accepted the same name with U+009F in place of the 0x1f.
+//
+// The rune cap is MaxSessionName for the same column-budget reason; a window
+// name occupies the same kind of sidebar row.
+func ValidateWindowName(name string) error { return validateName("window", name) }
+
+func validateName(kind, name string) error {
 	// Before the rune count, because counting an invalid string is meaningless.
 	// encoding/json rewrites invalid UTF-8 to U+FFFD without erroring, so a
 	// name that survived this would be displayed as something tmux does not
 	// hold, and the owner would be clicking a lie.
 	if !utf8.ValidString(name) {
-		return fmt.Errorf("invalid session name %q: not valid UTF-8", name)
+		return fmt.Errorf("invalid %s name %q: not valid UTF-8", kind, name)
 	}
 	// TrimSpace, not len: a name of spaces is a row the owner can neither read
 	// nor tell apart from the next one.
 	if strings.TrimSpace(name) == "" {
-		return fmt.Errorf("invalid session name %q: empty", name)
+		return fmt.Errorf("invalid %s name %q: empty", kind, name)
 	}
 	if n := utf8.RuneCountInString(name); n > MaxSessionName {
-		return fmt.Errorf("invalid session name: %d characters, limit is %d", n, MaxSessionName)
+		return fmt.Errorf("invalid %s name: %d characters, limit is %d", kind, n, MaxSessionName)
 	}
 	if strings.HasPrefix(name, "-") {
-		return fmt.Errorf("invalid session name %q: cannot start with '-', tmux reads it as a flag", name)
+		return fmt.Errorf("invalid %s name %q: cannot start with '-', tmux reads it as a flag", kind, name)
 	}
 	if i := strings.IndexAny(name, ":."); i >= 0 {
-		return fmt.Errorf("invalid session name %q: cannot contain %q, tmux uses it to separate targets", name, name[i])
+		return fmt.Errorf("invalid %s name %q: cannot contain %q, tmux uses it to separate targets", kind, name, name[i])
 	}
 	for _, r := range name {
 		if unicode.IsControl(r) {
-			return fmt.Errorf("invalid session name %q: contains a control character (%U)", name, r)
+			return fmt.Errorf("invalid %s name %q: contains a control character (%U)", kind, name, r)
 		}
 	}
 	return nil

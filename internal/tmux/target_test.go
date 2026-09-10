@@ -142,3 +142,29 @@ func TestValidateSessionNameCapsRunesNotBytes(t *testing.T) {
 		t.Errorf("ValidateSessionName(%d two-byte runes) = %v, want nil", MaxSessionName, err)
 	}
 }
+
+// ValidateWindowName is a sibling of ValidateSessionName rather than a call to
+// it, and the only difference is the one that matters to the owner: the message
+// names the thing they were renaming. A shared implementation is what makes the
+// rules identical; this pins that neither half drifted.
+func TestValidateWindowNameSharesTheRulesAndNamesItsOwnKind(t *testing.T) {
+	// U+009F is in the list because tmux's own control-character check is
+	// byte-oriented and lets C1 through, for windows exactly as for sessions.
+	for _, name := range []string{"", "   ", "a:b", "w.y", "-z", "a\x1fb", "a\u009fb",
+		strings.Repeat("z", MaxSessionName+1)} {
+		werr, serr := ValidateWindowName(name), ValidateSessionName(name)
+		if werr == nil {
+			t.Errorf("ValidateWindowName(%q) = nil, want an error: tmux stores it and the row breaks", name)
+			continue
+		}
+		if serr == nil {
+			t.Errorf("ValidateSessionName(%q) = nil while the window rule rejects it: the two have drifted", name)
+		}
+		if !strings.Contains(werr.Error(), "window name") {
+			t.Errorf("ValidateWindowName(%q) says %q; a toast on a window rename must not say \"session\"", name, werr)
+		}
+	}
+	if err := ValidateWindowName("api build"); err != nil {
+		t.Errorf("ValidateWindowName(%q) = %v, want nil", "api build", err)
+	}
+}

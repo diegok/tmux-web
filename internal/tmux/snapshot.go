@@ -72,7 +72,7 @@ const Format = "#{?#{session_group},#{session_group},#{session_name}}" + Sep +
 	"#{pane_id}" + Sep +
 	"#{pane_index}" + Sep +
 	"#{@wterm_web}" + Sep +
-	"#{@wterm_label}" + Sep +
+	"#{" + LabelOption + "}" + Sep +
 	"#{window_index}" + Sep +
 	"#{window_name}" + Sep +
 	"#{pane_active}" + Sep +

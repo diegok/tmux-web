@@ -34,6 +34,13 @@ was red for four tasks before anyone ran it.
 
 **Safety.** Never run `pkill`, `killall`, or any pattern-matching process kill. The developer has a live tmux session with real work and running agents in it. Every mutating tmux command in a test goes through `testutil.Server`.
 
+**Do not run `prettier`.** This repo has no formatter configured, so prettier
+applies its own defaults — double quotes and semicolons — and rewrites whole
+files, including ones you are not working on. It has already happened once and
+had to be unpicked by hand. Match the surrounding style instead. (`prettier
+--check` flags 32 files even at the repo's own settings, most of them generated
+shadcn components, so adding a config would trade this problem for a worse one.)
+
 **Commit after every task.**
 
 ---

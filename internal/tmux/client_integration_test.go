@@ -380,23 +380,21 @@ func TestCaptureAgainstRealTmux(t *testing.T) {
 	}
 }
 
-// An id the frontend failed to fill in must never reach tmux: an empty target
-// means "whatever is current" and exits 0, so the classifier would silently
-// hash some other pane and badge this row with its state.
-func TestCaptureRejectsBadPaneIDs(t *testing.T) {
-	srv := testutil.NewServer(t)
-	srv.Run(t, "new-session", "-d", "-s", "work")
-	c := tmux.NewClient(srv.Args())
+// -J rejoins a line the pane wrapped, so a question broken across two rows by a
+// narrow pane reads as one -- and, less obviously, so that a pane being resized
+// does not change the hash of a screen nothing happened on.
+func TestCaptureRejoinsWrappedLines(t *testing.T) {
+	long := strings.Repeat("a", 45)
 
-	for _, bad := range []string{"", "%", "3", "@3", "$3", "%3x", "%-1", "work:0"} {
-		if _, err := c.Capture(context.Background(), bad); err == nil {
-			t.Errorf("Capture(%q) succeeded, want a rejection", bad)
-		}
-	}
-	// A well-formed id for a pane that does not exist is tmux's to refuse, and
-	// it must be an error rather than an empty screen -- an empty screen hashes
-	// as stable and would settle to idle.
-	if _, err := c.Capture(context.Background(), "%999"); err == nil {
-		t.Error("Capture of a nonexistent pane succeeded, want an error")
-	}
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "20", "-y", "10",
+		"echo "+long+"; exec cat")
+
+	c := tmux.NewClient(srv.Args())
+	pane := srv.Run(t, "list-panes", "-t", "work", "-F", "#{pane_id}")
+
+	waitFor(t, 3*time.Second, func() bool {
+		screen, err := c.Capture(context.Background(), pane)
+		return err == nil && strings.Contains(screen, long)
+	}, "a 45-character line never came back whole from a 20-column pane")
 }

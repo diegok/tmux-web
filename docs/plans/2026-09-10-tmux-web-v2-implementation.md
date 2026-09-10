@@ -24,6 +24,12 @@
 4. **tmux sanitises pane *titles* but not user *option values*.** `@wterm_label` can contain a `0x1f` or a newline and make a pane vanish from the sidebar.
 5. **Blocked is checked on every capture, with no idle gate.** An agent can raise an approval box while background work continues.
 
+**Run both suites after every task.** `go test ./...` alone is not enough: the
+frontend carries a contract test that parses the Go `Row` struct, so a Go-side
+wire change turns `pnpm test` red while Go stays green. That happened here —
+Task 2's new fields were never mirrored into TypeScript and the frontend suite
+was red for four tasks before anyone ran it.
+
 **Testing.** Same as v1: integration against a real tmux on an isolated socket (`internal/tmux/testutil`, whose `Args()` includes `-f /dev/null` — that flag is load-bearing, the developer's `~/.tmux.conf` sets non-default options). Pure logic gets table tests. Never mock tmux.
 
 **Safety.** Never run `pkill`, `killall`, or any pattern-matching process kill. The developer has a live tmux session with real work and running agents in it. Every mutating tmux command in a test goes through `testutil.Server`.
@@ -594,7 +600,17 @@ below", and it is true: it is useful with no state detection at all. Phase C is
 otherwise the first point where anything is demonstrable, which is a long way to
 go on trust.
 
-**Files:** `web/src/components/AppSidebar.tsx`, its test.
+**Files:** `web/src/components/AppSidebar.tsx` and its test, **plus
+`web/src/lib/useSnapshot.ts`** — two dependencies the first draft of this task
+missed, both of them correctness rather than plumbing:
+
+- `SnapshotRow` must mirror Task 2's four new wire fields. The contract test in
+  `useSnapshot.test.ts` parses the Go `Row` struct and compares its json tags
+  against the TypeScript keys, so it goes red the moment the Go side moves.
+- `rowsEqual` must compare the title. It decides whether the previous tree
+  object survives a poll, and React reconciles nothing when it does — so a title
+  that changes while nothing else about the pane does would never reach the DOM.
+  The feature would appear to work at first paint and then freeze.
 
 Show `title` in place of `command` for panes where a title exists and differs
 from the command. Nothing else — no state, no dot, no logo. One commit, and the
@@ -751,7 +767,13 @@ un-encoded is refused rather than mis-routed.
 
 **Files:** `web/src/lib/useSnapshot.ts`, `web/src/components/AppSidebar.tsx`, tests.
 
-- Row shows `label`, else `title`, else `command`.
+- Row shows `label`, else `title`, else `command` — but a title has to earn the
+  row. **The design says only *agent* panes show a title**, while this task
+  originally said all panes unconditionally; the reconciliation shipped in
+  Task 6b is a rule rather than a list: show a title when it is non-empty, is
+  not the command, and is not a single bare hostname-shaped token. That keeps
+  useful `vim`/`ssh` titles, drops the hostname every plain shell carries, and
+  avoids a second copy of the Go `Agents` list in TypeScript.
 - **Session rows display `sessionName`, not `groupKey`.** `useSnapshot.ts:222-225`
   groups and labels by `groupKey` today, and tmux keeps the *pre-rename* name
   there forever — so without this change, renaming from the browser still appears

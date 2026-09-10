@@ -4,7 +4,9 @@
   "type": "module",
   "description": "Root package: the Playwright end-to-end suite only. The app's frontend lives in web/ and has its own package.json.",
   "scripts": {
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "test": "pnpm --dir web test",
+    "typecheck": "pnpm --dir web exec tsc -b"
   },
   "devDependencies": {
     "@playwright/test": "^1.63.0"

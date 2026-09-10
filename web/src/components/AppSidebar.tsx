@@ -7,9 +7,8 @@
  * `SidebarGroup` per session group, `SidebarMenu` of windows inside it, and
  * `SidebarMenuSub` of panes **only when a window has more than one**. A window
  * with a single pane is the pane, and rendering a lone child under it would add
- * a row and a disclosure to say nothing. The `Badge` is `pane_current_command`
- * -- `claude`, `vim`, `zsh` -- which is the one field that tells the user which
- * agent a window is at a glance.
+ * a row and a disclosure to say nothing. The `Badge` says what the pane is: its
+ * label, its title, or `pane_current_command` -- see `paneBadge`.
  *
  * ## Responsiveness is shadcn's, not ours
  *
@@ -50,8 +49,9 @@ import {
 } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import type { TerminalPhase } from '@/components/Terminal'
+import { cn } from '@/lib/utils'
 import { windowTarget } from '@/lib/useSnapshot'
-import type { SnapshotState, WindowNode } from '@/lib/useSnapshot'
+import type { PaneNode, SnapshotState, WindowNode } from '@/lib/useSnapshot'
 
 export interface AppSidebarProps {
   /** Everything `useSnapshot` knows, including why it might be out of date. */
@@ -201,11 +201,7 @@ function WindowItem({
       >
         {split ? <Columns2 aria-hidden /> : <SquareTerminal aria-hidden />}
         <span className="truncate">{label}</span>
-        {!split && window.panes[0] && (
-          <Badge variant="secondary" className="ml-auto max-w-24 truncate font-mono">
-            {window.panes[0].command}
-          </Badge>
-        )}
+        {!split && window.panes[0] && <PaneBadge pane={window.panes[0]} width="max-w-32" />}
       </SidebarMenuButton>
 
       {split && (
@@ -238,9 +234,7 @@ function WindowItem({
                       aria-label="current in tmux"
                     />
                   )}
-                  <Badge variant="secondary" className="ml-auto max-w-20 truncate font-mono">
-                    {pane.command}
-                  </Badge>
+                  <PaneBadge pane={pane} width="max-w-24" />
                 </button>
               </SidebarMenuSubButton>
             </SidebarMenuSubItem>
@@ -351,6 +345,88 @@ function RetryButton({ onRefresh }: { onRefresh: () => void }) {
       <RefreshCw className="size-3" aria-hidden />
       Retry now
     </button>
+  )
+}
+
+/**
+ * A pane title that is only a hostname: one token of the characters a hostname
+ * is made of, and nothing else.
+ *
+ * tmux gives every pane the machine's hostname as its title and leaves it there
+ * until something sets one, so a sidebar that showed titles unconditionally
+ * would print the same word down every shell row -- the field would cost a row
+ * of width to say where you already know you are. Nothing else about a title
+ * distinguishes the default from a real one; it is not empty and it is not the
+ * command.
+ *
+ * Narrow on purpose: it suppresses `thinkpad` and `dev-box.local` but not
+ * `~/devel/tmux-web` or `✳ Thinking`, so the only titles it can lose are
+ * single bare words, and losing one costs the command that was there before.
+ */
+const HOSTNAME_LIKE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/** What a pane's badge says, and whether the text is a command. */
+interface PaneBadgeText {
+  text: string
+  /**
+   * The text is `pane_current_command` -- a program name, not prose someone
+   * wrote. It keeps the monospaced badge and gets no tooltip of its own: a
+   * command is one short word, and on a pane row what the row's own `title=`
+   * already says -- the pane id and index -- is more use than repeating it.
+   */
+  fromCommand: boolean
+}
+
+/**
+ * The badge for a pane: **label, else title, else command**.
+ *
+ * The label is a name the user gave this pane and wins outright, including over
+ * a title a program is rewriting underneath it -- that is the whole point of
+ * having one. (Nothing sets a label from the browser until Task 12's rename;
+ * `tmux set -p @wterm_label` already does, and the field is already on the
+ * wire, so the order is honoured now rather than left as a field that is read
+ * and ignored.)
+ *
+ * A title has to earn the row. Claude Code sets it to what it is working on,
+ * which is far better than three rows all reading `claude`, but two kinds of
+ * title say nothing the row does not already say: the hostname every untouched
+ * pane carries, and a title that is just the command again. Both fall through
+ * to the command, so those rows look exactly as they did before this existed.
+ */
+function paneBadge(pane: Pick<PaneNode, 'command' | 'title' | 'label'>): PaneBadgeText {
+  const label = pane.label.trim()
+  if (label !== '') return { text: label, fromCommand: false }
+
+  const title = pane.title.trim()
+  const command = pane.command.trim()
+  if (title !== '' && !HOSTNAME_LIKE.test(title) && title.toLowerCase() !== command.toLowerCase()) {
+    return { text: title, fromCommand: false }
+  }
+  return { text: pane.command, fromCommand: true }
+}
+
+/**
+ * The badge itself.
+ *
+ * Truncation is CSS: the sidebar is 16rem wide and a title arrives capped at
+ * 256 bytes, so no width the badge could be given makes measuring in JS worth a
+ * layout pass. The full text goes in `title=`, which is where the rest of a
+ * truncated row is reachable without a tooltip library and without a click.
+ *
+ * `shrink` overrides the badge's own `shrink-0` for a title: when a long window
+ * name and a long title compete for one row, the window name is the identity
+ * and the title is the description, so the title is what gives way.
+ */
+function PaneBadge({ pane, width }: { pane: PaneNode; width: string }) {
+  const { text, fromCommand } = paneBadge(pane)
+  return (
+    <Badge
+      variant="secondary"
+      title={fromCommand ? undefined : text}
+      className={cn('ml-auto truncate', width, fromCommand ? 'font-mono' : 'shrink font-normal')}
+    >
+      {text}
+    </Badge>
   )
 }
 

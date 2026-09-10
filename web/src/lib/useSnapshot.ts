@@ -70,18 +70,35 @@ export const TROUBLE_BEFORE_STALE = 2
 export interface SnapshotRow {
   /** session_group, falling back to session_name. What the sidebar labels. */
   groupKey: string
+  /**
+   * `$N`, and the session's live name beside it. Both differ from `groupKey`:
+   * tmux keeps the *pre-rename* name in session_group forever, so the group key
+   * is neither an address nor a display name. Mirrored here because the wire
+   * carries them; what the sidebar does with them is Task 10's.
+   */
+  sessionId: string
+  sessionName: string
   /** e.g. "%3". Unique per tmux server and stable for the pane's life. */
   paneId: string
   /** Position in the window's layout. Not the id -- see the header comment. */
   paneIndex: number
   /** Row came from a session this app created (`@wterm_web`). */
   appOwned: boolean
+  /** `@wterm_label`: a name the user gave this pane, or "" when unset. */
+  label: string
   windowIndex: number
   windowName: string
   /** tmux's current pane *for that window*. Windows are shared by a group. */
   paneActive: boolean
-  /** pane_current_command: `claude`, `vim`, `zsh`. The Badge. */
+  /** pane_current_command: `claude`, `vim`, `zsh`. */
   command: string
+  /**
+   * `pane_title`, normalised by tmux's own OSC parser and capped at 256 bytes
+   * by the daemon. Claude Code sets it to what it is working on; a plain shell
+   * leaves it at the hostname. `paneBadge` decides which of those is worth a
+   * row.
+   */
+  title: string
 }
 
 /** The body of `GET /api/snapshot`, normalised. */
@@ -182,6 +199,10 @@ export interface PaneNode {
   paneId: string
   paneIndex: number
   command: string
+  /** The pane's tmux title; the hostname when nothing has set one. */
+  title: string
+  /** `@wterm_label`, or "" -- the only one of the three the user chose. */
+  label: string
   /** tmux's active pane within this window. */
   active: boolean
   appOwned: boolean
@@ -242,6 +263,8 @@ export function groupRows(rows: readonly SnapshotRow[]): SessionNode[] {
       paneId: row.paneId,
       paneIndex: row.paneIndex,
       command: row.command,
+      title: row.title,
+      label: row.label,
       active: row.paneActive,
       appOwned: row.appOwned,
     })
@@ -332,7 +355,15 @@ export function resolveSession(
   return chooseSession(groups, picked)
 }
 
-/** Shallow field-wise equality over two snapshots' rows. */
+/**
+ * Shallow field-wise equality over two snapshots' rows.
+ *
+ * Every field the wire carries, not only the ones something renders today: a
+ * row that compares equal keeps the previous tree object and React reconciles
+ * nothing, so a field left out here is a field that can change in tmux and
+ * never reach the DOM. A pane title does exactly that -- Claude Code rewrites
+ * it when its task changes and nothing else about the pane moves.
+ */
 function rowsEqual(a: readonly SnapshotRow[], b: readonly SnapshotRow[]): boolean {
   if (a.length !== b.length) return false
   return a.every((x, i) => {
@@ -340,10 +371,14 @@ function rowsEqual(a: readonly SnapshotRow[], b: readonly SnapshotRow[]): boolea
     return (
       x.paneId === y.paneId &&
       x.groupKey === y.groupKey &&
+      x.sessionId === y.sessionId &&
+      x.sessionName === y.sessionName &&
       x.paneIndex === y.paneIndex &&
       x.windowIndex === y.windowIndex &&
       x.windowName === y.windowName &&
       x.command === y.command &&
+      x.title === y.title &&
+      x.label === y.label &&
       x.paneActive === y.paneActive &&
       x.appOwned === y.appOwned
     )

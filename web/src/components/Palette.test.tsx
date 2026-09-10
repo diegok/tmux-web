@@ -20,13 +20,18 @@ import type { SnapshotRow } from '@/lib/useSnapshot'
 function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
   return {
     groupKey: 'work',
+    sessionId: '$0',
+    sessionName: 'work',
     paneId: '%0',
     paneIndex: 0,
     appOwned: false,
+    label: '',
     windowIndex: 0,
     windowName: 'shell',
     paneActive: true,
     command: 'zsh',
+    // tmux's default for an untouched pane: the hostname.
+    title: 'devbox',
     ...over,
   }
 }

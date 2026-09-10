@@ -21,13 +21,18 @@ import type { SnapshotPayload, SnapshotRow, SnapshotState } from './useSnapshot'
 function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
   return {
     groupKey: 'work',
+    sessionId: '$0',
+    sessionName: 'work',
     paneId: '%0',
     paneIndex: 0,
     appOwned: false,
+    label: '',
     windowIndex: 0,
     windowName: 'shell',
     paneActive: true,
     command: 'zsh',
+    // What tmux gives a pane nothing has titled: the hostname.
+    title: 'devbox',
     ...over,
   }
 }
@@ -77,7 +82,7 @@ describe('contract with the daemon', () => {
     const struct = goSource('internal/tmux/snapshot.go').match(/type Row struct \{([\s\S]*?)\n\}/)
     if (!struct) throw new Error('type Row not found in internal/tmux/snapshot.go')
     const tags = [...struct[1].matchAll(/json:"([^",]+)"/g)].map((m) => m[1])
-    expect(tags).toHaveLength(8)
+    expect(tags).toHaveLength(12)
     expect(Object.keys(row()).sort()).toEqual(tags.sort())
   })
 })
@@ -167,6 +172,15 @@ describe('groupRows', () => {
     const [session] = groupRows(scrambled)
     expect(session.windows[0].panes.map((p) => p.paneId)).toEqual(['%0', '%4', '%2', '%1'])
     expect(session.windows[0].panes.map((p) => p.paneIndex)).toEqual([0, 1, 2, 3])
+  })
+
+  it('carries the title and label onto the pane, since the badge is made of them', () => {
+    const [session] = groupRows([row({ title: '✳ Categorización', label: 'prod db' })])
+    expect(session.windows[0].panes[0]).toMatchObject({
+      command: 'zsh',
+      title: '✳ Categorización',
+      label: 'prod db',
+    })
   })
 
   it('keeps sessions and windows in arrival order', () => {
@@ -535,6 +549,34 @@ describe('SnapshotPoller', () => {
     await h.tick()
     expect(h.last.groups).not.toBe(first)
     expect(h.last.groups[0].windows[0].panes[2].command).toBe('less')
+  })
+
+  it('compares every field the wire carries, so no change is swallowed', async () => {
+    // Whether the previous tree object survives a poll is decided by rowsEqual,
+    // and React reconciles nothing when it does -- so a field left out of that
+    // comparison is a field that can change in tmux and never reach the DOM.
+    // The live case is the pane title: Claude Code rewrites it when its task
+    // changes and nothing else about the pane moves at all.
+    //
+    // Driven off the fixture's own keys rather than a list written out here, so
+    // a field added to the wire is covered on the day it arrives.
+    const base = row({ paneId: '%1' })
+    for (const key of Object.keys(base) as (keyof SnapshotRow)[]) {
+      const was = base[key]
+      const moved: SnapshotRow = {
+        ...base,
+        [key]: typeof was === 'string' ? `${was}-moved` : typeof was === 'number' ? was + 1 : !was,
+      }
+      const h = harness()
+      h.answerWith(() => ok({ panes: [{ ...base }] }))
+      h.poller.start()
+      await h.tick(0)
+      const first = h.last.groups
+
+      h.answerWith(() => ok({ panes: [moved] }))
+      await h.tick()
+      expect(h.last.groups, `a change to ${key} was swallowed`).not.toBe(first)
+    }
   })
 
   it('notices a pane appearing or disappearing even when the count is the same', async () => {

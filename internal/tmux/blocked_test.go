@@ -95,22 +95,6 @@ func TestIsBlockedWantsTheBorderedRegion(t *testing.T) {
 	}
 }
 
-// Rules are per agent. Claude Code's dialog is the only one anybody has
-// captured, so it is the only one that can be recognised; running its rules
-// against another agent's screen would be a guess wearing a badge.
-func TestIsBlockedIsPerAgent(t *testing.T) {
-	blocked := readFixture(t, "claude-blocked.txt")
-	if !IsBlocked("claude", blocked) {
-		t.Fatal("fixture must match for claude, or this test proves nothing")
-	}
-	for _, agent := range []string{"opencode", "pi", "zsh", ""} {
-		if IsBlocked(agent, blocked) {
-			t.Errorf("IsBlocked(%q, claude-blocked.txt) = true, want false: "+
-				"no dialog rules exist for %q", agent, agent)
-		}
-	}
-}
-
 // dropLine removes the first line whose trimmed form has the given prefix, plus
 // the wrapped continuation that follows it -- Claude Code's second choice runs
 // onto a line that is not itself numbered.
@@ -309,13 +293,200 @@ func TestExtractionFailureKeepsTheState(t *testing.T) {
 	}
 }
 
-// Extraction is per agent for the same reason detection is: the grammar was
-// written against one agent's screen and running it on another's is a guess.
-func TestExtractQuestionIsPerAgent(t *testing.T) {
-	blocked := readFixture(t, "claude-blocked.txt")
-	for _, agent := range []string{"opencode", "pi", "zsh", ""} {
-		if q := ExtractQuestion(agent, blocked); q != nil {
-			t.Errorf("ExtractQuestion(%q) = %+v, want nil: no rules exist for %q", agent, q, agent)
+// --- opencode ---------------------------------------------------------------
+
+// opencode's box shares nothing with Claude Code's: no rules, no numbered
+// options, no question mark -- a left gutter and a header that says outright
+// what it wants. These pin that it is matched on those terms.
+func TestIsBlockedOpencode(t *testing.T) {
+	for _, tc := range []struct {
+		file string
+		want bool
+	}{
+		{"opencode-idle.txt", false},
+		{"opencode-blocked.txt", true},
+	} {
+		if got := IsBlocked("opencode", readFixture(t, tc.file)); got != tc.want {
+			t.Errorf("IsBlocked(opencode, %s) = %v, want %v", tc.file, got, tc.want)
+		}
+	}
+}
+
+// dropGutterLine removes the one line containing the given text and nothing
+// else. dropLine cannot serve here: it also swallows the unnumbered line below
+// the one it removes, which is Claude Code's wrapped continuation and
+// opencode's request line. It fails the test if nothing matched, so it cannot
+// quietly leave the assertions below running against an unmodified screen.
+func dropGutterLine(t *testing.T, screen, text string) string {
+	t.Helper()
+	lines := strings.Split(screen, "\n")
+	for i, line := range lines {
+		if !strings.Contains(line, text) {
+			continue
+		}
+		return strings.Join(append(append([]string{}, lines[:i]...), lines[i+1:]...), "\n")
+	}
+	t.Fatalf("no line containing %q to remove", text)
+	return ""
+}
+
+// The gutter is not the signal. opencode draws every block the same way -- the
+// idle input box and each user message included -- so a rule that fired on the
+// gutter would light the badge on an agent sitting at its prompt.
+//
+// The screen here is the real dialog with its header line taken out and nothing
+// else changed: the gutter, the diff preview and the whole "Allow once / Allow
+// always / Reject" row survive it.
+func TestIsBlockedOpencodeWantsTheHeader(t *testing.T) {
+	dialog := readFixture(t, "opencode-blocked.txt")
+	headless := dropGutterLine(t, dialog, "△ Permission required")
+	if headless == dialog {
+		t.Fatal("transform changed nothing")
+	}
+	if !strings.Contains(headless, "Allow once") {
+		t.Fatal("stripped screen lost the option row it is supposed to keep")
+	}
+	if IsBlocked("opencode", headless) {
+		t.Error("a guttered block with options but no header is not a permission box")
+	}
+}
+
+// The header has to be the block's own title, not a line inside it.
+//
+// The input box is a guttered block, and text pasted into it is that block's
+// content -- so an operator pasting a log that carries the words on a line of
+// its own would light the badge on an agent that is waiting for the enter key.
+// Matching the header anywhere in the block passes every other test in this
+// file, this one included until the pasted line was a whole line.
+//
+// Composed from the idle capture's own bytes: its gutter, its text column, its
+// box, with two lines at the prompt instead of one. The situation is real and
+// was not on screen when the fixture was taken, and the fixture's text is a
+// redacted placeholder already.
+func TestIsBlockedOpencodeWantsTheHeaderAtTheTopOfTheBlock(t *testing.T) {
+	idle := readFixture(t, "opencode-idle.txt")
+	var pasted []string
+	for _, line := range strings.Split(idle, "\n") {
+		if col := strings.Index(line, "Ask anything…"); col >= 0 {
+			gutter := line[:col]
+			pasted = append(pasted, gutter+"why does this fail", gutter+"Permission required")
+			continue
+		}
+		pasted = append(pasted, line)
+	}
+	screen := strings.Join(pasted, "\n")
+	if screen == idle {
+		t.Fatal("transform changed nothing")
+	}
+	if !strings.Contains(screen, "Permission required") {
+		t.Fatal("composed screen lost the words it is supposed to contain")
+	}
+	if IsBlocked("opencode", screen) {
+		t.Error("the words pasted into the prompt box are content, not a title")
+	}
+}
+
+// The bottommost block is the live one, for the same reason the bottommost
+// rule-delimited region is for Claude Code -- and here the point is sharper,
+// because opencode's input box is itself a guttered block, so an answered
+// permission box sits directly above one.
+//
+// Composed from two real captures: the situation is real but was not on screen
+// when either fixture was taken.
+func TestIsBlockedOpencodeWantsTheBottommostBlock(t *testing.T) {
+	answered := readFixture(t, "opencode-blocked.txt") + readFixture(t, "opencode-idle.txt")
+	if !strings.Contains(answered, "△ Permission required") {
+		t.Fatal("composed screen lost the dialog it is supposed to contain")
+	}
+	if IsBlocked("opencode", answered) {
+		t.Error("a permission box above a live input box is answered, not blocked")
+	}
+}
+
+// Words on a screen are not a dialog. Without the gutter there is no block, and
+// without a block there is nothing to be the title of.
+func TestIsBlockedOpencodeIsStrict(t *testing.T) {
+	for _, screen := range []string{
+		"",
+		"just some output\nnothing to see",
+		"△ Permission required\n→ Edit fixture.txt\n  Allow once   Allow always   Reject",
+		"Permission required",
+	} {
+		if IsBlocked("opencode", screen) {
+			t.Errorf("false positive on %q", screen)
+		}
+	}
+}
+
+// A block's first line is its title only when the whole of it is the title.
+//
+// The input box is a guttered block like any other, and whatever the operator
+// has typed into it is that block's first line -- so words matched loosely
+// inside it would light the badge on an agent that is waiting for nothing but
+// the enter key. This is the screen that costs, and the reason the header is
+// anchored at both ends.
+//
+// The idle capture with something else typed at its prompt: the fixture's text
+// is a redacted placeholder already, so one placeholder becomes another and
+// nothing structural moves.
+func TestIsBlockedOpencodeWantsTheWholeLine(t *testing.T) {
+	idle := readFixture(t, "opencode-idle.txt")
+	typed := strings.Replace(idle,
+		`Ask anything… "Fix a TODO in the codebase"`,
+		`Ask anything… "Permission required for the deploy"`, 1)
+	if typed == idle {
+		t.Fatal("transform changed nothing")
+	}
+	if IsBlocked("opencode", typed) {
+		t.Error("words typed into the prompt box are not a permission box")
+	}
+}
+
+// Each agent's rules stay on that agent's screen. Run either fixture through
+// the other's grammar and nothing must match -- which is the whole reason the
+// detector keeps a table per agent instead of one heuristic broad enough to
+// cover both shapes, and broad enough to fire on prose.
+func TestBlockedRulesDoNotCrossAgents(t *testing.T) {
+	claude := readFixture(t, "claude-blocked.txt")
+	opencode := readFixture(t, "opencode-blocked.txt")
+	if !IsBlocked("claude", claude) || !IsBlocked("opencode", opencode) {
+		t.Fatal("both fixtures must match their own agent, or this test proves nothing")
+	}
+	if IsBlocked("opencode", claude) {
+		t.Error("IsBlocked(opencode, claude-blocked.txt) = true: that is a guess, not a match")
+	}
+	if IsBlocked("claude", opencode) {
+		t.Error("IsBlocked(claude, opencode-blocked.txt) = true: that is a guess, not a match")
+	}
+	if q := ExtractQuestion("opencode", claude); q != nil {
+		t.Errorf("ExtractQuestion(opencode, claude-blocked.txt) = %+v, want nil", q)
+	}
+	if q := ExtractQuestion("claude", opencode); q != nil {
+		t.Errorf("ExtractQuestion(claude, opencode-blocked.txt) = %+v, want nil", q)
+	}
+}
+
+// An agent on the known list with no rules entry is never blocked.
+//
+// `pi` is that agent: it is not installed on this machine, so no dialog of its
+// has been captured, so it has no rules -- deliberately, because inventing a
+// grammar for an unseen dialog is the failure this whole table avoids. It reads
+// working or idle, and the day someone captures its box the entry is a data
+// change. This pins both halves: that the gap is real, and that it is harmless.
+func TestAgentWithNoRulesIsNeverBlocked(t *testing.T) {
+	if _, ok := blockedRules["pi"]; ok {
+		t.Error("pi has rules now: capture-backed rules are welcome, but this test " +
+			"and blocked.go's comment about the gap both need updating")
+	}
+	for _, agent := range []string{"pi", "zsh", "nvim", ""} {
+		for _, file := range []string{"claude-blocked.txt", "opencode-blocked.txt"} {
+			screen := readFixture(t, file)
+			if IsBlocked(agent, screen) {
+				t.Errorf("IsBlocked(%q, %s) = true, want false: no rules exist for %q", agent, file, agent)
+			}
+			if q := ExtractQuestion(agent, screen); q != nil {
+				t.Errorf("ExtractQuestion(%q, %s) = %+v, want nil", agent, file, q)
+			}
 		}
 	}
 }

@@ -1,0 +1,32 @@
+                                                                                                    
+  ┃                                                                                                 
+  ┃  Create a file called fixture.txt containing the word hello                                     
+  ┃                                                                                                 
+                                                                                                    
+     + Thought: 21ms                                                                                
+                                                                                                    
+     ← Write fixture.txt                                                                            
+                                                                                                    
+     ▣  Build · GLM-5.3                                                                             
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+  ┃                                                                                                 
+  ┃  △ Permission required                                                                          
+  ┃    → Edit fixture.txt                                                                           
+  ┃                                                                                                 
+  ┃  1 + hello                                                                                      
+  ┃                                                                                                 
+  ┃                                                                                                 
+  ┃                                                                                                 
+  ┃                                                                                                 
+  ┃                                                                                                 
+  ┃                                                                                                 
+  ┃                                                                                                 
+  ┃                                                                                                 
+  ┃   Allow once   Allow always   Reject             ctrl+f fullscreen  ⇆ select  enter confirm     
+  ┃                                                                                                 
+                                                                                                    

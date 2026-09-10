@@ -19,6 +19,7 @@ import (
 	"github.com/diegok/tmux-web/internal/auth"
 	"github.com/diegok/tmux-web/internal/front"
 	"github.com/diegok/tmux-web/internal/tmux"
+	"github.com/diegok/tmux-web/internal/tmux/testutil"
 )
 
 // The route table is the thing under test here, and almost every test needs the
@@ -142,6 +143,12 @@ func newFixture(t *testing.T, opts ...fixtureOpt) *fixture {
 		Enroller:  f.enroller,
 		Snapshots: f.snaps,
 		Registry:  f.registry,
+		// A manager on a private, empty tmux server. Tests that care about
+		// management replace it (see manage_test.go); the reason every other
+		// fixture still gets a real one is that a route accidentally reachable
+		// without credentials must run its tmux command against a throwaway
+		// socket, never the developer's own server.
+		Manage: tmux.NewClient(testutil.NewServer(t).Args()),
 		Terminal: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			f.terminalCalls.Add(1)
 			f.terminalOpen <- struct{}{}
@@ -1014,6 +1021,7 @@ func TestNewHandlerRefusesToBuildSomethingIncomplete(t *testing.T) {
 			Enroller:  auth.NewEnroller(store),
 			Snapshots: &fakeSnapshots{},
 			Registry:  front.NewRegistry(),
+			Manage:    tmux.NewClient(testutil.NewServer(t).Args()),
 			BaseURL:   canonicalOrigin,
 		}
 	}
@@ -1026,6 +1034,10 @@ func TestNewHandlerRefusesToBuildSomethingIncomplete(t *testing.T) {
 		// shell -- the failure the whole design exists to prevent, and one
 		// that nothing at runtime would report.
 		"no registry": func(c *front.HandlerConfig) { c.Registry = nil },
+		// Without a manager none of the management routes exist, and nothing
+		// at runtime would report it: the context menus would simply fail one
+		// verb at a time against a 404.
+		"no manager":  func(c *front.HandlerConfig) { c.Manage = nil },
 		"no base url": func(c *front.HandlerConfig) { c.BaseURL = "" },
 	}
 	for name, break_ := range cases {

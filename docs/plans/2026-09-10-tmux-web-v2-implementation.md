@@ -690,7 +690,10 @@ Any test pinning one string must pin the one that command emits.
 
 ### Task 9: The endpoints
 
-**Files:** `internal/front/manage.go`, `internal/front/manage_test.go`
+**Files:** `internal/front/manage.go`, `internal/front/manage_test.go`, and
+`internal/front/server.go` (the routes and `HandlerConfig.Manage`, which is
+required: a daemon built without a manager would 404 every context-menu action
+and say nothing at startup).
 
 The routes from the design, all `cfg.Auth.Protect(...)`. Every `DELETE` requires `{"confirm": true}` in the body and returns 400 without it.
 
@@ -709,6 +712,36 @@ written against a route that cannot be reached.
 Tests: each route rejects a foreign Origin; each `DELETE` rejects a missing
 confirm; a stale id returns the tmux error rather than a 500; an id arriving
 un-encoded is refused rather than mis-routed.
+
+**Decided in implementation, and measured rather than assumed:**
+
+- **Only a *pane* id needs encoding, and the un-encoded one is refused by
+  net/http rather than by anything in this package.** `@7` and `$1` are legal
+  raw in a path and route unchanged; `%3` is not, and `http.ReadRequest` fails
+  the request line with "invalid URL escape" before the mux is consulted. There
+  is therefore no code here to test, and `httptest.NewRequest` cannot even
+  express the case — it parses the target and panics. The test serves the real
+  route table over an in-memory `net.Pipe` (no port bound) with full
+  credentials and `{"confirm": true}`, and asserts a 400 with the pane still
+  alive; the encoded spelling of the same id over the same wire kills it.
+- **Every failure from a management verb answers 400, never 500.** Telling a
+  stale target apart from a genuinely broken tmux would mean matching on tmux's
+  message text, which is exactly what this task was warned is not uniform, so
+  one code is used and tmux's own words are passed through for the toast.
+- **`resize-pane -Z` on a single-pane window exits 0 and does nothing** (tmux
+  3.7b). A zoom test seeded with one pane therefore reports "not zoomed" no
+  matter what the handler did — vacuous, and the one found in this task. The
+  test splits first and asserts the flag in both directions.
+- **Ids and names are not re-validated in `front`.** Task 8's verbs validate
+  per kind, and a second copy here is the copy that drifts — the same reasoning
+  that deleted `wsIsPaneID`.
+- Mutation-tested: 17 mutants, all killed. Including a route registered without
+  `Protect`, the confirm check removed, the confirm check accepting any body
+  that parses, an id taken from `r.URL.EscapedPath()` rather than `PathValue`,
+  an Origin comparison relaxed to a suffix match, a tmux error surfacing as a
+  500, and each optional input (`path`, `fromPane`, `name`, `direction`)
+  dropped on the way to tmux — the last four were survivors until tests were
+  added for them.
 
 ---
 

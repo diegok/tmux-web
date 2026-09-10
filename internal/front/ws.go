@@ -3,7 +3,6 @@ package front
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
@@ -400,26 +399,16 @@ func (h *TerminalHandler) copyMode(ctx context.Context, sess *ptybridge.Session,
 	// as a pane target, and "=name" is not a pane.
 	target := "=" + sess.SessionName() + ":"
 	if pane != "" {
-		if !wsIsPaneID(pane) {
-			return fmt.Errorf("%q is not a tmux pane id", pane)
+		// tmux.ValidatePaneID, not a local copy: this rule already exists once
+		// in internal/tmux and a second spelling of it here is the one that
+		// eventually drifts.
+		if err := tmux.ValidatePaneID(pane); err != nil {
+			return err
 		}
 		target = pane
 	}
 	_, err := h.tm.Run(ctx, "copy-mode", "-t", target)
 	return err
-}
-
-// wsIsPaneID reports whether s is a tmux pane id, e.g. "%3".
-func wsIsPaneID(s string) bool {
-	if len(s) < 2 || s[0] != '%' {
-		return false
-	}
-	for _, r := range s[1:] {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 // wsWriteLoop carries PTY output to the browser, one message per PTY read.

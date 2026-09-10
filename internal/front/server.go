@@ -32,8 +32,8 @@ import (
 const DefaultPollInterval = 1500 * time.Millisecond
 
 // maxJSONBody bounds a request body. Every JSON request this API takes is a
-// token or a device name; anything larger is a mistake or an attempt to make
-// the daemon allocate.
+// token, a device name, a tmux name, a pane label or a directory; anything
+// larger is a mistake or an attempt to make the daemon allocate.
 const maxJSONBody = 64 << 10
 
 // sweepTimeout bounds the startup orphan sweep. It runs before the daemon
@@ -96,6 +96,11 @@ type HandlerConfig struct {
 	// what the device has open, and GET /ws registers itself in it.
 	Registry *Registry
 
+	// Manage drives the management verbs behind /api/sessions, /api/windows
+	// and /api/panes. Required: a daemon built without one would answer every
+	// context-menu action with a 404 and report nothing at startup.
+	Manage Manager
+
 	// Terminal is the WebSocket endpoint, already origin-checking itself.
 	Terminal http.Handler
 
@@ -115,6 +120,7 @@ type server struct {
 	enroller  DeviceEnroller
 	snapshots SnapshotSource
 	registry  *Registry
+	manage    Manager
 	terminal  http.Handler
 	assets    fs.FS
 	baseURL   string
@@ -157,6 +163,16 @@ func localIdentity() (osUser, hostname string) {
 //	POST   /api/devices         device cookie + Origin mint a link
 //	DELETE /api/devices/{id}    device cookie + Origin revoke
 //	GET    /ws                  device cookie + Origin terminal
+//	POST   /api/sessions        device cookie + Origin create
+//	POST   /api/windows         device cookie + Origin create
+//	POST   /api/panes           device cookie + Origin split
+//	PATCH  /api/sessions/{id}   device cookie + Origin rename
+//	PATCH  /api/windows/{id}    device cookie + Origin rename
+//	PATCH  /api/panes/{id}      device cookie + Origin label
+//	POST   /api/panes/{id}/zoom device cookie + Origin toggle zoom
+//	DELETE /api/sessions/{id}   device cookie + Origin kill, confirmed
+//	DELETE /api/windows/{id}    device cookie + Origin kill, confirmed
+//	DELETE /api/panes/{id}      device cookie + Origin kill, confirmed
 //
 // Protect supplies the Origin requirement for the mutating routes: a present
 // Origin must match on every method, and an absent one is tolerated only on
@@ -176,6 +192,10 @@ func NewHandler(cfg HandlerConfig) (http.Handler, error) {
 		// Without it, revoking a device would leave its shell open, which is
 		// the one failure the whole revocation design exists to prevent.
 		return nil, errors.New("front: no connection registry")
+	case cfg.Manage == nil:
+		// Silent otherwise: the routes would simply not exist, and the owner
+		// would discover it one context-menu action at a time.
+		return nil, errors.New("front: no tmux manager; the management routes cannot be served")
 	case cfg.BaseURL == "":
 		return nil, errors.New("front: no base URL; enrollment links cannot be rendered")
 	}
@@ -190,6 +210,7 @@ func NewHandler(cfg HandlerConfig) (http.Handler, error) {
 		enroller:  cfg.Enroller,
 		snapshots: cfg.Snapshots,
 		registry:  cfg.Registry,
+		manage:    cfg.Manage,
 		terminal:  cfg.Terminal,
 		assets:    assets,
 		baseURL:   strings.TrimRight(cfg.BaseURL, "/"),
@@ -213,6 +234,20 @@ func NewHandler(cfg HandlerConfig) (http.Handler, error) {
 	mux.Handle("GET /api/devices", cfg.Auth.Protect(http.HandlerFunc(s.listDevices)))
 	mux.Handle("POST /api/devices", cfg.Auth.Protect(http.HandlerFunc(s.mintDevice)))
 	mux.Handle("DELETE /api/devices/{id}", cfg.Auth.Protect(http.HandlerFunc(s.revokeDevice)))
+
+	// Management. Every one is a mutating verb, so every one carries the
+	// Origin requirement as well as the cookie -- see manage.go. {id} is a
+	// tmux id and arrives percent-encoded, because a pane id contains "%".
+	mux.Handle("POST /api/sessions", cfg.Auth.Protect(http.HandlerFunc(s.createSession)))
+	mux.Handle("POST /api/windows", cfg.Auth.Protect(http.HandlerFunc(s.createWindow)))
+	mux.Handle("POST /api/panes", cfg.Auth.Protect(http.HandlerFunc(s.createPane)))
+	mux.Handle("PATCH /api/sessions/{id}", cfg.Auth.Protect(http.HandlerFunc(s.renameSession)))
+	mux.Handle("PATCH /api/windows/{id}", cfg.Auth.Protect(http.HandlerFunc(s.renameWindow)))
+	mux.Handle("PATCH /api/panes/{id}", cfg.Auth.Protect(http.HandlerFunc(s.labelPane)))
+	mux.Handle("POST /api/panes/{id}/zoom", cfg.Auth.Protect(http.HandlerFunc(s.zoomPane)))
+	mux.Handle("DELETE /api/sessions/{id}", cfg.Auth.Protect(http.HandlerFunc(s.killSession)))
+	mux.Handle("DELETE /api/windows/{id}", cfg.Auth.Protect(http.HandlerFunc(s.killWindow)))
+	mux.Handle("DELETE /api/panes/{id}", cfg.Auth.Protect(http.HandlerFunc(s.killPane)))
 
 	if s.terminal != nil {
 		mux.Handle("GET /ws", cfg.Auth.ProtectSocket(s.trackDevice(s.terminal)))
@@ -938,6 +973,7 @@ func newDaemon(cfg Config) (*daemon, error) {
 		Enroller:  d.enroller,
 		Snapshots: d.poller,
 		Registry:  d.registry,
+		Manage:    tm,
 		Terminal: NewTerminalHandler(TerminalConfig{
 			TmuxArgs: cfg.TmuxArgs,
 			// Fed from the middleware's own allowlist rather than rebuilt, so

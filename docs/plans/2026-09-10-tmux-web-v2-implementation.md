@@ -118,8 +118,13 @@ git commit -m "feat: recognise which pane commands are coding agents"
 
 **Files:**
 - Modify: `internal/tmux/snapshot.go` (`Format`, `fieldCount`, `Row`, `ParseRows`)
-- Modify: `internal/tmux/snapshot_test.go`
-- Modify: `internal/front/server.go` (`snapshotResponse`)
+- Modify: `internal/tmux/snapshot_test.go` — **every existing fixture moves from
+  8 fields to 12**; there is no way to add fields without touching them all
+- Modify: `internal/tmux/client.go` (`ServerStart`), `internal/tmux/poller.go`
+  (read it per refresh) and their tests — "read once per poll" cannot be
+  satisfied without the poller
+- Modify: `internal/front/server.go` (`snapshotResponse`, and the
+  `SnapshotSource` interface the poller satisfies)
 
 Four new fields, all free in the existing `list-panes` call, plus the tmux server
 generation on the response envelope.
@@ -177,9 +182,12 @@ t.Run("carries session identity, label and title", func(t *testing.T) {
 })
 
 t.Run("a huge title is truncated on a rune boundary", func(t *testing.T) {
-	// Multi-byte runes straddling the cap: a byte slice would cut one in half
-	// and put invalid UTF-8 into the DOM.
-	huge := strings.Repeat("é", 4000)
+	// The rune has to be one the cap does NOT divide evenly, or the test is
+	// vacuous: é is 2 bytes and MaxTitle is 256, so a naive title[:256] lands
+	// exactly on a boundary and passes. ✳ is 3 bytes (256 % 3 == 1), so a byte
+	// slice genuinely splits one -- and it is the character Claude Code puts at
+	// the head of every title.
+	huge := strings.Repeat("✳", 4000)
 	line := rec("w", "$0", "w", "%1", "0", "", "", "1", "win", "1", "claude", huge)
 	got, _, _ := ParseRows(line)
 	if len(got[0].Title) > MaxTitle {
@@ -187,6 +195,10 @@ t.Run("a huge title is truncated on a rune boundary", func(t *testing.T) {
 	}
 	if !utf8.ValidString(got[0].Title) {
 		t.Fatal("truncation split a rune; the title is not valid UTF-8")
+	}
+	// A lower bound too, or "throw the title away" is a passing truncation.
+	if len(got[0].Title) < MaxTitle-4 {
+		t.Fatalf("truncation kept only %d bytes of a %d-byte cap", len(got[0].Title), MaxTitle)
 	}
 })
 
@@ -231,7 +243,11 @@ Truncate on a rune boundary.
 **Step 4: The tmux server generation**
 
 `snapshotResponse` gains `ServerStart string \`json:"serverStart"\``, read once per
-poll with `display-message -p '#{start_time}'`. Task 10 keys its `seen` map with
+poll with `display-message -p '#{start_time}'`. Two consequences to accept
+rather than engineer around: this is a **second tmux fork per poll**, where the
+poller's own doc comment currently promises one; and `start_time` has
+whole-second resolution, so two tmux servers started within the same second
+share a generation. Task 10 keys its `seen` map with
 it: pane ids restart at `%0` when the tmux server restarts, so without it a stale
 `seen["%3"]` silently suppresses the badge on an unrelated new pane.
 

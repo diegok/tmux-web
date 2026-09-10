@@ -28,7 +28,7 @@
  * changes what the pane is doing.
  */
 
-import { Columns2, Copy, SquareTerminal } from 'lucide-react'
+import { Columns2, Copy, SquareTerminal, Wrench } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { Badge } from '@/components/ui/badge'
@@ -43,6 +43,9 @@ import {
   CommandSeparator,
   CommandShortcut,
 } from '@/components/ui/command'
+import { NO_WINDOW_ID, newSessionPrompt, rowMenu } from '@/lib/manage'
+import type { MenuEntry, MenuIntent, RowTarget } from '@/lib/manage'
+import { findPane } from '@/lib/useSnapshot'
 import type { SessionNode } from '@/lib/useSnapshot'
 
 /** What the chord is, in one place, for the UI hint and the matcher. */
@@ -132,7 +135,13 @@ export function paneEntries(
     for (const window of session.windows) {
       const split = window.panes.length > 1
       for (const pane of window.panes) {
-        const label = `${session.key} › ${window.index}: ${window.name}`
+        // The live session name, never `session.key`. tmux freezes
+        // session_group at the name the group was created under, so a row
+        // labelled from the key shows the pre-rename name forever -- and the
+        // sidebar beside it shows the new one, which makes a rename look like
+        // it half worked. The key stays the identity: it is what `action`
+        // carries and what re-attaching uses.
+        const label = `${session.name} › ${window.index}: ${window.name}`
         const detail = split ? `pane ${pane.paneIndex}` : null
         entries.push({
           id: pane.paneId,
@@ -140,7 +149,11 @@ export function paneEntries(
           detail,
           command: pane.command,
           search: [
-            session.key,
+            // Both names, so a group renamed from `work3` to `api` is still
+            // reachable by typing either -- the one on screen and the one in
+            // the `?session=` URL a tab may have been opened with.
+            session.name,
+            session.key === session.name ? '' : session.key,
             `${window.index}: ${window.name}`,
             detail ?? '',
             pane.command,
@@ -158,6 +171,66 @@ export function paneEntries(
   return entries
 }
 
+/** A management entry in the palette, with what it acts on spelled out. */
+export interface PaletteActionEntry extends MenuEntry {
+  /** `pane 2 · %3`, or `session "work"`: the palette has no row to point at. */
+  detail: string
+}
+
+/**
+ * The management actions, scoped to the pane this tab is looking at.
+ *
+ * The sidebar scopes its menu to the row you right-clicked; the palette has no
+ * row, so it scopes to the current pane and the session that pane is in. Same
+ * `rowMenu` behind both, so an action can never exist on one surface and not
+ * the other, and the labels are the same words.
+ *
+ * "New session" is the exception and is always present: it is the one action
+ * that needs no pane, and the case it exists for -- an empty tmux server -- is
+ * exactly the case where there is no current pane to scope to.
+ */
+export function actionEntries(
+  groups: readonly SessionNode[],
+  activePane: string | null,
+  activeSession: string | null,
+): PaletteActionEntry[] {
+  const entries: PaletteActionEntry[] = []
+  const located = findPane(groups, activePane)
+  if (located) {
+    const { session, window, pane } = located
+    const target: RowTarget = { kind: 'pane', session, window, windowId: NO_WINDOW_ID, pane }
+    const where = `pane ${pane.paneIndex} · ${pane.paneId}`
+    for (const entry of rowMenu(target, activeSession)) {
+      entries.push({
+        ...entry,
+        id: `pane:${entry.id}`,
+        detail: where,
+        search: `${entry.search} ${where}`,
+      })
+    }
+    for (const entry of rowMenu({ kind: 'session', session }, activeSession)) {
+      // The session row offers a new window too, and it is the same action on
+      // the same session -- one row for it, on the pane, where it opens in the
+      // directory you are working in.
+      if (entry.id === 'new-window') continue
+      entries.push({
+        ...entry,
+        id: `session:${entry.id}`,
+        detail: `session "${session.name}"`,
+        search: `${entry.search} session ${session.name}`,
+      })
+    }
+  }
+  entries.push({
+    id: 'new-session',
+    label: 'New session…',
+    detail: 'tmux server',
+    search: 'new session create tmux',
+    intent: { kind: 'prompt', prompt: newSessionPrompt() },
+  })
+  return entries
+}
+
 export interface PaletteProps {
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -171,6 +244,11 @@ export interface PaletteProps {
    * command that did nothing is indistinguishable from one that worked.
    */
   onCopyMode: () => boolean
+  /**
+   * A management entry was chosen. The palette closes and App takes it from
+   * there -- a prompt or the kill dialog, or straight to the daemon.
+   */
+  onIntent: (intent: MenuIntent) => void
 }
 
 export function Palette({
@@ -181,6 +259,7 @@ export function Palette({
   activeSession,
   onSelectPane,
   onCopyMode,
+  onIntent,
 }: PaletteProps) {
   const [failure, setFailure] = useState<string | null>(null)
 
@@ -207,6 +286,7 @@ export function Palette({
   )
 
   const entries = paneEntries(groups, activePane, activeSession)
+  const actions = actionEntries(groups, activePane, activeSession)
 
   function run(action: PaletteAction) {
     if (action.kind === 'copy-mode') {
@@ -230,51 +310,112 @@ export function Palette({
       title="Command palette"
       description="Jump to a pane, or run a terminal command"
     >
-      <Command>
-        <CommandInput placeholder="Jump to session/window/pane…" />
-        <CommandList>
-          <CommandEmpty>Nothing matches.</CommandEmpty>
-          {failure && (
-            <p role="alert" className="text-destructive px-3 py-2 text-xs">
-              {failure}
-            </p>
-          )}
-          <CommandGroup heading="Panes">
-            {entries.map((entry) => (
-              <CommandItem
-                key={entry.id}
-                value={entry.search}
-                disabled={entry.unreachable}
-                onSelect={() => run(entry.action)}
-              >
-                {entry.detail ? <Columns2 aria-hidden /> : <SquareTerminal aria-hidden />}
-                <span className="truncate">{entry.label}</span>
-                {entry.detail && (
-                  <span className="text-muted-foreground shrink-0 text-xs">{entry.detail}</span>
-                )}
-                {entry.current && (
-                  <span className="text-muted-foreground shrink-0 text-xs">· current</span>
-                )}
-                <Badge variant="secondary" className="ml-auto max-w-24 truncate font-mono">
-                  {entry.command}
-                </Badge>
-              </CommandItem>
-            ))}
-          </CommandGroup>
-          <CommandSeparator />
-          <CommandGroup heading="Terminal">
-            <CommandItem
-              value="copy mode scrollback search"
-              onSelect={() => run({ kind: 'copy-mode' })}
-            >
-              <Copy aria-hidden />
-              Enter copy mode
-              <CommandShortcut>scrollback</CommandShortcut>
-            </CommandItem>
-          </CommandGroup>
-        </CommandList>
-      </Command>
+      <PaletteBody
+        entries={entries}
+        actions={actions}
+        failure={failure}
+        onRun={run}
+        onIntent={(intent) => {
+          onIntent(intent)
+          // Closed either way: a prompt and the kill dialog both open over this
+          // one, and a `run` intent has already been sent. Neither has anything
+          // more to say here.
+          change(false)
+        }}
+      />
     </CommandDialog>
+  )
+}
+
+export interface PaletteBodyProps {
+  entries: PaletteEntry[]
+  actions: PaletteActionEntry[]
+  failure: string | null
+  onRun: (action: PaletteAction) => void
+  onIntent: (intent: MenuIntent) => void
+}
+
+/**
+ * The palette's three groups, outside the dialog that portals them.
+ *
+ * Split out for the same reason the dialogs' bodies are: an open
+ * `CommandDialog` is a Radix portal into a `document` that does not exist under
+ * vitest's node environment, so the rows -- which ones there are, and what they
+ * say -- would otherwise be reachable only from Playwright.
+ */
+export function PaletteBody({ entries, actions, failure, onRun, onIntent }: PaletteBodyProps) {
+  return (
+    <Command>
+      <CommandInput placeholder="Jump to session/window/pane…" />
+      <CommandList>
+        <CommandEmpty>Nothing matches.</CommandEmpty>
+        {failure && (
+          <p role="alert" className="text-destructive px-3 py-2 text-xs">
+            {failure}
+          </p>
+        )}
+        <CommandGroup heading="Panes">
+          {entries.map((entry) => (
+            <CommandItem
+              key={entry.id}
+              value={entry.search}
+              disabled={entry.unreachable}
+              onSelect={() => onRun(entry.action)}
+            >
+              {entry.detail ? <Columns2 aria-hidden /> : <SquareTerminal aria-hidden />}
+              <span className="truncate">{entry.label}</span>
+              {entry.detail && (
+                <span className="text-muted-foreground shrink-0 text-xs">{entry.detail}</span>
+              )}
+              {entry.current && (
+                <span className="text-muted-foreground shrink-0 text-xs">· current</span>
+              )}
+              <Badge variant="secondary" className="ml-auto max-w-24 truncate font-mono">
+                {entry.command}
+              </Badge>
+            </CommandItem>
+          ))}
+        </CommandGroup>
+        <CommandSeparator />
+        {/*
+          The same actions as the sidebar's context menus, from the same
+          `rowMenu`, scoped to the pane this tab is looking at. Not a second
+          surface with its own idea of what can be done.
+        */}
+        <CommandGroup heading="Manage">
+          {actions.map((entry) => (
+            <CommandItem
+              key={entry.id}
+              value={entry.search}
+              onSelect={() => onIntent(entry.intent)}
+              className={entry.danger ? 'text-destructive' : undefined}
+            >
+              <Wrench aria-hidden />
+              <span className="truncate">{entry.label}</span>
+              {entry.hint && (
+                // The line saying zoom moves every client, including the
+                // terminal on the host. Same words as the context menu.
+                <span className="text-muted-foreground hidden shrink-0 text-xs sm:inline">
+                  {entry.hint}
+                </span>
+              )}
+              <span className="text-muted-foreground ml-auto shrink-0 text-xs">{entry.detail}</span>
+            </CommandItem>
+          ))}
+        </CommandGroup>
+        <CommandSeparator />
+        <CommandGroup heading="Terminal">
+          <CommandItem
+            value="copy mode scrollback search"
+            onSelect={() => onRun({ kind: 'copy-mode' })}
+          >
+            <Copy aria-hidden />
+            Enter copy mode
+            <CommandShortcut>scrollback</CommandShortcut>
+          </CommandItem>
+        </CommandGroup>
+      </CommandList>
+    </Command>
   )
 }
 

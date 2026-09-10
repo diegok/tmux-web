@@ -13,7 +13,15 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 
-import { Palette, isPaletteChord, installPaletteChord, paneEntries } from './Palette'
+import {
+  Palette,
+  PaletteBody,
+  actionEntries,
+  isPaletteChord,
+  installPaletteChord,
+  paneEntries,
+} from './Palette'
+import { ZOOM_HINT } from '@/lib/manage'
 import { groupRows } from '@/lib/useSnapshot'
 import type { SnapshotRow } from '@/lib/useSnapshot'
 
@@ -209,6 +217,76 @@ describe('paneEntries', () => {
   })
 })
 
+/**
+ * The rename that has to be visible on both surfaces at once.
+ */
+describe('a renamed session', () => {
+  const renamed = groupRows([
+    row({ groupKey: 'work3', sessionName: 'api', paneId: '%4', command: 'claude' }),
+  ])
+
+  it('is labelled by its live name, never by the group key', () => {
+    // tmux freezes session_group at the pre-rename name, so a row built from
+    // the key reads `work3` forever -- while the sidebar beside it reads `api`,
+    // which makes a rename look like it half worked.
+    expect(paneEntries(renamed, null, 'work3')[0].label).toBe('api › 0: shell')
+  })
+
+  it('is still addressed by the group key, and findable under both names', () => {
+    const [entry] = paneEntries(renamed, null, 'work3')
+    // The key is the identity: it is what a click carries and what `?session=`
+    // holds, so it stays in the search text as well as the new name.
+    expect(entry.action).toEqual({ kind: 'pane', paneId: '%4', groupKey: 'work3' })
+    expect(entry.search).toContain('api')
+    expect(entry.search).toContain('work3')
+  })
+})
+
+// --- the management rows ----------------------------------------------------
+
+describe('actionEntries', () => {
+  const groups = groupRows([
+    row({ windowIndex: 1, windowName: 'api', paneId: '%4', command: 'claude' }),
+    row({ windowIndex: 1, windowName: 'api', paneId: '%5', paneIndex: 1, paneActive: false }),
+  ])
+
+  it('offers the current pane is actions, and the session is', () => {
+    const entries = actionEntries(groups, '%4', 'work')
+    expect(entries.map((e) => e.id)).toEqual([
+      'pane:label-pane',
+      'pane:new-window',
+      'pane:split-right',
+      'pane:split-down',
+      'pane:zoom',
+      'pane:kill',
+      'session:rename-session',
+      'session:kill',
+      'new-session',
+    ])
+  })
+
+  it('acts on the pane this tab is looking at', () => {
+    const entries = actionEntries(groups, '%5', 'work')
+    expect(entries.find((e) => e.id === 'pane:split-right')?.intent).toEqual({
+      kind: 'run',
+      action: { verb: 'split', pane: '%5', direction: 'right' },
+    })
+    // And says which pane, because the palette has no row to point at.
+    expect(entries.find((e) => e.id === 'pane:zoom')?.detail).toBe('pane 1 · %5')
+  })
+
+  it('carries the same zoom warning the context menu shows', () => {
+    const zoom = actionEntries(groups, '%4', 'work').find((e) => e.id === 'pane:zoom')
+    expect(zoom?.hint).toBe(ZOOM_HINT)
+  })
+
+  it('still offers a new session with no pane and no tmux at all', () => {
+    // The case the design names: an empty tmux server has no row to
+    // right-click and no current pane to scope to.
+    expect(actionEntries([], null, null).map((e) => e.id)).toEqual(['new-session'])
+  })
+})
+
 // --- mounting ---------------------------------------------------------------
 
 describe('<Palette>', () => {
@@ -222,6 +300,7 @@ describe('<Palette>', () => {
         activeSession="work"
         onSelectPane={() => {}}
         onCopyMode={() => true}
+        onIntent={() => {}}
       />,
     )
     // Not empty: shadcn's own CommandDialog renders its sr-only DialogHeader
@@ -232,5 +311,59 @@ describe('<Palette>', () => {
     expect(markup).not.toContain('command-input')
     expect(markup).not.toContain('command-item')
     expect(markup).not.toContain('dialog-content')
+  })
+})
+
+/**
+ * The rows themselves, rendered without the dialog that portals them.
+ *
+ * An open `CommandDialog` cannot be rendered under vitest's node environment,
+ * so `PaletteBody` is what the suite can see. What it pins is that the three
+ * groups exist and that the management rows are among them -- the palette
+ * carrying the same actions as the sidebar is the half of this that a unit
+ * test can reach.
+ */
+describe('<PaletteBody>', () => {
+  const groups = groupRows([
+    row({ windowIndex: 1, windowName: 'api', paneId: '%4', command: 'claude' }),
+  ])
+
+  function render(over: { activePane?: string | null } = {}): string {
+    const activePane = over.activePane === undefined ? '%4' : over.activePane
+    return renderToStaticMarkup(
+      <PaletteBody
+        entries={paneEntries(groups, activePane, 'work')}
+        actions={actionEntries(groups, activePane, 'work')}
+        failure={null}
+        onRun={() => {}}
+        onIntent={() => {}}
+      />,
+    )
+  }
+
+  it('carries panes, management and the terminal action', () => {
+    const markup = render()
+    expect(markup).toContain('Panes')
+    expect(markup).toContain('Manage')
+    expect(markup).toContain('Enter copy mode')
+  })
+
+  it('offers the same actions the row menus do, on the current pane', () => {
+    const markup = render()
+    expect(markup).toContain('Split right')
+    expect(markup).toContain('Zoom window')
+    expect(markup).toContain('Kill pane…')
+    // And the one line that has to travel with the zoom wherever it is offered.
+    expect(markup).toContain(ZOOM_HINT)
+  })
+
+  it('marks the kill red here too', () => {
+    expect(render()).toMatch(/text-destructive[^>]*>[^<]*(<[^>]*>)*[^<]*Kill pane/)
+  })
+
+  it('still offers a new session with nothing selected', () => {
+    const markup = render({ activePane: null })
+    expect(markup).toContain('New session…')
+    expect(markup).not.toContain('Split right')
   })
 })

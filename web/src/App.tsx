@@ -24,16 +24,27 @@
  * only while input is actually going somewhere.
  */
 
-import { Search } from 'lucide-react'
+import { Plus, Search } from 'lucide-react'
 import { ThemeProvider } from 'next-themes'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { toast } from 'sonner'
 
 import { AppSidebar } from '@/components/AppSidebar'
+import { KILL_CLOSED, KillDialog, canKill, killDialogReducer } from '@/components/KillDialog'
 import { PALETTE_CHORD_LABEL, Palette } from '@/components/Palette'
+import {
+  PROMPT_CLOSED,
+  PromptDialog,
+  promptAction,
+  promptDialogReducer,
+} from '@/components/PromptDialog'
 import { Terminal } from '@/components/Terminal'
 import type { TerminalHandle, TerminalStatus } from '@/components/Terminal'
 import { Separator } from '@/components/ui/separator'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
+import { Toaster } from '@/components/ui/sonner'
+import { newSessionPrompt, runManage } from '@/lib/manage'
+import type { ManageAction, MenuIntent } from '@/lib/manage'
 import { findPane, resolveSession, useSnapshot } from '@/lib/useSnapshot'
 
 /** Where this tab remembers its base session, so a reload lands where it was. */
@@ -145,6 +156,71 @@ export default function App() {
   const activePane = pendingPane ?? status?.pane ?? null
   const located = findPane(groups, activePane)
 
+  // The two dialogs management needs, and the reducers behind them. Both state
+  // machines live in their own files, where the rules that matter -- a
+  // dismissal disarming the kill, a prompt opening on the *current* name --
+  // are testable without a renderer.
+  const [kill, dispatchKill] = useReducer(killDialogReducer, KILL_CLOSED)
+  const [prompt, dispatchPrompt] = useReducer(promptDialogReducer, PROMPT_CLOSED)
+
+  const { refresh } = snapshot
+
+  /**
+   * Send one management call.
+   *
+   * The failure path is `runManage`'s: a toast naming what was attempted and
+   * tmux's own words about why not, and a refresh either way so the sidebar
+   * catches up now rather than in 1.5s. Nothing is retried -- a failed kill
+   * that silently succeeded on a retry is worse than one that failed.
+   */
+  const send = useCallback(
+    (action: ManageAction) =>
+      runManage(action, {
+        notify: ({ title, description }) => toast.error(title, { description }),
+        refresh,
+      }),
+    [refresh],
+  )
+
+  /** A menu entry was chosen, from the sidebar or from the palette. */
+  const handleIntent = useCallback(
+    (intent: MenuIntent) => {
+      if (intent.kind === 'run') {
+        void send(intent.action)
+      } else if (intent.kind === 'prompt') {
+        dispatchPrompt({ type: 'open', spec: intent.prompt })
+      } else {
+        dispatchKill({ type: 'open', plan: intent.plan })
+      }
+    },
+    [send],
+  )
+
+  const submitPrompt = useCallback(() => {
+    const action = promptAction(prompt)
+    if (!action) return
+    dispatchPrompt({ type: 'send' })
+    // Closed on success, held open on a refusal. What the daemon refuses here
+    // is the *name* -- a ":", a leading "-", the length cap -- and that is
+    // fixable in the field it was typed in, so closing would only mean typing
+    // it all again.
+    void send(action).then((result) =>
+      dispatchPrompt(result.ok ? { type: 'dismiss' } : { type: 'settle' }),
+    )
+  }, [prompt, send])
+
+  const confirmKill = useCallback(() => {
+    // The same rule the red button's `disabled` is drawn from, rather than a
+    // second spelling of it here: a handler that trusted the button would kill
+    // on an Enter that reached it some other way.
+    if (!canKill(kill) || !kill.plan) return
+    dispatchKill({ type: 'send' })
+    // Closed either way, unlike the prompt: a kill fails because the id it
+    // named is already gone, and there is nothing in this dialog to correct.
+    // The toast says what happened and the sidebar has already refreshed.
+    void send(kill.plan.action).finally(() => dispatchKill({ type: 'dismiss' }))
+  }, [kill, send])
+
   // False means the socket is not ready, which the palette reports rather than
   // closing on a command that did nothing. The header button is disabled in
   // that state, so it never gets there.
@@ -168,6 +244,7 @@ export default function App() {
           activeSession={session}
           onSelectPane={handleSelectPane}
           onRefresh={snapshot.refresh}
+          onIntent={handleIntent}
           connection={status?.phase ?? null}
         />
         <SidebarInset className="min-h-svh">
@@ -204,7 +281,12 @@ export default function App() {
             {session ? (
               <Terminal session={session} onStatusChange={setStatus} ref={term} />
             ) : (
-              <NoSession loaded={loaded} />
+              <NoSession
+                loaded={loaded}
+                onNewSession={() =>
+                  dispatchPrompt({ type: 'open', spec: newSessionPrompt() })
+                }
+              />
             )}
           </div>
         </SidebarInset>
@@ -217,7 +299,28 @@ export default function App() {
           activeSession={session}
           onSelectPane={handleSelectPane}
           onCopyMode={copyMode}
+          onIntent={handleIntent}
         />
+
+        <PromptDialog
+          state={prompt}
+          onDismiss={() => dispatchPrompt({ type: 'dismiss' })}
+          onChange={(field, value) => dispatchPrompt({ type: 'set', field, value })}
+          onSubmit={submitPrompt}
+        />
+        <KillDialog
+          state={kill}
+          onDismiss={() => dispatchKill({ type: 'dismiss' })}
+          onArmedChange={(armed) => dispatchKill({ type: 'arm', armed })}
+          onConfirm={confirmKill}
+        />
+        {/*
+          Where a failed management call lands: what was attempted, and tmux's
+          own sentence about why not. Mounted here rather than beside each
+          caller so there is one of it -- sonner renders a single region and a
+          second `<Toaster>` would double every toast.
+        */}
+        <Toaster position="bottom-right" closeButton />
       </SidebarProvider>
     </ThemeProvider>
   )
@@ -287,18 +390,31 @@ function ConnectionDot({ status }: { status: TerminalStatus | null }) {
 }
 
 /**
- * No terminal, because there is no session to attach to yet. Deliberately not
- * an offer to create one: v1's API has no session-creating endpoint, and a
- * button that cannot work is worse than a sentence that explains.
+ * No terminal, because there is no session to attach to yet.
+ *
+ * v1 could only explain how to start one over SSH: it had no session-creating
+ * endpoint, and a button that cannot work is worse than a sentence that does.
+ * It has one now, so this is a button -- and this is the case the design points
+ * at, a phone with no shell on this host and an empty tmux server.
  */
-function NoSession({ loaded }: { loaded: boolean }) {
+function NoSession({ loaded, onNewSession }: { loaded: boolean; onNewSession: () => void }) {
   return (
     <div className="text-muted-foreground flex h-full items-center justify-center p-6 text-center text-sm">
       {loaded ? (
-        <p className="max-w-sm">
-          There is no tmux session to attach to. Start one on the host —{' '}
-          <code className="font-mono">tmux new -s work</code> — and this tab picks it up.
-        </p>
+        <div className="max-w-sm space-y-3">
+          <p>
+            There is no tmux session to attach to. Start one here, or on the host with{' '}
+            <code className="font-mono">tmux new -s work</code>.
+          </p>
+          <button
+            type="button"
+            onClick={onNewSession}
+            className="hover:bg-accent hover:text-accent-foreground inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 font-medium"
+          >
+            <Plus className="size-3.5" aria-hidden />
+            New session
+          </button>
+        </div>
       ) : (
         <p>Looking for tmux…</p>
       )}

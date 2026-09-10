@@ -260,6 +260,43 @@ describe('groupRows', () => {
     expect(session.name).toBe('api')
   })
 
+  it('carries the id of the session the user made, from the row that named it', () => {
+    // Every session-level management call targets this: rename, kill, and the
+    // session a new window goes in. It has to be the *user's* session -- the
+    // daemon refuses to rename or kill an @wterm_web one -- and it has to come
+    // from the same row as the name, or a rename dialog titled "api" sends the
+    // id of a throwaway.
+    const [session] = groupRows([
+      row({ groupKey: 'work3', sessionId: '$9', sessionName: 'wterm-web-1', paneId: '%0', appOwned: true }),
+      row({ groupKey: 'work3', sessionId: '$3', sessionName: 'api', paneId: '%1', appOwned: false }),
+      row({ groupKey: 'work3', sessionId: '$8', sessionName: 'wterm-web-2', paneId: '%2', appOwned: true }),
+    ])
+    expect(session.sessionId).toBe('$3')
+    expect(session.name).toBe('api')
+  })
+
+  it('keeps the first live session, when the user has grouped two of their own', () => {
+    // `tmux new -t work` puts a second real session in the same group. A label
+    // that flipped between two live names every poll would be worse than one
+    // that picks the first and stays there -- and the id has to stay with it,
+    // or the dialog renames a session the row was never about.
+    const [session] = groupRows([
+      row({ groupKey: 'work', sessionId: '$1', sessionName: 'work', paneId: '%0' }),
+      row({ groupKey: 'work', sessionId: '$5', sessionName: 'work-two', paneId: '%1' }),
+    ])
+    expect(session.name).toBe('work')
+    expect(session.sessionId).toBe('$1')
+  })
+
+  it('falls back to the first row is id when every session is app-owned', () => {
+    const [session] = groupRows([
+      row({ groupKey: 'work3', sessionId: '$9', sessionName: 'wterm-web-1', appOwned: true }),
+    ])
+    // Nothing here is addressable -- the daemon refuses app sessions -- but an
+    // id is better than "", which tmux resolves to "whatever is current".
+    expect(session.sessionId).toBe('$9')
+  })
+
   it('still shows a live name when every session in the group is app-owned', () => {
     // The user killed the namesake under an attached tab. The group key is the
     // dead session's name; the throwaway's own name is at least a live one.

@@ -40,12 +40,21 @@
  * as `activePane` -- see App.tsx.
  */
 
-import { Columns2, RefreshCw, SquareTerminal, TriangleAlert } from 'lucide-react'
+import { Columns2, Plus, RefreshCw, SquareTerminal, TriangleAlert } from 'lucide-react'
+import { Fragment } from 'react'
 import type { ReactNode } from 'react'
 
 import { AGENT_MARKS, AgentIcon } from '@/components/AgentIcon'
 import { UserMenu } from '@/components/UserMenu'
 import { Badge } from '@/components/ui/badge'
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu'
 import {
   Sidebar,
   SidebarContent,
@@ -65,16 +74,20 @@ import {
 } from '@/components/ui/sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import type { TerminalPhase } from '@/components/Terminal'
+import { NO_WINDOW_ID, newSessionPrompt, newWindowAction, rowMenu, rowTargetForWindow } from '@/lib/manage'
+import type { MenuIntent, RowTarget } from '@/lib/manage'
 import { cn } from '@/lib/utils'
 import { paneState, sessionState, useSeenPanes, windowState, windowTarget } from '@/lib/useSnapshot'
 import type {
   DisplayState,
   PaneNode,
   SeenMap,
+  SessionNode,
   SnapshotQuestion,
   SnapshotState,
   WindowNode,
 } from '@/lib/useSnapshot'
+
 
 export interface AppSidebarProps {
   /** Everything `useSnapshot` knows, including why it might be out of date. */
@@ -92,6 +105,17 @@ export interface AppSidebarProps {
   /** Poll now: the Retry button on the failed and empty states. */
   onRefresh: () => void
   /**
+   * A management entry was chosen -- from a row's context menu, from the
+   * long-press that opens the same menu on touch, or from one of the `+`
+   * buttons.
+   *
+   * The sidebar decides *what is offered* (that is `rowMenu`, over the row that
+   * was clicked) and nothing about what happens next: a rename opens a prompt,
+   * a kill opens the two-step dialog, and a split is sent immediately. All
+   * three live in App, which owns the dialogs and the refresh.
+   */
+  onIntent: (intent: MenuIntent) => void
+  /**
    * The socket's phase, for the footer's second line. Passed down rather than
    * read here: the terminal owns it, and the sidebar is not on that path.
    */
@@ -104,6 +128,7 @@ export function AppSidebar({
   activeSession,
   onSelectPane,
   onRefresh,
+  onIntent,
   connection = null,
 }: AppSidebarProps) {
   const { groups, loaded, serverStart, rows } = snapshot
@@ -125,54 +150,88 @@ export function AppSidebar({
             <span className="truncate font-medium group-data-[collapsible=icon]:hidden">
               tmux-web
             </span>
+            {/*
+              The one affordance that cannot live on a row: with no tmux server
+              running there are no rows, nothing to right-click, and v1 could
+              not fix that from the browser at all. It sits in the header so it
+              is in the same place whether the tree is empty or full.
+            */}
+            <NewButton
+              label="New session"
+              className="ml-auto group-data-[collapsible=icon]:hidden"
+              onClick={() => onIntent({ kind: 'prompt', prompt: newSessionPrompt() })}
+            />
           </div>
         </SidebarHeader>
 
         <SidebarContent>
           {groups.map((session) => (
             <SidebarGroup key={session.key}>
-              <SidebarGroupLabel
-                className={session.key === activeSession ? 'text-sidebar-foreground' : undefined}
+              <RowMenu
+                target={{ kind: 'session', session }}
+                activeSession={activeSession}
+                onIntent={onIntent}
               >
-                {/*
-                  The roll-up: the most urgent state anywhere under this
-                  session. Visible only while the sidebar is expanded --
-                  shadcn fades group labels out in the icon rail -- so the
-                  window rows below carry their own, on their icons, for the
-                  collapsed case.
-                */}
-                <StateDot
-                  state={sessionState(session, serverStart, seen)}
-                  className="mr-1.5"
-                />
-                {/*
-                  The live session name, never `session.key`. tmux freezes
-                  session_group at the name the group was created under, so a
-                  sidebar keyed and labelled on it shows the pre-rename name
-                  forever -- which makes renaming from the browser look like it
-                  did nothing. The key is still the identity: it is the React
-                  key, the `?session=` value and what a click carries.
-                */}
-                <span className="truncate">{session.name}</span>
-                {session.appOnly && (
-                  // The user's own session under this group name is gone; its
-                  // windows are only still alive because a browser tab is holding
-                  // the group open. Worth saying, because attaching to it by name
-                  // is exactly what the daemon will refuse.
-                  <span className="text-sidebar-foreground/50 ml-1 truncate text-[10px] font-normal">
-                    (orphaned)
-                  </span>
-                )}
-              </SidebarGroupLabel>
+                <SidebarGroupLabel
+                  className={session.key === activeSession ? 'text-sidebar-foreground' : undefined}
+                >
+                  {/*
+                    The roll-up: the most urgent state anywhere under this
+                    session. Visible only while the sidebar is expanded --
+                    shadcn fades group labels out in the icon rail -- so the
+                    window rows below carry their own, on their icons, for the
+                    collapsed case.
+                  */}
+                  <StateDot state={sessionState(session, serverStart, seen)} className="mr-1.5" />
+                  {/*
+                    The live session name, never `session.key`. tmux freezes
+                    session_group at the name the group was created under, so a
+                    sidebar keyed and labelled on it shows the pre-rename name
+                    forever -- which makes renaming from the browser look like it
+                    did nothing. The key is still the identity: it is the React
+                    key, the `?session=` value and what a click carries.
+                  */}
+                  <span className="truncate">{session.name}</span>
+                  {session.appOnly && (
+                    // The user's own session under this group name is gone; its
+                    // windows are only still alive because a browser tab is holding
+                    // the group open. Worth saying, because attaching to it by name
+                    // is exactly what the daemon will refuse.
+                    <span className="text-sidebar-foreground/50 ml-1 truncate text-[10px] font-normal">
+                      (orphaned)
+                    </span>
+                  )}
+                  {/*
+                    The session row's own `+`. A new window is what a session
+                    row can create -- the row is the session -- and it opens in
+                    the working directory of the pane that window would show,
+                    which the daemon resolves from the pane id.
+                  */}
+                  {!session.appOnly && (
+                    <NewButton
+                      label={`New window in "${session.name}"`}
+                      className="ml-auto"
+                      onClick={() =>
+                        onIntent({
+                          kind: 'run',
+                          action: newWindowAction({ kind: 'session', session }),
+                        })
+                      }
+                    />
+                  )}
+                </SidebarGroupLabel>
+              </RowMenu>
               <SidebarGroupContent>
                 <SidebarMenu>
                   {session.windows.map((window) => (
                     <WindowItem
                       key={window.key}
                       window={window}
-                      sessionKey={session.key}
+                      session={session}
                       activePane={activePane}
+                      activeSession={activeSession}
                       onSelectPane={onSelectPane}
+                      onIntent={onIntent}
                       serverStart={serverStart}
                       seen={seen}
                       // An orphaned group has no session of its own left to
@@ -192,6 +251,7 @@ export function AppSidebar({
           <SidebarStatus
             snapshot={snapshot}
             onRefresh={onRefresh}
+            onIntent={onIntent}
             hasTree={loaded && groups.length > 0}
           />
         </SidebarContent>
@@ -211,24 +271,31 @@ export function AppSidebar({
  *
  * Clicking the window row selects the window's own active pane, so the row does
  * what `select-window` alone would do rather than silently landing on pane 0.
+ * Right-clicking it -- or holding it down on a touch screen -- offers what can
+ * be done to that window; the pane rows offer what can be done to a pane.
  */
 function WindowItem({
   window,
-  sessionKey,
+  session,
   activePane,
+  activeSession,
   onSelectPane,
+  onIntent,
   reachable,
   serverStart,
   seen,
 }: {
   window: WindowNode
-  sessionKey: string
+  session: SessionNode
   activePane: string | null
+  activeSession: string | null
   onSelectPane: (paneId: string, groupKey: string) => void
+  onIntent: (intent: MenuIntent) => void
   reachable: boolean
   serverStart: string
   seen: SeenMap
 }) {
+  const sessionKey = session.key
   const split = window.panes.length > 1
   const target = windowTarget(window)
   const holdsActive = window.panes.some((p) => p.paneId === activePane)
@@ -241,91 +308,201 @@ function WindowItem({
     ? undefined
     : 'This session was killed; its panes are only alive because a tab is holding the group open'
 
+  // On a single-pane window this row *is* the pane, and its menu is the pane's
+  // too -- the rule is `rowTargetForWindow`'s, where it can be tested.
+  const rowTarget = rowTargetForWindow(session, window)
+
   return (
     <SidebarMenuItem>
-      <SidebarMenuButton
-        // A split window is "active" when the tab is in one of its panes, but
-        // the pane row below carries the highlight; marking both would read as
-        // two selections.
-        isActive={holdsActive && !split}
-        tooltip={label}
-        disabled={!reachable}
-        title={unreachable}
-        onClick={() => target && onSelectPane(target, sessionKey)}
-        className={holdsActive && split ? 'text-sidebar-accent-foreground' : undefined}
-      >
-        <RowIcon
-          state={state}
-          icon={
-            split ? (
-              <Columns2 aria-hidden />
-            ) : lone && Object.hasOwn(AGENT_MARKS, lone.command) ? (
-              // The agent's own mark says more than a generic terminal glyph,
-              // and on a single-pane window this row *is* the pane. A pane
-              // running something else keeps the glyph.
-              <AgentIcon command={lone.command} />
-            ) : (
-              <SquareTerminal aria-hidden />
-            )
-          }
-        />
-        <span className="truncate">{label}</span>
-        {lone && <PaneBadge pane={lone} width="max-w-32" />}
-      </SidebarMenuButton>
+      <RowMenu target={rowTarget} activeSession={activeSession} onIntent={onIntent}>
+        <div>
+          <SidebarMenuButton
+            // A split window is "active" when the tab is in one of its panes, but
+            // the pane row below carries the highlight; marking both would read as
+            // two selections.
+            isActive={holdsActive && !split}
+            tooltip={label}
+            disabled={!reachable}
+            title={unreachable}
+            onClick={() => target && onSelectPane(target, sessionKey)}
+            className={holdsActive && split ? 'text-sidebar-accent-foreground' : undefined}
+          >
+            <RowIcon
+              state={state}
+              icon={
+                split ? (
+                  <Columns2 aria-hidden />
+                ) : lone && Object.hasOwn(AGENT_MARKS, lone.command) ? (
+                  // The agent's own mark says more than a generic terminal glyph,
+                  // and on a single-pane window this row *is* the pane. A pane
+                  // running something else keeps the glyph.
+                  <AgentIcon command={lone.command} />
+                ) : (
+                  <SquareTerminal aria-hidden />
+                )
+              }
+            />
+            <span className="truncate">{label}</span>
+            {lone && <PaneBadge pane={lone} width="max-w-32" />}
+          </SidebarMenuButton>
+        </div>
+      </RowMenu>
 
       {split && (
         <SidebarMenuSub>
           {window.panes.map((pane) => (
             <SidebarMenuSubItem key={pane.paneId}>
-              <SidebarMenuSubButton
-                asChild
-                isActive={pane.paneId === activePane}
-                // `title` rather than a tooltip: sub-items are hidden in the
-                // icon-collapsed rail, so there is nothing for a tooltip to
-                // hang off, and the pane id is the thing a user debugging a
-                // selection actually wants to read.
-                title={unreachable ?? `${pane.paneId} · pane ${pane.paneIndex}`}
+              <RowMenu
+                target={{ kind: 'pane', session, window, windowId: NO_WINDOW_ID, pane }}
+                activeSession={activeSession}
+                onIntent={onIntent}
               >
-                <button
-                  type="button"
-                  disabled={!reachable}
-                  onClick={() => onSelectPane(pane.paneId, sessionKey)}
+                <SidebarMenuSubButton
+                  asChild
+                  isActive={pane.paneId === activePane}
+                  // `title` rather than a tooltip: sub-items are hidden in the
+                  // icon-collapsed rail, so there is nothing for a tooltip to
+                  // hang off, and the pane id is the thing a user debugging a
+                  // selection actually wants to read.
+                  title={unreachable ?? `${pane.paneId} · pane ${pane.paneIndex}`}
                 >
-                  <RowIcon
-                    state={paneState(pane, serverStart, seen)}
-                    // Null rather than an <AgentIcon> that renders nothing:
-                    // an element returning null is still an element, and
-                    // RowIcon would reserve 16px of gutter for it on every
-                    // shell row. hasOwn rather than `in` because `in` walks the
-                    // prototype, so a pane whose command happened to be
-                    // `toString` would take this branch and be handed a
-                    // function to draw.
-                    icon={
-                      Object.hasOwn(AGENT_MARKS, pane.command) ? (
-                        <AgentIcon command={pane.command} />
-                      ) : null
-                    }
-                  />
-                  <span className="truncate">pane {pane.paneIndex}</span>
-                  {pane.active && (
-                    <span
-                      className="bg-sidebar-foreground/40 size-1.5 shrink-0 rounded-full"
-                      title="tmux's current pane in this window"
-                      // role="img" is what gives an empty span a name a screen
-                      // reader will read; aria-label alone on a generic element
-                      // is ignored.
-                      role="img"
-                      aria-label="current in tmux"
+                  <button
+                    type="button"
+                    disabled={!reachable}
+                    onClick={() => onSelectPane(pane.paneId, sessionKey)}
+                  >
+                    <RowIcon
+                      state={paneState(pane, serverStart, seen)}
+                      // Null rather than an <AgentIcon> that renders nothing:
+                      // an element returning null is still an element, and
+                      // RowIcon would reserve 16px of gutter for it on every
+                      // shell row. hasOwn rather than `in` because `in` walks the
+                      // prototype, so a pane whose command happened to be
+                      // `toString` would take this branch and be handed a
+                      // function to draw.
+                      icon={
+                        Object.hasOwn(AGENT_MARKS, pane.command) ? (
+                          <AgentIcon command={pane.command} />
+                        ) : null
+                      }
                     />
-                  )}
-                  <PaneBadge pane={pane} width="max-w-24" />
-                </button>
-              </SidebarMenuSubButton>
+                    <span className="truncate">pane {pane.paneIndex}</span>
+                    {pane.active && (
+                      <span
+                        className="bg-sidebar-foreground/40 size-1.5 shrink-0 rounded-full"
+                        title="tmux's current pane in this window"
+                        // role="img" is what gives an empty span a name a screen
+                        // reader will read; aria-label alone on a generic element
+                        // is ignored.
+                        role="img"
+                        aria-label="current in tmux"
+                      />
+                    )}
+                    <PaneBadge pane={pane} width="max-w-24" />
+                  </button>
+                </SidebarMenuSubButton>
+              </RowMenu>
             </SidebarMenuSubItem>
           ))}
         </SidebarMenuSub>
       )}
     </SidebarMenuItem>
+  )
+}
+
+/**
+ * The management menu for one row: right-click, or hold it down on a touch
+ * screen.
+ *
+ * Radix's trigger runs a 700ms timer on a touch or pen pointerdown and opens
+ * the same menu from it, so the long-press the design asks for is the same code
+ * as the right-click rather than a second gesture to maintain.
+ *
+ * What is offered is `rowMenu`'s answer and nothing else -- this renders it.
+ * When a row has nothing to offer (an app-owned group, which the daemon refuses
+ * to touch) the children are returned bare, so no menu opens on a row where
+ * every entry would be disabled.
+ */
+function RowMenu({
+  target,
+  activeSession,
+  onIntent,
+  children,
+}: {
+  target: RowTarget
+  activeSession: string | null
+  onIntent: (intent: MenuIntent) => void
+  children: ReactNode
+}) {
+  const entries = rowMenu(target, activeSession)
+  if (entries.length === 0) return <>{children}</>
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuLabel>{menuHeading(target)}</ContextMenuLabel>
+        {entries.map((entry) => (
+          <Fragment key={entry.id}>
+            {/*
+              The kill is the only `danger` entry, and the rule is the design's:
+              it is separated from everything above it, so the destructive item
+              is never the one under a thumb that meant to hit the item above.
+            */}
+            {entry.danger && <ContextMenuSeparator />}
+            <ContextMenuItem
+              variant={entry.danger ? 'destructive' : 'default'}
+              onSelect={() => onIntent(entry.intent)}
+            >
+              <span>{entry.label}</span>
+              {entry.hint && (
+                // Rendered rather than hidden in a tooltip: this is the line
+                // saying zoom moves the terminal on the host too, and a phone
+                // has no hover to reveal it with.
+                <span className="text-muted-foreground text-xs">{entry.hint}</span>
+              )}
+            </ContextMenuItem>
+          </Fragment>
+        ))}
+      </ContextMenuContent>
+    </ContextMenu>
+  )
+}
+
+/** What the menu says it is acting on, so a mis-aimed right-click is obvious. */
+function menuHeading(target: RowTarget): string {
+  switch (target.kind) {
+    case 'session':
+      return `session "${target.session.name}"`
+    case 'window':
+      return `window ${target.window.index}: ${target.window.name}`
+    case 'pane':
+      return `pane ${target.pane.paneIndex} · ${target.pane.paneId}`
+  }
+}
+
+/** A small `+`, named for a screen reader and for the hover it gets on desktop. */
+function NewButton({
+  label,
+  onClick,
+  className,
+}: {
+  label: string
+  onClick: () => void
+  className?: string
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      className={cn(
+        'hover:bg-sidebar-accent hover:text-sidebar-accent-foreground flex size-5 shrink-0 items-center justify-center rounded-md',
+        className,
+      )}
+    >
+      <Plus className="size-3.5" aria-hidden />
+    </button>
   )
 }
 
@@ -341,10 +518,12 @@ function WindowItem({
 function SidebarStatus({
   snapshot,
   onRefresh,
+  onIntent,
   hasTree,
 }: {
   snapshot: SnapshotState
   onRefresh: () => void
+  onIntent: (intent: MenuIntent) => void
   hasTree: boolean
 }) {
   const { loaded, stale, error, unauthorized } = snapshot
@@ -394,12 +573,27 @@ function SidebarStatus({
     return (
       <div className={box} role="status">
         <p className="text-sidebar-foreground font-medium">No tmux session</p>
+        {/*
+          v1 could only tell you to go and start one over SSH, because it had no
+          endpoint that could. It has one now, and this is the case the design
+          calls out as the one with nothing to right-click: an empty tmux
+          server, reachable from a phone that has no shell on this host at all.
+        */}
         <p className="text-sidebar-foreground/70 mt-1">
-          Nothing is running on this host yet. Start one over SSH —{' '}
-          <code className="font-mono">tmux new -s work</code> — and it appears here within a
-          couple of seconds.
+          Nothing is running on this host yet. Start one here, or over SSH with{' '}
+          <code className="font-mono">tmux new -s work</code>.
         </p>
-        <RetryButton onRefresh={onRefresh} />
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => onIntent({ kind: 'prompt', prompt: newSessionPrompt() })}
+            className="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground mt-2 inline-flex items-center gap-1.5 rounded-md border px-2 py-1 font-medium"
+          >
+            <Plus className="size-3" aria-hidden />
+            New session
+          </button>
+          <RetryButton onRefresh={onRefresh} />
+        </div>
       </div>
     )
   }

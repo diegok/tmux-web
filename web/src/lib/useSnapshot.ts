@@ -299,6 +299,16 @@ export interface SessionNode {
    * first row still answers, which is better than printing a stale group key.
    */
   name: string
+  /**
+   * `$N`: what every session-level management call targets.
+   *
+   * Chosen the same way as `name`, from the group's first non-app-owned row,
+   * and for the same reason -- that is the session the user made, and the one
+   * the daemon will consent to rename or kill. Never the group key: tmux keeps
+   * the pre-rename name there, so `kill-session -t '=work3'` fails on a session
+   * living happily as `api`.
+   */
+  sessionId: string
   windows: WindowNode[]
   /** No member of this group is a session the user made; see `chooseSession`. */
   appOnly: boolean
@@ -326,6 +336,7 @@ export function groupRows(rows: readonly SnapshotRow[]): SessionNode[] {
         // A placeholder only until a row supplies one; the group key is the
         // pre-rename name, so it is the last resort rather than the default.
         name: row.sessionName || row.groupKey,
+        sessionId: row.sessionId,
         windows: [],
         appOnly: true,
       }
@@ -338,7 +349,13 @@ export function groupRows(rows: readonly SnapshotRow[]): SessionNode[] {
       // `tmux new -t work` puts a second real session in the group, and a label
       // that flipped between two live names every poll would be worse than one
       // that picks the first and stays there.
-      if (session.appOnly) session.name = row.sessionName || row.groupKey
+      if (session.appOnly) {
+        session.name = row.sessionName || row.groupKey
+        // The id the user's session is addressed by, taken from the same row as
+        // the name so that the two cannot describe different sessions: a
+        // rename dialog titled "work" must not send `$4`.
+        session.sessionId = row.sessionId
+      }
       session.appOnly = false
     }
 

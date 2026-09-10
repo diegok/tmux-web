@@ -117,6 +117,7 @@ function render(
         activeSession={over.activeSession ?? 'work'}
         onSelectPane={() => {}}
         onRefresh={() => {}}
+        onIntent={() => {}}
       />
     </SidebarProvider>,
   )
@@ -726,5 +727,58 @@ describe('the session row', () => {
     })
     // The active session's label is the emphasised one.
     expect(markup).toMatch(/text-sidebar-foreground"[^>]*>(<[^>]*>)*<span class="truncate">api</)
+  })
+})
+
+/**
+ * Management: the menu on every row, and the two `+` buttons that exist for the
+ * case with no row to open a menu on.
+ *
+ * A static render cannot open a Radix context menu -- the content is portalled
+ * and only mounts when it is opened -- so what is pinned here is that every row
+ * *carries* a trigger, and that `rowMenu` (tested in lib/manage.test.ts)
+ * decides what goes in it. Opening one is the Playwright run's job.
+ */
+describe('management affordances', () => {
+  it('puts a context menu on the session, the window and each pane', () => {
+    const markup = render(
+      fromRows([row({ paneId: '%0' }), row({ paneId: '%1', paneIndex: 1, paneActive: false })]),
+    )
+    // Session label, window row, and one per pane. Radix's own trigger handles
+    // both the right-click and the 700ms long-press on touch.
+    expect(markup.match(/data-slot="context-menu-trigger"/g)).toHaveLength(4)
+  })
+
+  it('leaves no menu on a group the daemon refuses to touch', () => {
+    // Every entry on an app-owned group would be a refusal waiting to happen,
+    // and a menu of disabled rows is worse than no menu.
+    const markup = render(fromRows([row({ groupKey: 'dead', appOwned: true })]), {
+      activeSession: 'dead',
+    })
+    // The window and its lone pane still have theirs; the session label does not.
+    expect(markup.match(/data-slot="context-menu-trigger"/g)).toHaveLength(1)
+  })
+
+  it('offers a new session from the header, whatever the tree looks like', () => {
+    expect(render(fromRows([row()]))).toContain('aria-label="New session"')
+    // And with no tmux server at all, which is the case it exists for: there is
+    // no row to right-click, and v1 could not fix that from the browser.
+    const empty = render(state({ loaded: true }))
+    expect(empty).toContain('aria-label="New session"')
+    expect(empty).toContain('New session')
+    // The v1 copy sent you to SSH because there was no endpoint. There is one.
+    expect(empty).not.toContain('and it appears here within a')
+  })
+
+  it('offers a new window from the session row it would go in', () => {
+    const markup = render(fromRows([row({ groupKey: 'work3', sessionName: 'api' })]))
+    expect(markup).toContain('aria-label="New window in &quot;api&quot;"')
+  })
+
+  it('offers no new window on an orphaned group', () => {
+    // Its only session is this app's throwaway one; a window created in it dies
+    // with the tab.
+    const markup = render(fromRows([row({ groupKey: 'dead', appOwned: true })]))
+    expect(markup).not.toContain('New window in')
   })
 })

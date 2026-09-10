@@ -12,18 +12,27 @@ import (
 type Poller struct {
 	interval time.Duration
 	fn       func(context.Context) ([]Row, error)
+	// startFn reads the tmux server's generation. It is optional: a poller built
+	// from a bare snapshot function has no tmux server to ask, and reports an
+	// empty generation rather than inventing one.
+	startFn func(context.Context) (string, error)
 
-	mu     sync.RWMutex
-	latest []Row
-	err    error
+	mu          sync.RWMutex
+	latest      []Row
+	err         error
+	serverStart string
 }
 
+// NewPollerFunc builds a poller over an arbitrary snapshot function. It reports
+// no server generation; see NewPoller for one wired to a real tmux server.
 func NewPollerFunc(interval time.Duration, fn func(context.Context) ([]Row, error)) *Poller {
 	return &Poller{interval: interval, fn: fn}
 }
 
 func NewPoller(interval time.Duration, c *Client) *Poller {
-	return NewPollerFunc(interval, c.Snapshot)
+	p := NewPollerFunc(interval, c.Snapshot)
+	p.startFn = c.ServerStart
+	return p
 }
 
 // Start polls once synchronously -- so the first tab to connect does not see an
@@ -59,9 +68,28 @@ func (p *Poller) Start(ctx context.Context) {
 // unreachable for a minute.
 func (p *Poller) refresh(ctx context.Context) {
 	rows, err := p.fn(ctx)
+
+	// The generation is read per poll rather than once at construction: the tmux
+	// server can restart underneath a running daemon, and that is precisely the
+	// moment the value matters. It is skipped when the snapshot itself failed --
+	// the same fault would fail this too, and a doomed second fork buys nothing --
+	// and a failure of its own leaves the previous generation in place, since
+	// blanking it would make every browser's per-pane memory miss for one poll.
+	var start string
+	var haveStart bool
+	if err == nil && p.startFn != nil {
+		var serr error
+		if start, serr = p.startFn(ctx); serr == nil {
+			haveStart = true
+		}
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.err = err
+	if haveStart {
+		p.serverStart = start
+	}
 	if err != nil {
 		return
 	}
@@ -78,6 +106,15 @@ func (p *Poller) Latest() []Row {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.latest
+}
+
+// ServerStart is the generation of the tmux server the cached snapshot came
+// from, or "" if there is no server or this poller was built without a client.
+// See Client.ServerStart for why anything keyed on a pane id needs it.
+func (p *Poller) ServerStart() string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.serverStart
 }
 
 // Err reports how the most recent poll ended: nil if it succeeded, otherwise

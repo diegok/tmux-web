@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Sep is the field separator used in tmux -F format strings. It is a literal
@@ -11,21 +12,33 @@ import (
 // unsafe because window names may contain one.
 const Sep = "\x1f"
 
-const fieldCount = 8
+const fieldCount = 12
+
+// MaxTitle bounds a pane title. tmux normalises control bytes out of titles but
+// does not cap length; an 8KB title was observed stored and reported in full,
+// and it would ride a 1.5s poll into the DOM.
+const MaxTitle = 256
 
 // Row is one pane as reported by tmux, before deduplication.
 //
 // The JSON names are the wire contract with the frontend; without the tags Go
 // would marshal the exported Go names instead.
 type Row struct {
-	GroupKey    string `json:"groupKey"`  // session_group, falling back to session_name
-	PaneID      string `json:"paneId"`    // e.g. "%3", stable for the pane's lifetime
-	PaneIndex   int    `json:"paneIndex"` // position within the window, in layout order
-	AppOwned    bool   `json:"appOwned"`  // set from the @wterm_web user option
+	GroupKey string `json:"groupKey"` // session_group, falling back to session_name
+	// SessionID and SessionName are separate from GroupKey because they differ
+	// after a rename: session_group keeps the pre-rename name, so the group key
+	// is not an address and not a display name. Operations target the id.
+	SessionID   string `json:"sessionId"`   // $N; what management operations target
+	SessionName string `json:"sessionName"` // live name, for display
+	PaneID      string `json:"paneId"`      // e.g. "%3", stable for the pane's lifetime
+	PaneIndex   int    `json:"paneIndex"`   // position within the window, in layout order
+	AppOwned    bool   `json:"appOwned"`    // set from the @wterm_web user option
+	Label       string `json:"label"`       // @wterm_label; user-set, may be ""
 	WindowIndex int    `json:"windowIndex"`
 	WindowName  string `json:"windowName"`
 	PaneActive  bool   `json:"paneActive"`
 	Command     string `json:"command"`
+	Title       string `json:"title"` // tmux-sanitised, truncated
 }
 
 // Format is the -F argument producing rows this package can parse.
@@ -35,7 +48,7 @@ type Row struct {
 // a 0x1f or a newline can forge a whole extra record or swallow the following
 // pane's -- either way the sidebar shows something other than the truth, and a
 // pane that exists can vanish from it. Being the last field does not bound the
-// damage: a newline simply starts a fresh line whose eight fields are all
+// damage: a newline simply starts a fresh line whose every field is
 // attacker-controlled. tmux's #{q:} modifier does not escape either byte.
 // Nothing in v1 renders the path; the deferred git panel can query it per pane,
 // where a single-pane result needs no field splitting to interpret.
@@ -43,14 +56,28 @@ type Row struct {
 // pane_current_command is a theoretical residual: it is not known to be
 // sanitized either, and two attempts to make tmux report a command containing a
 // newline failed, but that is not a proof that it cannot happen.
+//
+// pane_title is safe for the opposite reason to the path: tmux normalises a
+// title through its own OSC parser, so a title set to "EVIL\x1fFORGED\nMORE"
+// reads back as one line with the control bytes gone.
+//
+// @wterm_label is NOT safe in the same way: tmux does not sanitize user option
+// values, so a label carrying a 0x1f or a newline forges or splits a record and
+// makes its pane vanish from the sidebar. It is validated on write, and ParseRows
+// drops what it cannot parse -- one row missing until the option is cleared,
+// rather than a neighbouring pane's record silently rewritten.
 const Format = "#{?#{session_group},#{session_group},#{session_name}}" + Sep +
+	"#{session_id}" + Sep +
+	"#{session_name}" + Sep +
 	"#{pane_id}" + Sep +
 	"#{pane_index}" + Sep +
 	"#{@wterm_web}" + Sep +
+	"#{@wterm_label}" + Sep +
 	"#{window_index}" + Sep +
 	"#{window_name}" + Sep +
 	"#{pane_active}" + Sep +
-	"#{pane_current_command}"
+	"#{pane_current_command}" + Sep +
+	"#{pane_title}"
 
 // ParseRows parses raw `tmux list-panes` output into one Row per line.
 //
@@ -75,24 +102,48 @@ func ParseRows(out string) (rows []Row, dropped int, err error) {
 		}
 		// Distinct names: shadowing the named err return here would be
 		// harmless today only because it is always nil.
-		pidx, perr := strconv.Atoi(fields[2])
-		widx, werr := strconv.Atoi(fields[4])
+		pidx, perr := strconv.Atoi(fields[4])
+		widx, werr := strconv.Atoi(fields[7])
 		if perr != nil || werr != nil {
 			dropped++
 			continue
 		}
 		rows = append(rows, Row{
 			GroupKey:    fields[0],
-			PaneID:      fields[1],
+			SessionID:   fields[1],
+			SessionName: fields[2],
+			PaneID:      fields[3],
 			PaneIndex:   pidx,
-			AppOwned:    fields[3] == "1",
+			AppOwned:    fields[5] == "1",
+			Label:       fields[6],
 			WindowIndex: widx,
-			WindowName:  fields[5],
-			PaneActive:  fields[6] == "1",
-			Command:     fields[7],
+			WindowName:  fields[8],
+			PaneActive:  fields[9] == "1",
+			Command:     fields[10],
+			Title:       truncateAtRuneBoundary(fields[11], MaxTitle),
 		})
 	}
 	return rows, dropped, nil
+}
+
+// truncateAtRuneBoundary cuts s to at most maxBytes without splitting a rune.
+//
+// s[:maxBytes] is not good enough: a title is arbitrary UTF-8 and a multi-byte
+// rune straddling the cap would be halved, putting bytes that are not valid
+// UTF-8 on the wire and into the DOM. Whether that happens depends on where the
+// runes land, so the naive version is right most of the time -- which is why it
+// has to be pinned by a test rather than eyeballed.
+func truncateAtRuneBoundary(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	// s[maxBytes] is the first byte dropped. If it does not begin a rune, the
+	// cut falls inside one, so walk back to where that rune starts.
+	cut := maxBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // Dedupe collapses rows to one per pane and puts them in the order the user

@@ -3,6 +3,7 @@ package tmux
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // rec builds one snapshot record from its fields, joined by the real separator.
@@ -11,15 +12,16 @@ import (
 func rec(fields ...string) string { return strings.Join(fields, Sep) }
 
 // A valid record, as a named baseline the malformed cases can be varied from.
-// Field order matches Format: group, pane id, pane index, app marker, window
-// index, window name, pane active, command.
+// Field order matches Format: group, session id, session name, pane id, pane
+// index, app marker, label, window index, window name, pane active, command,
+// title.
 func goodRow(paneID, paneIndex, windowIndex string) string {
-	return rec("work", paneID, paneIndex, "", windowIndex, "api", "1", "claude")
+	return rec("work", "$0", "work", paneID, paneIndex, "", "", windowIndex, "api", "1", "claude", "a title")
 }
 
 func TestParseRows(t *testing.T) {
 	t.Run("one well formed row", func(t *testing.T) {
-		got, dropped, err := ParseRows(rec("work", "%3", "0", "", "1", "api", "1", "claude"))
+		got, dropped, err := ParseRows(rec("work", "$0", "work", "%3", "0", "", "", "1", "api", "1", "claude", "a title"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -44,7 +46,7 @@ func TestParseRows(t *testing.T) {
 	// Pins the false side of both booleans: a parser hardcoding either to true
 	// passes every other subtest.
 	t.Run("app owned row with an inactive pane", func(t *testing.T) {
-		got, dropped, err := ParseRows(rec("work", "%3", "2", "1", "0", "w", "0", "zsh"))
+		got, dropped, err := ParseRows(rec("work", "$0", "work", "%3", "2", "1", "", "0", "w", "0", "zsh", "t"))
 		if err != nil || dropped != 0 || len(got) != 1 {
 			t.Fatalf("ParseRows = %+v, %d, %v", got, dropped, err)
 		}
@@ -97,9 +99,9 @@ func TestParseRows(t *testing.T) {
 			goodRow("%1", "0", "0"),
 			"nonsense", // too few fields
 			// Numeric indices, so that only the field count can reject it.
-			rec("work", "%7", "0", "", "0", "w", "1", "zsh", "extra"),
-			rec("work", "%9", "0", "", "notanint", "w", "1", "zsh"), // bad window index
-			rec("work", "%8", "notanint", "", "0", "w", "1", "zsh"), // bad pane index
+			rec("work", "$0", "work", "%7", "0", "", "", "0", "w", "1", "zsh", "t", "extra"),
+			rec("work", "$0", "work", "%9", "0", "", "", "notanint", "w", "1", "zsh", "t"), // bad window index
+			rec("work", "$0", "work", "%8", "notanint", "", "", "0", "w", "1", "zsh", "t"), // bad pane index
 			goodRow("%2", "1", "0"),
 		}, "\n")
 		got, dropped, err := ParseRows(out)
@@ -143,6 +145,80 @@ func TestParseRows(t *testing.T) {
 				t.Fatalf("ParseRows(%q) returned %v, want nil", in, err)
 			}
 		}
+	})
+
+	t.Run("carries session identity, label and title", func(t *testing.T) {
+		// The group key and the live session name are DELIBERATELY different.
+		// tmux keeps the pre-rename name in session_group, so a fixture where they
+		// match would pass against an implementation that reads the group key --
+		// which is exactly the bug this field exists to fix.
+		line := rec("work3", "$3", "api", "%1", "0", "", "reviewer", "1", "win", "1", "claude", "✳ writing tests")
+		got, dropped, err := ParseRows(line)
+		if err != nil || dropped != 0 || len(got) != 1 {
+			t.Fatalf("got %+v dropped=%d err=%v", got, dropped, err)
+		}
+		r := got[0]
+		if r.GroupKey != "work3" {
+			t.Errorf("GroupKey = %q, want the group name work3", r.GroupKey)
+		}
+		if r.SessionName != "api" {
+			t.Errorf("SessionName = %q, want the live name api: reading the group key "+
+				"here is the pre-rename bug this field exists to fix", r.SessionName)
+		}
+		if r.SessionID != "$3" || r.Label != "reviewer" || r.Title != "✳ writing tests" {
+			t.Errorf("bad row: %+v", r)
+		}
+	})
+
+	t.Run("a huge title is truncated on a rune boundary", func(t *testing.T) {
+		// Multi-byte runes straddling the cap: a byte slice would cut one in half
+		// and put invalid UTF-8 into the DOM.
+		//
+		// Both widths are here on purpose. MaxTitle is 256, which is divisible by
+		// 2, so 2-byte runes land exactly on the cap and s[:MaxTitle] happens to
+		// be valid -- a byte-slicing implementation passes the "é" case and fails
+		// only on a width that does not divide the cap. "✳" is 3 bytes, and it is
+		// also what Claude Code actually puts at the head of a title.
+		for _, r := range []string{"é", "✳"} {
+			huge := strings.Repeat(r, 4000)
+			line := rec("w", "$0", "w", "%1", "0", "", "", "1", "win", "1", "claude", huge)
+			got, _, _ := ParseRows(line)
+			if len(got[0].Title) > MaxTitle {
+				t.Fatalf("%q title kept %d bytes, want <= %d", r, len(got[0].Title), MaxTitle)
+			}
+			if !utf8.ValidString(got[0].Title) {
+				t.Fatalf("%q: truncation split a rune; the title is not valid UTF-8", r)
+			}
+			// A cap that threw the title away entirely would satisfy both
+			// assertions above.
+			if len(got[0].Title) < MaxTitle-utf8.RuneLen([]rune(r)[0]) {
+				t.Fatalf("%q title kept only %d bytes; truncation must keep what fits", r, len(got[0].Title))
+			}
+		}
+	})
+
+	t.Run("a title that fits is not touched", func(t *testing.T) {
+		title := "✳ writing tests"
+		line := rec("w", "$0", "w", "%1", "0", "", "", "1", "win", "1", "claude", title)
+		got, _, _ := ParseRows(line)
+		if got[0].Title != title {
+			t.Fatalf("Title = %q, want %q unchanged", got[0].Title, title)
+		}
+	})
+
+	// tmux sanitises titles but NOT user option values, so a label is the one
+	// new field that can carry a separator or a newline.
+	t.Run("a label containing control bytes cannot remove a pane", func(t *testing.T) {
+		line := rec("w", "$0", "w", "%1", "0", "", "EV"+Sep+"IL", "1", "win", "1", "claude", "t")
+		got, dropped, _ := ParseRows(line)
+		if dropped == 0 {
+			t.Fatal("a malformed record must be counted")
+		}
+		if len(got) != 0 {
+			t.Fatalf("a malformed record must not produce a row: %+v", got)
+		}
+		// The point is that it is DROPPED AND COUNTED, never merged into a
+		// neighbour and never silently ignored.
 	})
 }
 

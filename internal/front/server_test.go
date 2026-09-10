@@ -30,9 +30,16 @@ import (
 
 // fakeSnapshots is a *tmux.Poller that answers what a test tells it to.
 type fakeSnapshots struct {
-	mu   sync.Mutex
-	rows []tmux.Row
-	err  error
+	mu          sync.Mutex
+	rows        []tmux.Row
+	err         error
+	serverStart string
+}
+
+func (f *fakeSnapshots) ServerStart() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.serverStart
 }
 
 func (f *fakeSnapshots) Latest() []tmux.Row {
@@ -51,6 +58,12 @@ func (f *fakeSnapshots) set(rows []tmux.Row, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rows, f.err = rows, err
+}
+
+func (f *fakeSnapshots) setServerStart(s string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.serverStart = s
 }
 
 // builtSPA is what Vite leaves in internal/front/dist: a shell naming one
@@ -472,6 +485,24 @@ func TestSnapshotServesTheCachedPoll(t *testing.T) {
 	}
 	if body.Stale {
 		t.Fatal("a good snapshot was reported as stale")
+	}
+}
+
+// Each browser keeps its own "this pane finished and I have not looked yet"
+// memory, keyed ${serverStart}:${paneId}. Pane ids restart at %0 when the tmux
+// server restarts, so without the generation on the response a stale seen["%3"]
+// silently suppresses the badge on an unrelated new pane.
+func TestSnapshotCarriesTheTmuxServerGeneration(t *testing.T) {
+	f := newFixture(t)
+	f.snaps.setServerStart("1789038099")
+	f.snaps.set([]tmux.Row{{GroupKey: "work", PaneID: "%1"}}, nil)
+
+	var body struct {
+		ServerStart string `json:"serverStart"`
+	}
+	decode(t, f.ok("GET", "/api/snapshot", ""), &body)
+	if body.ServerStart != "1789038099" {
+		t.Fatalf("serverStart = %q, want the value the poller read this poll", body.ServerStart)
 	}
 }
 

@@ -67,6 +67,33 @@ func (c *Client) Snapshot(ctx context.Context) ([]Row, error) {
 	return Dedupe(rows), nil
 }
 
+// ServerStart identifies the generation of the running tmux server, or "" if
+// there is none.
+//
+// Pane ids are only unique within one server's life: they restart at %0 when the
+// server does. Anything remembering something per pane across polls -- the
+// browser's "this finished and I have not looked yet" memory -- has to key on
+// this too, or a remembered %3 is silently applied to an unrelated new pane.
+//
+// The value is tmux's own #{start_time}, in whole seconds, and it is treated as
+// an opaque token rather than a time. Two servers started within the same second
+// therefore share a generation; that is a restart so fast it cannot be produced
+// by hand, and the consequence is one stale badge, so it is not worth a second
+// discriminator that tmux does not offer.
+//
+// No server is not an error, for the same reason as in Snapshot: a machine where
+// tmux has never started is an ordinary cold start, not a fault.
+func (c *Client) ServerStart(ctx context.Context) (string, error) {
+	out, err := c.Run(ctx, "display-message", "-p", "#{start_time}")
+	if err != nil {
+		if noServer(err.Error()) {
+			return "", nil
+		}
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 // noServer reports whether a tmux failure means "there is no server on this
 // socket" rather than a real fault.
 //

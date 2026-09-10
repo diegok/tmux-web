@@ -57,6 +57,10 @@ type SnapshotSource interface {
 	// Err is how the most recent poll ended. Non-nil with a non-nil Latest
 	// means the snapshot is stale, not wrong.
 	Err() error
+	// ServerStart identifies the generation of the tmux server these rows came
+	// from, or "" if there is none. Pane ids restart at %0 when tmux restarts,
+	// so the browser keys its per-pane memory on it.
+	ServerStart() string
 }
 
 // DeviceAdmin is the part of *auth.Store this layer administers. Lookup lives
@@ -484,6 +488,12 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 // blank screen.
 type snapshotResponse struct {
 	Panes []tmux.Row `json:"panes"`
+	// ServerStart is the tmux server's generation. The browser keys its per-pane
+	// "finished and not yet looked at" memory on it, because pane ids restart at
+	// %0 when the tmux server does -- so a remembered %3 would otherwise be
+	// applied to an unrelated new pane. It is "" when no tmux server is running,
+	// which is the same case as an empty Panes.
+	ServerStart string `json:"serverStart"`
 	// Stale means the most recent poll failed and these rows are from before
 	// it. The sidebar is expected to keep rendering them and say so quietly.
 	Stale bool   `json:"stale,omitempty"`
@@ -509,7 +519,7 @@ func (s *server) snapshot(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "cannot read the tmux server: "+err.Error())
 		return
 	}
-	body := snapshotResponse{Panes: rows}
+	body := snapshotResponse{Panes: rows, ServerStart: s.snapshots.ServerStart()}
 	if body.Panes == nil {
 		body.Panes = []tmux.Row{}
 	}

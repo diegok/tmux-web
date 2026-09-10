@@ -53,6 +53,92 @@ func TestSnapshotAgainstRealTmux(t *testing.T) {
 	}
 }
 
+// The reason SessionID and SessionName exist at all, pinned against a real tmux
+// because no fixture can prove it: tmux keeps the PRE-RENAME name in
+// session_group. Rename work3 to api and every member still reports
+// group=work3, so a sidebar keyed on the group shows the old name forever and
+// `kill-session -t '=work3'` fails while the session lives on as api.
+//
+// It also pins the two other new fields against tmux's real format vocabulary:
+// a mistyped #{@wterm_label} or #{pane_title} expands to empty rather than
+// erroring, so the field count -- and every unit test -- stays happy.
+func TestSnapshotCarriesLiveSessionIdentityAfterRename(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work3", "-x", "80", "-y", "24")
+	// A grouped, app-marked member: what an open browser tab creates, and what
+	// puts a session_group on the base session in the first place.
+	srv.Run(t, "new-session", "-d", "-t", "work3", "-s", "_web-sim")
+	srv.Run(t, "set", "-t", "_web-sim", "@wterm_web", "1")
+	srv.Run(t, "rename-session", "-t", "work3", "api")
+	srv.Run(t, "set", "-p", "-t", "api:0.0", "@wterm_label", "reviewer")
+
+	panes, err := tmux.NewClient(srv.Args()).Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(panes) != 1 {
+		t.Fatalf("want the one shared pane, got %d: %+v", len(panes), panes)
+	}
+	r := panes[0]
+	if r.GroupKey != "work3" {
+		t.Errorf("GroupKey = %q, want the stale group name work3; if tmux now "+
+			"renames the group, the SessionName field is no longer load-bearing "+
+			"and this design decision should be revisited", r.GroupKey)
+	}
+	if r.SessionName != "api" {
+		t.Errorf("SessionName = %q, want the live name api", r.SessionName)
+	}
+	if !strings.HasPrefix(r.SessionID, "$") {
+		t.Errorf("SessionID = %q, want a $N session id", r.SessionID)
+	}
+	// Addressability is the point of carrying the id: the name-based target
+	// that v1 would have used is now broken, and the id must not be.
+	if _, err := srv.TryRun("kill-session", "-t", "="+r.GroupKey); err == nil {
+		t.Error("kill-session by group key succeeded; the premise of this test is gone")
+	}
+	if out, err := srv.TryRun("display-message", "-p", "-t", r.SessionID, "#{session_name}"); err != nil ||
+		strings.TrimSpace(out) != "api" {
+		t.Errorf("the session id did not address the session: %q, %v", out, err)
+	}
+	if r.Label != "reviewer" {
+		t.Errorf("Label = %q, want reviewer from @wterm_label", r.Label)
+	}
+	// tmux defaults a pane title to the hostname, so a working #{pane_title} is
+	// never empty -- which is what makes an empty one evidence of a typo.
+	if r.Title == "" {
+		t.Error("Title is empty; #{pane_title} did not expand")
+	}
+}
+
+// The tmux server's generation. Pane ids restart at %0 when the server
+// restarts, so the browser keys its per-pane "done" memory on this; a wrong or
+// constant value silently suppresses badges on unrelated new panes.
+func TestServerStartAgainstRealTmux(t *testing.T) {
+	srv := testutil.NewServer(t)
+
+	c := tmux.NewClient(srv.Args())
+	// No server is not an error, exactly as for Snapshot: a machine where tmux
+	// has never started answers with no panes and no generation.
+	if got, err := c.ServerStart(context.Background()); got != "" || err != nil {
+		t.Fatalf("ServerStart with no server = %q, %v; want \"\", nil", got, err)
+	}
+
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+	first, err := c.ServerStart(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pinned as a number rather than merely non-empty: a mistyped format
+	// expands to the empty string, and a literal one to itself, so shape is the
+	// only thing separating a working #{start_time} from a typo.
+	if _, err := strconv.Atoi(first); err != nil {
+		t.Fatalf("ServerStart = %q, want a unix timestamp: %v", first, err)
+	}
+	if again, err := c.ServerStart(context.Background()); err != nil || again != first {
+		t.Fatalf("ServerStart changed without a restart: %q then %q (%v)", first, again, err)
+	}
+}
+
 // Regression: killing the base session must not blank the sidebar.
 func TestSnapshotSurvivesBaseSessionKill(t *testing.T) {
 	srv := testutil.NewServer(t)

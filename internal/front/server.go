@@ -957,11 +957,21 @@ func newDaemon(cfg Config) (*daemon, error) {
 		interval = DefaultPollInterval
 	}
 	tm := tmux.NewClient(cfg.TmuxArgs)
+	// Built before the daemon literal because the poller needs it: agent panes
+	// are captured only while a browser is holding a terminal socket, and the
+	// registry is the only thing that knows whether one is.
+	registry := NewRegistry()
 	d := &daemon{
-		store:     store,
-		enroller:  auth.NewEnroller(store),
-		registry:  NewRegistry(),
-		poller:    tmux.NewPoller(interval, tm),
+		store:    store,
+		enroller: auth.NewEnroller(store),
+		registry: registry,
+		poller: tmux.NewPollerWith(tmux.Options{
+			Interval:    interval,
+			Snapshot:    tm.Snapshot,
+			ServerStart: tm.ServerStart,
+			Capture:     tm.Capture,
+			Connected:   registry.Live,
+		}),
 		tmux:      tm,
 		baseURL:   baseURL(cfg),
 		statePath: statePath,

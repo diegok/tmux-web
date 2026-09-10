@@ -39,6 +39,18 @@ type Row struct {
 	PaneActive  bool   `json:"paneActive"`
 	Command     string `json:"command"`
 	Title       string `json:"title"` // tmux-sanitised, truncated
+	// AgentState is "working", "idle" or "blocked", and "" for anything the
+	// daemon did not compute a state for: a pane that is not a known agent, a
+	// poll taken with no browser connected, and a capture that failed. The
+	// frontend never decides what counts as an agent -- it renders what is
+	// here, and "" is not a state.
+	AgentState string `json:"agentState"`
+	// FinishedAt is the unix-ms timestamp of this pane's most recent
+	// working->idle edge, or 0 if it has not had one under the current
+	// classifier. The browser compares it against its own per-device memory of
+	// what it has already looked at, which is why it is a timestamp rather than
+	// a "done" flag: "done" would have to be cleared by somebody.
+	FinishedAt int64 `json:"finishedAt"`
 	// Question is what a blocked agent is waiting on. It is a pointer and
 	// omitempty because it is absent far more often than present -- every
 	// non-agent pane, every agent that is not blocked, and every blocked agent

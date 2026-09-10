@@ -178,3 +178,27 @@ func (c *Client) KillSession(ctx context.Context, name string) error {
 	_, err := c.Run(ctx, "kill-session", "-t", "="+name)
 	return err
 }
+
+// Capture returns a pane's visible screen.
+//
+// -p writes it to stdout instead of a buffer, and -J rejoins a line the pane
+// wrapped so that a question broken across two rows reads as one.
+//
+// Deliberately NOT -S -8. A negative -S counts back from the top of the visible
+// screen into scrollback, so on a 6-row pane `-S -8` returns 14 lines: the
+// screen plus 8 lines of history, which is exactly where a just-answered
+// approval box lives. Reporting one of those as a live question is the false
+// positive that would train the owner to ignore the badge. The visible screen
+// is what is being asked about, and any slicing happens in Go.
+//
+// The whole screen is returned rather than a tail: the hash of it is what tells
+// working from idle, and a redraw at the top of the screen is work too.
+func (c *Client) Capture(ctx context.Context, paneID string) (string, error) {
+	// tmux resolves an empty target to "whatever is current" and exits 0, so an
+	// unvalidated id would silently classify some other pane -- and the state
+	// would look plausible while belonging to the wrong row.
+	if err := ValidatePaneID(paneID); err != nil {
+		return "", fmt.Errorf("capture pane: %w", err)
+	}
+	return c.Run(ctx, "capture-pane", "-p", "-J", "-t", paneID)
+}

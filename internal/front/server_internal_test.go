@@ -19,6 +19,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/diegok/tmux-web/internal/tmux/testutil"
 )
 
 // captureLogs redirects the default logger for the duration of a test.
@@ -234,5 +236,79 @@ func TestPollIntervalDefaults(t *testing.T) {
 	}
 	if DefaultPollInterval != 1500*time.Millisecond {
 		t.Fatalf("DefaultPollInterval = %v; the sidebar polls at 1.5s and the design costs it at one fork per interval", DefaultPollInterval)
+	}
+}
+
+// -- the poller's second job ------------------------------------------------
+
+// Agent state exists only if newDaemon actually hands the poller a way to
+// capture panes and a way to ask whether anyone is connected. Both are one line
+// each, neither has any other caller, and a poller built without them classifies
+// nothing while every test in tmux and front stays green -- so the wiring is
+// checked here, through the real daemon, against a real tmux.
+//
+// The agent pane is a copy of cat named "claude", so this needs no TUI
+// installed and still goes through the real tmux.Agents list.
+func TestDaemonPollerClassifiesAgentPanesWhileAClientIsConnected(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "40", "-y", "10",
+		testutil.FakeAgent(t, "claude"))
+
+	d, err := newDaemon(Config{
+		Host:         "tmux.example.com",
+		Dev:          true,
+		Port:         7000,
+		StatePath:    filepath.Join(t.TempDir(), "devices.json"),
+		TmuxArgs:     srv.Args(),
+		PollInterval: 25 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d.poller.Start(ctx)
+
+	agentState := func() string {
+		for _, r := range d.poller.Latest() {
+			if r.Command == "claude" {
+				return r.AgentState
+			}
+		}
+		return "<no agent pane>"
+	}
+
+	// Nobody is connected, so nothing is captured and nothing is classified.
+	// Given a moment, in case a first poll could sneak a state in.
+	time.Sleep(100 * time.Millisecond)
+	if got := agentState(); got != "" {
+		t.Fatalf("agentState = %q with no browser connected, want empty", got)
+	}
+
+	// A tab opens: the registry is what the poller asks, so registering one
+	// connection is enough to turn capturing on.
+	remove, ok := d.registry.Add("laptop", func() {})
+	if !ok {
+		t.Fatal("registry refused a fresh registration")
+	}
+	defer remove()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for agentState() == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("no state was ever computed for an agent pane with a client connected")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// ... and it goes away again with the last tab, rather than freezing at
+	// whatever it last was.
+	remove()
+	deadline = time.Now().Add(5 * time.Second)
+	for agentState() != "" {
+		if time.Now().After(deadline) {
+			t.Fatalf("agentState = %q after the last client left, want empty", agentState())
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

@@ -348,3 +348,55 @@ func paneAt(t *testing.T, srv *testutil.Server, window string, index int) string
 	t.Fatalf("no pane %d in %s: %q", index, window, out)
 	return ""
 }
+
+// Capture returns the VISIBLE screen and nothing above it.
+//
+// The distinction is the whole reason this method exists rather than a
+// `capture-pane -S -8` inline somewhere. A negative -S counts back from the top
+// of the visible screen into scrollback, so it would hand the classifier a
+// just-answered approval box out of history and the pane would read blocked
+// with nothing on screen to answer.
+func TestCaptureAgainstRealTmux(t *testing.T) {
+	srv := testutil.NewServer(t)
+	// Five rows, forty lines: everything but the last handful is scrollback.
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "40", "-y", "5",
+		"sh -c 'for i in $(seq 1 40); do echo line$i; done; exec cat'")
+
+	c := tmux.NewClient(srv.Args())
+	pane := srv.Run(t, "list-panes", "-t", "work", "-F", "#{pane_id}")
+
+	var screen string
+	waitFor(t, 3*time.Second, func() bool {
+		var err error
+		screen, err = c.Capture(context.Background(), pane)
+		return err == nil && strings.Contains(screen, "line40")
+	}, "the pane never printed its last line")
+
+	if strings.Contains(screen, "line1\n") || strings.Contains(screen, "line20") {
+		t.Errorf("capture reached into scrollback:\n%s", screen)
+	}
+	if n := len(strings.Split(screen, "\n")); n > 5 {
+		t.Errorf("capture returned %d lines for a 5-row pane:\n%s", n, screen)
+	}
+}
+
+// An id the frontend failed to fill in must never reach tmux: an empty target
+// means "whatever is current" and exits 0, so the classifier would silently
+// hash some other pane and badge this row with its state.
+func TestCaptureRejectsBadPaneIDs(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work")
+	c := tmux.NewClient(srv.Args())
+
+	for _, bad := range []string{"", "%", "3", "@3", "$3", "%3x", "%-1", "work:0"} {
+		if _, err := c.Capture(context.Background(), bad); err == nil {
+			t.Errorf("Capture(%q) succeeded, want a rejection", bad)
+		}
+	}
+	// A well-formed id for a pane that does not exist is tmux's to refuse, and
+	// it must be an error rather than an empty screen -- an empty screen hashes
+	// as stable and would settle to idle.
+	if _, err := c.Capture(context.Background(), "%999"); err == nil {
+		t.Error("Capture of a nonexistent pane succeeded, want an error")
+	}
+}

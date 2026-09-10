@@ -100,6 +100,22 @@ export interface SnapshotRow {
    */
   title: string
   /**
+   * `""`, `"working"`, `"idle"` or `"blocked"`.
+   *
+   * `""` means the daemon computed no state -- the pane is not a known agent,
+   * or the poll was taken with no browser connected. It is not a state and is
+   * never rendered as one. The frontend never decides what counts as an agent:
+   * that list lives on the Go side and gates capture, state and logo together.
+   */
+  agentState: string
+  /**
+   * Unix ms of this pane's most recent working -> idle edge, or 0 if it has not
+   * had one. A timestamp rather than a `done` flag because "done" would have to
+   * be cleared by somebody: the browser compares this against its own memory of
+   * what it has already looked at.
+   */
+  finishedAt: number
+  /**
    * What a blocked agent is waiting on, when the daemon could read it.
    *
    * Absent for every pane that is not a blocked agent -- and also for a blocked
@@ -397,6 +413,8 @@ function rowsEqual(a: readonly SnapshotRow[], b: readonly SnapshotRow[]): boolea
       x.label === y.label &&
       x.paneActive === y.paneActive &&
       x.appOwned === y.appOwned &&
+      x.agentState === y.agentState &&
+      x.finishedAt === y.finishedAt &&
       questionsEqual(x.question, y.question)
     )
   })

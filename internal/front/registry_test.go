@@ -384,3 +384,47 @@ func TestConcurrentAddRemoveAndClose(t *testing.T) {
 		}
 	}
 }
+
+// Live is what stops the daemon capturing panes for nobody. Every state on the
+// sidebar depends on it answering true while a tab is open and false once the
+// last one goes, so both edges are pinned -- and the middle, because a registry
+// that reported true for one device's tab while another device's was open would
+// look correct in a single-device test.
+func TestLiveFollowsTheOpenConnections(t *testing.T) {
+	r := front.NewRegistry()
+	if r.Live() {
+		t.Fatal("Live() on an empty registry = true, want false")
+	}
+
+	removeA, _ := r.Add("dev-a", func() {})
+	if !r.Live() {
+		t.Fatal("Live() with one connection = false, want true")
+	}
+	removeB1, _ := r.Add("dev-b", func() {})
+	removeB2, _ := r.Add("dev-b", func() {})
+
+	// Two tabs on one device: closing one leaves the device connected.
+	removeB1()
+	if !r.Live() {
+		t.Fatal("Live() after one of a device's two tabs closed = false, want true")
+	}
+	removeA()
+	if !r.Live() {
+		t.Fatal("Live() with dev-b still connected = false, want true")
+	}
+	removeB2()
+	if r.Live() {
+		t.Fatal("Live() after the last connection closed = true, want false")
+	}
+
+	// Revocation is the other way a connection ends, and it takes the device's
+	// whole entry rather than removing one connection.
+	r.Add("dev-c", func() {})
+	if !r.Live() {
+		t.Fatal("Live() after a fresh Add = false, want true")
+	}
+	r.CloseDevice("dev-c")
+	if r.Live() {
+		t.Fatal("Live() after the only device was revoked = true, want false")
+	}
+}

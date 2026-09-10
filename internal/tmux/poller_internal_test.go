@@ -3,6 +3,7 @@ package tmux
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 )
 
@@ -77,5 +78,280 @@ func TestRefreshWithoutAServerGenerationReader(t *testing.T) {
 	p.refresh(context.Background())
 	if got := p.ServerStart(); got != "" {
 		t.Fatalf("ServerStart() = %q, want empty", got)
+	}
+}
+
+// --- agent classification ---------------------------------------------------
+//
+// These drive refresh directly rather than Start. Classification spans polls --
+// two identical captures mean idle, a third does not re-stamp -- so a test has
+// to control exactly how many polls happen and in what order, which a ticker
+// cannot offer. Everything they touch is package-private for the same reason
+// the generation tests above are.
+
+// agentPoller builds a poller whose snapshot and captures are supplied by the
+// test, with agent classification turned on.
+func agentPoller(rows *[]Row, screens map[string]string, captures *int, connected *bool) *Poller {
+	return NewPollerWith(Options{
+		Snapshot: func(context.Context) ([]Row, error) {
+			return append([]Row{}, *rows...), nil
+		},
+		Capture: func(_ context.Context, paneID string) (string, error) {
+			*captures++
+			s, ok := screens[paneID]
+			if !ok {
+				return "", errors.New("no such pane: " + paneID)
+			}
+			return s, nil
+		},
+		Connected: func() bool { return *connected },
+	})
+}
+
+func stateOf(t *testing.T, p *Poller, paneID string) Row {
+	t.Helper()
+	for _, r := range p.Latest() {
+		if r.PaneID == paneID {
+			return r
+		}
+	}
+	t.Fatalf("pane %s missing from the snapshot", paneID)
+	return Row{}
+}
+
+// With nobody watching there is nothing to capture for, and the design is
+// explicit that the states go EMPTY rather than frozen at their last value:
+// state presented as current when it is minutes old is worse than none.
+//
+// The classifier is reset too, so the next connection settles from scratch. A
+// resumed run would settle two polls after reconnect and stamp a finish edge,
+// which is a done badge on every device for work that finished while nobody was
+// connected -- the same storm everChanged exists to prevent.
+func TestRefreshSkipsCapturesWithNoClient(t *testing.T) {
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	screens := map[string]string{"%1": "screen A"}
+	captures := 0
+	connected := true
+	p := agentPoller(&rows, screens, &captures, &connected)
+	ctx := context.Background()
+
+	// Connected: a real change, then a settle, so there is a live run to lose.
+	p.refresh(ctx)
+	screens["%1"] = "screen B"
+	p.refresh(ctx)
+	p.refresh(ctx)
+	p.refresh(ctx)
+	if got := stateOf(t, p, "%1"); got.AgentState != StateIdle || got.FinishedAt == 0 {
+		t.Fatalf("with a client connected = %+v, want idle with a finish edge", got)
+	}
+	before := captures
+	if before == 0 {
+		t.Fatal("no captures were attempted with a client connected")
+	}
+
+	connected = false
+	p.refresh(ctx)
+	if got := captures; got != before {
+		t.Errorf("%d captures with no client connected, want none", got-before)
+	}
+	if got := stateOf(t, p, "%1"); got.AgentState != "" || got.FinishedAt != 0 {
+		t.Errorf("with no client = %+v, want an empty state: a frozen last value "+
+			"is stale state presented as current", got)
+	}
+
+	// Reconnect. The pane has not changed, so a classifier that kept its old
+	// entry settles immediately and stamps an edge; one that was reset reports
+	// working first and settles with nothing to stamp.
+	connected = true
+	if got := stateOf(t, p, "%1"); got.AgentState != "" {
+		t.Fatal("the previous poll's rows changed under us")
+	}
+	p.refresh(ctx)
+	if got := stateOf(t, p, "%1"); got.AgentState != StateWorking {
+		t.Errorf("first poll after reconnect = %+v, want working: the classifier "+
+			"must start from nothing, not resume a run nobody was watching", got)
+	}
+	p.refresh(ctx)
+	p.refresh(ctx)
+	if got := stateOf(t, p, "%1"); got.AgentState != StateIdle || got.FinishedAt != 0 {
+		t.Errorf("settling after reconnect = %+v, want idle with NO finish edge", got)
+	}
+}
+
+// Only known agents are captured. A shell, an editor or a build is never
+// forked for, never classified, and never badged -- the whole cost of this
+// feature is bounded by that list.
+func TestRefreshCapturesOnlyKnownAgents(t *testing.T) {
+	rows := []Row{
+		{PaneID: "%1", Command: "claude"},
+		{PaneID: "%2", Command: "zsh"},
+		{PaneID: "%3", Command: "claude-helper"},
+	}
+	var asked []string
+	connected := true
+	p := NewPollerWith(Options{
+		Snapshot: func(context.Context) ([]Row, error) { return append([]Row{}, rows...), nil },
+		Capture: func(_ context.Context, paneID string) (string, error) {
+			asked = append(asked, paneID)
+			return "a screen", nil
+		},
+		Connected: func() bool { return connected },
+	})
+	p.refresh(context.Background())
+
+	if len(asked) != 1 || asked[0] != "%1" {
+		t.Errorf("captured %v, want only the claude pane %%1", asked)
+	}
+	if got := stateOf(t, p, "%1"); got.AgentState == "" {
+		t.Error("the agent pane got no state")
+	}
+	for _, id := range []string{"%2", "%3"} {
+		if got := stateOf(t, p, id); got.AgentState != "" {
+			t.Errorf("pane %s = %q, want no state: it is not a known agent", id, got.AgentState)
+		}
+	}
+}
+
+// Blocked is not gated on idle and is not a verdict churn can outvote. An agent
+// can raise an approval box while background work carries on, so the box wins
+// on any poll it is on screen.
+func TestRefreshBlockedOverridesChurn(t *testing.T) {
+	dialog := readFixture(t, "claude-blocked.txt")
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	screens := map[string]string{"%1": dialog + "\nspinner 1"}
+	captures := 0
+	connected := true
+	p := agentPoller(&rows, screens, &captures, &connected)
+	ctx := context.Background()
+
+	// Churning: the screen differs every poll, so churn says working.
+	for i := 2; i < 5; i++ {
+		p.refresh(ctx)
+		screens["%1"] = dialog + "\nspinner " + strconv.Itoa(i)
+	}
+	got := stateOf(t, p, "%1")
+	if got.AgentState != StateBlocked {
+		t.Errorf("a changing screen showing a dialog = %q, want blocked", got.AgentState)
+	}
+	if got.Question == nil || got.Question.Text == "" {
+		t.Errorf("blocked row carries no question: %+v", got.Question)
+	}
+
+	// Still: churn says idle, and the box still wins.
+	p.refresh(ctx)
+	p.refresh(ctx)
+	p.refresh(ctx)
+	if got := stateOf(t, p, "%1"); got.AgentState != StateBlocked {
+		t.Errorf("a still screen showing a dialog = %q, want blocked", got.AgentState)
+	}
+
+	// The box goes away: the state goes back to what churn says, and the
+	// question goes with it rather than being left on a row nobody is asking
+	// about.
+	screens["%1"] = "answered, working again"
+	p.refresh(ctx)
+	if got := stateOf(t, p, "%1"); got.AgentState != StateWorking || got.Question != nil {
+		t.Errorf("after the dialog was answered = %+v, want working with no question", got)
+	}
+}
+
+// Retain takes the panes that are known agents NOW, not every pane in the
+// snapshot. A pane that goes claude -> zsh -> claude has to come back as a
+// first sight: keeping its hash across the shell means the relaunched agent's
+// different screen sets everChanged, and the next settle stamps a finish edge
+// for an agent that has only just started.
+func TestRefreshForgetsAPaneThatStoppedBeingAnAgent(t *testing.T) {
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	screens := map[string]string{"%1": "claude, mid-run"}
+	captures := 0
+	connected := true
+	p := agentPoller(&rows, screens, &captures, &connected)
+	ctx := context.Background()
+
+	// A real change, so everChanged is set on the entry that must not survive.
+	p.refresh(ctx)
+	screens["%1"] = "claude, still going"
+	p.refresh(ctx)
+
+	// The agent exits back to a shell for one poll.
+	rows[0].Command = "zsh"
+	p.refresh(ctx)
+
+	// A new agent starts in the same pane, with a screen unlike the old one's.
+	rows[0].Command = "claude"
+	screens["%1"] = "a brand new claude"
+	p.refresh(ctx)
+	p.refresh(ctx)
+	p.refresh(ctx)
+	if got := stateOf(t, p, "%1"); got.AgentState != StateIdle || got.FinishedAt != 0 {
+		t.Errorf("relaunched agent = %+v, want idle with NO finish edge: its "+
+			"predecessor's hash must not have survived the shell", got)
+	}
+}
+
+// A pane can close between list-panes and capture-pane -- the snapshot is
+// milliseconds old by then. That is an ordinary race, not a fault: the pane
+// gets no state for that poll, and its neighbours are unaffected.
+func TestRefreshSurvivesACaptureThatFails(t *testing.T) {
+	rows := []Row{
+		{PaneID: "%1", Command: "claude"},
+		{PaneID: "%2", Command: "claude"},
+	}
+	screens := map[string]string{"%2": "a screen"} // %1 is gone
+	captures := 0
+	connected := true
+	p := agentPoller(&rows, screens, &captures, &connected)
+	p.refresh(context.Background())
+
+	if got := stateOf(t, p, "%1"); got.AgentState != "" {
+		t.Errorf("pane whose capture failed = %q, want no state", got.AgentState)
+	}
+	if got := stateOf(t, p, "%2"); got.AgentState == "" {
+		t.Error("a failed capture on one pane cost its neighbour its state")
+	}
+	if err := p.Err(); err != nil {
+		t.Errorf("Err() = %v; a capture that failed is not a failed poll", err)
+	}
+}
+
+// A poller with no capture function is v1's poller and must stay one: every
+// existing caller of NewPollerFunc builds one, and a nil dereference in the
+// poll goroutine would take the daemon with it.
+func TestRefreshWithoutClassificationLeavesRowsAlone(t *testing.T) {
+	p := NewPollerFunc(0, func(context.Context) ([]Row, error) {
+		return []Row{{PaneID: "%1", Command: "claude"}}, nil
+	})
+	p.refresh(context.Background())
+	if got := p.Latest(); len(got) != 1 || got[0].AgentState != "" {
+		t.Fatalf("Latest() = %+v, want one row with no state", got)
+	}
+}
+
+// Half-wired classification is a silent no-op: captures with no liveness check
+// fork tmux for nobody, and a liveness check with no capture computes nothing.
+// Either is a wiring mistake that would leave the whole feature dark with every
+// test still green, so it fails at construction.
+func TestNewPollerWithRefusesHalfWiredClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		o    Options
+	}{
+		{"capture without liveness", Options{
+			Snapshot: func(context.Context) ([]Row, error) { return nil, nil },
+			Capture:  func(context.Context, string) (string, error) { return "", nil },
+		}},
+		{"liveness without capture", Options{
+			Snapshot:  func(context.Context) ([]Row, error) { return nil, nil },
+			Connected: func() bool { return true },
+		}},
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: built a poller, want a panic", tc.name)
+				}
+			}()
+			NewPollerWith(tc.o)
+		}()
 	}
 }

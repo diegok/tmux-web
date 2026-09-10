@@ -112,3 +112,34 @@ func (s *Server) Run(t *testing.T, args ...string) string {
 	}
 	return out
 }
+
+// FakeAgent returns the path to an executable named name that behaves like cat:
+// it holds a pane open and echoes whatever is typed into it.
+//
+// tmux reports #{pane_current_command} from the kernel's idea of a process's
+// name, which comes from the basename of the file that was exec'd -- so a copy
+// of cat named "claude" produces a pane the snapshot cannot tell from a real
+// one. That is how the agent tests get an agent pane without requiring claude
+// to be installed.
+//
+// The alternative was appending a fake name to tmux.Agents for the duration of
+// a test. That is a package-level variable read by KnownAgent, which the poll
+// goroutine calls, and restoring it in a cleanup races that goroutine -- the
+// poller's context being cancelled does not wait for a poll already in flight.
+// Copying a binary has no such window, and it exercises the real list.
+func FakeAgent(t *testing.T, name string) string {
+	t.Helper()
+	src, err := exec.LookPath("cat")
+	if err != nil {
+		t.Fatalf("cat not found in PATH: %v", err)
+	}
+	b, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("read %s: %v", src, err)
+	}
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, b, 0o755); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	return path
+}

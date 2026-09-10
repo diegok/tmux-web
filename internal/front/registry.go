@@ -95,6 +95,27 @@ func (r *Registry) Add(deviceID string, closer func()) (remove func(), ok bool) 
 	return func() { r.remove(deviceID, id) }, true
 }
 
+// Live reports whether any browser is holding a terminal connection right now.
+//
+// The poller asks this before capturing agent panes: with nobody connected
+// there is nothing to compute a badge for, and the design's whole cost argument
+// -- two tmux forks a second -- rests on that being answered honestly.
+//
+// "Connected" means a live terminal socket, and this counts exactly what the
+// registry holds, which is one entry per open /ws connection. That is the same
+// thing today and must stay so: if the registry ever gains a registration that
+// is not a terminal socket, this needs to stop counting it rather than start
+// keeping the poller awake for it.
+//
+// A device with no open connections holds no entry -- see remove -- so a
+// non-empty map means a live connection and not merely a device that once had
+// one.
+func (r *Registry) Live() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.live) > 0
+}
+
 // remove deregisters one connection. The handle is unique for the life of the
 // Registry, so this can only ever remove the connection it was issued for.
 func (r *Registry) remove(deviceID string, id uint64) {

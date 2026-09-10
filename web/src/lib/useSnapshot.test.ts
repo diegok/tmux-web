@@ -33,6 +33,9 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     command: 'zsh',
     // What tmux gives a pane nothing has titled: the hostname.
     title: 'devbox',
+    // A shell: the daemon computes no state for it.
+    agentState: '',
+    finishedAt: 0,
     // Present as a key and undefined as a value: `question` is omitempty on the
     // Go side, and the contract check below compares KEYS, so a fixture that
     // simply left it out would report the field as missing from TypeScript.
@@ -89,7 +92,7 @@ describe('contract with the daemon', () => {
     // and a pattern that stopped at the quote would simply not see it -- which
     // reads as "TypeScript is missing a field" rather than as a broken check.
     const tags = [...struct[1].matchAll(/json:"([^"]+)"/g)].map((m) => m[1].split(',')[0])
-    expect(tags).toHaveLength(13)
+    expect(tags).toHaveLength(15)
     expect(Object.keys(row()).sort()).toEqual(tags.sort())
   })
 })

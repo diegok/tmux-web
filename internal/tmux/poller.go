@@ -149,6 +149,27 @@ func (p *Poller) refresh(ctx context.Context) {
 		}
 	}
 
+	// A tmux server restart renumbers panes from %0, so an entry keyed on a
+	// pane id survives into a server it says nothing about: a fresh pane
+	// reusing %1 is compared against the dead server's hash, inherits its
+	// everChanged, and stamps a finish edge two polls later. The browser cannot
+	// suppress that one -- its `seen` map is keyed on the new generation, so it
+	// is empty -- and an unviewed done badge on an agent that has only just
+	// started is the badge-integrity failure the whole feature rests on.
+	//
+	// Nothing else prunes it: while the server is down the snapshot fails and
+	// refresh returns above without reaching classify at all.
+	//
+	// Only a *change* resets. A poll gap on the same server needs none: an edge
+	// after a snapshot outage reflects work that really happened. haveStart
+	// gates it so that a poller with no generation reader -- NewPollerFunc's,
+	// which is every v1 caller -- does not reset on every poll, and so that a
+	// generation read that failed leaves the run alone rather than reading its
+	// own empty answer as a restart.
+	if p.classifier != nil && haveStart && start != p.ServerStart() {
+		p.classifier.Retain(nil)
+	}
+
 	// Before publishing, so no reader ever sees a row between its snapshot
 	// fields being set and its state being decided.
 	if err == nil {
@@ -213,15 +234,22 @@ func (p *Poller) classify(ctx context.Context, rows []Row) {
 		if err != nil {
 			continue
 		}
-		st := p.classifier.Observe(rows[i].PaneID, screen, now)
-		rows[i].AgentState = st.State
-		rows[i].FinishedAt = st.FinishedAt
-
+		// Decided before the capture is classified, not after, because the
+		// classifier needs it: a held dialog is byte-identical between polls
+		// and would otherwise settle into a working->idle edge for a run that
+		// never finished. See Classifier.Observe.
+		//
 		// Checked on every capture, with no idle gate: an agent can raise an
 		// approval box while background work carries on redrawing, so churn's
 		// verdict never outvotes a box that is on screen. Only a positive match
 		// changes anything -- no match leaves whatever churn decided.
-		if IsBlocked(agent, screen) {
+		blocked := IsBlocked(agent, screen)
+
+		st := p.classifier.Observe(rows[i].PaneID, screen, now, blocked)
+		rows[i].AgentState = st.State
+		rows[i].FinishedAt = st.FinishedAt
+
+		if blocked {
 			rows[i].AgentState = StateBlocked
 			// nil when the grammar could not read the dialog. The state is the
 			// load-bearing half; the text is a convenience.

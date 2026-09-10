@@ -449,6 +449,52 @@ func TestRenameSessionIsVisibleInTheNextSnapshot(t *testing.T) {
 	}
 }
 
+// The app's own sessions are not the owner's to rename either, and this row is
+// reachable: Dedupe deliberately keeps an app-owned session when it is a
+// group's only member, which is exactly the state the sidebar is in after the
+// base session is killed with a tab open.
+//
+// Renaming it is worse than renaming a stranger's session. ptybridge tears its
+// session down BY NAME when the tab closes, so a renamed one is never found,
+// and the teardown falls through to the `destroy-unattached` net that client.go
+// calls a crash net rather than the normal path.
+func TestRenameSessionRefusesAnAppSession(t *testing.T) {
+	f := newManageFixture(t)
+	app := f.srv.Run(t, "new-session", "-d", "-t", "work", "-s", "_web-sim", "-P", "-F", "#{session_id}")
+	f.srv.Run(t, "set", "-t", app, tmux.AppOption, "1")
+
+	err := f.c.RenameSession(context.Background(), app, "mine-now")
+	if err == nil {
+		t.Fatal("RenameSession on an app session = nil, want a refusal")
+	}
+	if !strings.Contains(err.Error(), tmux.AppOption) {
+		t.Errorf("error %v does not say why it refused", err)
+	}
+	if out := f.srv.Run(t, "list-sessions", "-F", "#{session_name}"); !strings.Contains(out, "_web-sim") {
+		t.Errorf("the app session was renamed anyway: %q", out)
+	}
+
+	// The refusal reads the option, never the name. A user session that merely
+	// looks like the app's is the owner's, and stays renameable -- taking
+	// "_web-" names away from the user is the bug session.go warns about.
+	named := f.srv.Run(t, "new-session", "-d", "-s", "_web-notes", "-P", "-F", "#{session_id}")
+	if err := f.c.RenameSession(context.Background(), named, "notes"); err != nil {
+		t.Errorf("RenameSession on a user session named _web-notes: %v", err)
+	}
+
+	// And the app's session is refused for the option alone, even under a name
+	// with nothing app-shaped about it: an implementation keyed on the "_web-"
+	// prefix passes everything above and fails here.
+	plain := f.srv.Run(t, "new-session", "-d", "-s", "ordinary", "-P", "-F", "#{session_id}")
+	f.srv.Run(t, "set", "-t", plain, tmux.AppOption, "1")
+	if err := f.c.RenameSession(context.Background(), plain, "renamed"); err == nil {
+		t.Error("RenameSession on an app session named \"ordinary\" = nil, want a refusal")
+	}
+	if err := f.c.KillSessionID(context.Background(), plain); err == nil {
+		t.Error("KillSessionID on an app session named \"ordinary\" = nil, want a refusal")
+	}
+}
+
 func TestRenameSessionRejectsANameTmuxCannotUndo(t *testing.T) {
 	f := newManageFixture(t)
 

@@ -224,6 +224,15 @@ type Question struct {
 }
 ```
 
+**Truncated means capped, and the choices are capped too** — 256 runes each,
+`MaxQuestion`. Nothing on the screen bounds either one: `capture-pane -J`
+rejoins a question wrapped across rows, and the extractor rejoins a choice's
+continuation lines the same way, so one line of a wide pane is one long string
+riding every 1.5s poll into the sidebar and the tooltip. That is the hazard
+`MaxTitle` exists for, arriving through the other field. Runes rather than
+bytes, for `MaxLabel`'s reason: the cap is a column budget for a row, and a byte
+cap cuts a question in half in any language that is not English.
+
 `AgentState` is empty for anything not recognised as an agent, so the frontend
 never decides what counts.
 
@@ -238,6 +247,30 @@ so a closed pane's entry disappears on the next poll.
 
 It is rebuilt from nothing on restart, so every agent reads as `working` until
 two identical polls settle it — two polls, ~3s, not one.
+
+**It is also rebuilt when the tmux server's generation changes**, for the same
+reason the browser's `seen` keys carry that generation: pane ids restart at `%0`
+with the server, so an entry keyed on `%1` outlives the machine it describes.
+While the server is down the snapshot fails and the poll returns before
+classification, so nothing prunes it; on the first poll against the new server a
+fresh pane reusing `%1` inherits the dead server's hash and its "a real change
+was seen" flag, and stamps a finish edge two polls later. The browser cannot
+suppress that one — its map is keyed on the *new* generation and is empty — so
+it is an unviewed `done` badge on an agent that has only just started. Only a
+*change* of generation resets; a poll gap on the same server does not, because
+an edge after a snapshot outage reflects work that really happened.
+
+**And the classifier is told when a capture is a dialog.** A box waiting on the
+owner is byte-identical poll after poll, which is exactly the shape stillness
+has, so a working agent that raises one draws a single change and then settles —
+stamping a working→idle edge for a pane that was never idle on the wire. The
+damage lands *after* the box is answered: the agent resumes working and that
+stale edge is still the newest, so every device that has not viewed the pane
+shows `done` on an agent mid-run. Blocked detection therefore runs *before*
+classification and is passed in: while blocked the hash and the still-counter
+are kept up to date — the settled state is fine, the caller overrides it with
+`blocked` anyway — and only the stamp is withheld. A false `done` is the same
+badge-integrity failure a false `blocked` is, reached from the other side.
 
 **That settling must not stamp `finishedAt`.** Otherwise every daemon restart
 synthesises a working→idle edge on every agent pane, every edge is newer than
@@ -299,9 +332,17 @@ rename, since the name changes while the group name does not. Where a name must
 be used at all it carries tmux's `=` exact-match prefix: v1 established why,
 `kill-session -t _web-` silently kills `_web-abcd` and exits 0.
 
-**The daemon refuses to touch its own sessions.** Anything carrying
-`@wterm_web` is the app's, not the user's; killing one would drop a live tab's
-socket for no reason the user could understand.
+**The daemon refuses to touch its own sessions** — both verbs that take one,
+kill *and rename*. Anything carrying `@wterm_web` is the app's, not the user's;
+killing one would drop a live tab's socket for no reason the user could
+understand, and renaming one is worse, because the bridge tears its session down
+**by name** when the tab closes: a renamed session is never found and the
+teardown falls through to the `destroy-unattached` net that exists as a crash
+net, not as the normal path. The app row is reachable, not hypothetical — the
+snapshot deliberately keeps an app-owned session when it is a group's only
+member, which is the state the sidebar is in after the base session is killed
+with a tab open. Identified by the option and never by the name: `_web-` is a
+convention the app follows, not a namespace it owns.
 
 **`confirm: true` on every delete.** This mirrors the UI's two-step rather than
 replacing it, so a stray request that never passed through the dialog cannot
@@ -408,9 +449,12 @@ resets the toggle.
 | Rename or kill racing the poll | Panes, windows and sessions all have ids, so a stale row targets nothing |
 | Killing the last pane or window | Cascades to the session and the whole group, disconnecting attached tabs. The dialog says so; reconnect reports it rather than retrying |
 | A label containing control bytes | Rejected on write; a row that still arrives malformed is dropped and counted, as v1 does |
-| A resize, or a zoom | Changes the capture once, so the pane reads working for one poll and settles in ~3s. Cosmetic and self-healing; do not "fix" it by excluding rows |
+| A resize, a zoom, or a keystroke echoed into an idle agent's box | **Stamps a finish edge, and that is not cosmetic.** One changed capture is indistinguishable from one poll's worth of work, so the pane reads working for a poll, settles in ~3s, and earns a `done` badge on every device that has not viewed it. The *state* self-heals; the edge does not. Accepted, because nothing separates the two: a minimum run length would close the single-poll cases and not the class — typing spans several polls and looks exactly like an agent redrawing — while costing a real badge on every task that finishes inside it. Viewing the pane clears it, as it clears any other |
 | Daemon restart | Every agent settles from working to idle in ~3s and stamps no finish edge, so no badge storm |
-| tmux server restart | Pane ids restart at `%0`; `seen` keys carry the server generation so old entries cannot suppress new badges |
+| tmux server restart | Pane ids restart at `%0`; `seen` keys carry the server generation so old entries cannot suppress new badges, and the daemon's own per-pane map is reset on the generation change so a reused id cannot inherit a dead server's run |
+| An agent held at a permission dialog | The classifier is told, so a held box updates the hash without stamping a finish edge. Without that, answering the box leaves a stale `done` on an agent that is mid-run |
+| `Permission required` typed as the whole first line of opencode's input box | Reads blocked. The input box *is* the bottommost guttered block, and the header rule matches a whole line with any decoration before it. Accepted: closing it means requiring the `△` — reversing the decision that the glyph is style — which trades a self-inflicted, self-evident, transient false badge for a silently missed one on the load-bearing signal, the same trade the footer rule already refuses |
+| A capture that fails for one poll | That pane's `agentState` is empty for one poll by decision, and the badge is gated on `idle`, so an unseen `done` blinks off and returns 1.5s later with the same timestamp. Accepted: the flicker is the empty state, not the edge, so carrying `finishedAt` through the failed poll would change nothing the browser renders. It can only *hide* a badge for one poll, never invent one |
 | `split-window -c` on a deleted directory | tmux silently succeeds and lands in `$HOME`. The daemon resolves the path itself, so it stats first and reports rather than surprising you |
 
 ## Testing
@@ -425,6 +469,14 @@ Following v1:
 - **Playwright** for the two-step kill, the roll-up, and the tab badge.
 - **A regression test for the restart badge storm** — restart the poller with
   agent panes present and assert no finish edge is stamped.
+- **A regression test that a held dialog stamps no edge**, asserted on
+  `finishedAt` and not only on `agentState`: the blocked override makes the row
+  read `blocked` whether or not an edge was stamped underneath it, so a test
+  that checks the state alone cannot see this bug at all.
+- **A regression test that the tmux generation changing resets the per-pane
+  map**, and that an unchanged generation does *not* — a reset that fired every
+  poll would make every poll a first sight and kill the done badge outright,
+  with the restart test still green.
 - **A regression test that a label containing `0x1f` or a newline cannot remove a
   pane from the snapshot.**
 - **A test that rename is visible in the snapshot afterwards**, which is what

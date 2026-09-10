@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // readFixture returns a real captured pane, byte for byte.
@@ -545,5 +546,77 @@ func TestExtractQuestionOpencodeFailureKeepsTheState(t *testing.T) {
 		if q := ExtractQuestion("opencode", tc.screen); q != nil {
 			t.Errorf("%s: want no question rather than a wrong one, got %+v", tc.name, q)
 		}
+	}
+}
+
+// Nothing on the screen bounds a question. `capture-pane -J` rejoins a question
+// wrapped across rows, and the claude extractor rejoins a choice's continuation
+// lines the same way, so one line of a wide pane is one long string -- and this
+// one rides every 1.5s poll into the sidebar and the tooltip. MaxTitle exists
+// for exactly this hazard through the other field; the design's own wire
+// contract says "the request, one line, truncated".
+//
+// The cap counts RUNES, and the padding here is multi-byte on purpose: a byte
+// cap cuts a question to half its length in any language that is not English,
+// and a byte cap applied without care leaves half a rune on the wire. Both
+// assertions below are needed -- the length one alone passes for a naive
+// `s[:n]` whenever the bytes happen to land on a boundary, which depends on the
+// text and so is right most of the time.
+func TestExtractQuestionIsTruncated(t *testing.T) {
+	// An odd-length prefix, so that a naive byte slice lands mid-rune rather
+	// than getting away with it.
+	long := strings.Repeat("ñ", MaxQuestion*2)
+	screen := strings.Replace(readFixture(t, "claude-blocked.txt"),
+		"Do you want to create fixture.txt?", "Do you want"+long+"?", 1)
+	screen = strings.Replace(screen, "1. Yes", "1. "+long, 1)
+
+	q := ExtractQuestion("claude", screen)
+	if q == nil {
+		t.Fatal("a long question stopped the dialog parsing")
+	}
+	if n := utf8.RuneCountInString(q.Text); n != MaxQuestion {
+		t.Errorf("Text is %d runes, want %d: the cap is a column budget, so it "+
+			"counts runes, not bytes", n, MaxQuestion)
+	}
+	if !utf8.ValidString(q.Text) {
+		t.Errorf("Text is not valid UTF-8: the cut fell inside a rune")
+	}
+	if len(q.Choices) != 3 {
+		t.Fatalf("Choices = %q, want the fixture's three", q.Choices)
+	}
+	// The choices are capped too. They are the same rejoined-line hazard, they
+	// ride the same poll, and the tooltip is not a place to put a screenful.
+	if n := utf8.RuneCountInString(q.Choices[0]); n != MaxQuestion {
+		t.Errorf("Choices[0] is %d runes, want %d", n, MaxQuestion)
+	}
+	if !utf8.ValidString(q.Choices[0]) {
+		t.Errorf("Choices[0] is not valid UTF-8: the cut fell inside a rune")
+	}
+	// A question that fits is untouched -- a cap that trimmed everything would
+	// pass every assertion above.
+	if q := ExtractQuestion("claude", readFixture(t, "claude-blocked.txt")); q == nil ||
+		q.Text != "Do you want to create fixture.txt?" {
+		t.Errorf("the real fixture's question came back as %+v, want it whole", q)
+	}
+}
+
+// The cap lives in ExtractQuestion, not in one grammar, so that an agent added
+// to the rules table later cannot forget it. opencode's extractor is the other
+// implementation and never counts anything itself; if the cap were moved into
+// the claude one this is the test that says so.
+func TestExtractQuestionOpencodeIsTruncated(t *testing.T) {
+	long := strings.Repeat("ñ", MaxQuestion*2)
+	screen := strings.Replace(readFixture(t, "opencode-blocked.txt"),
+		"→ Edit fixture.txt", "→ Edit"+long, 1)
+
+	q := ExtractQuestion("opencode", screen)
+	if q == nil {
+		t.Fatal("a long request stopped the box parsing")
+	}
+	if n := utf8.RuneCountInString(q.Text); n != MaxQuestion {
+		t.Errorf("Text is %d runes, want %d", n, MaxQuestion)
+	}
+	if !utf8.ValidString(q.Text) {
+		t.Errorf("Text is not valid UTF-8: the cut fell inside a rune")
 	}
 }

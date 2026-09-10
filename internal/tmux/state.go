@@ -70,7 +70,23 @@ func NewClassifier() *Classifier {
 //
 // The whole capture is hashed, not a tail of it: a redraw at the top of the
 // screen is work too.
-func (c *Classifier) Observe(paneID, capture string, now time.Time) Status {
+//
+// blocked is the caller's verdict on this same capture -- whether a dialog is
+// on screen waiting for the owner. The classifier cannot see it: a held
+// permission box is byte-identical poll after poll, which is exactly the shape
+// stillness has, so without being told, a working agent that raises a box
+// stamps a working->idle edge two polls later for a run that never finished.
+// The damage lands after the box is answered: the agent resumes working and
+// that stale edge is still the newest, so every device that has not viewed the
+// pane shows done on an agent that is mid-run. A false done is the same
+// badge-integrity failure a false blocked is.
+//
+// So while blocked the hash and the still-counter are kept up to date -- the
+// screen really is still, and the settled *state* is fine, since the caller
+// overrides it with blocked anyway -- and only the stamp is withheld. The run
+// is not otherwise disturbed: everChanged survives, so the finish that comes
+// after the box is answered stamps normally.
+func (c *Classifier) Observe(paneID, capture string, now time.Time, blocked bool) Status {
 	h := fnv.New64a()
 	h.Write([]byte(capture))
 	sum := h.Sum64()
@@ -99,7 +115,12 @@ func (c *Classifier) Observe(paneID, capture string, now time.Time) Status {
 	// this with `finishedAt == 0` instead would let the done badge fire once
 	// per pane for the life of the daemon, and guarding it with nothing would
 	// re-stamp on every idle poll, so viewing the pane could never clear it.
-	if p.still == settleAfter && p.everChanged {
+	//
+	// `!blocked` is the third guard and it is not symmetric with the others: a
+	// pane held at a dialog passes through settleAfter exactly once too, and
+	// that poll is its only chance to stamp. Withholding it there means a run
+	// interrupted by a question earns no edge until it really ends.
+	if p.still == settleAfter && p.everChanged && !blocked {
 		p.finishedAt = now.UnixMilli()
 	}
 	return Status{State: StateIdle, FinishedAt: p.finishedAt}

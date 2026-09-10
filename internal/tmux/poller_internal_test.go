@@ -238,20 +238,90 @@ func TestRefreshBlockedOverridesChurn(t *testing.T) {
 	}
 
 	// Still: churn says idle, and the box still wins.
+	//
+	// And -- the half this test used to leave out -- the settle stamps NO
+	// finish edge. A held box is byte-identical between polls, so churn cannot
+	// tell it from a finished run; the classifier has to be told. Asserting
+	// only AgentState here hides that completely, because the override makes
+	// the row read `blocked` whether or not an edge was stamped underneath it.
 	p.refresh(ctx)
 	p.refresh(ctx)
 	p.refresh(ctx)
 	if got := stateOf(t, p, "%1"); got.AgentState != StateBlocked {
 		t.Errorf("a still screen showing a dialog = %q, want blocked", got.AgentState)
 	}
+	if got := stateOf(t, p, "%1"); got.FinishedAt != 0 {
+		t.Errorf("a held dialog stamped a finish edge at %d: this pane has not "+
+			"finished anything, and the edge outlives the box", got.FinishedAt)
+	}
 
 	// The box goes away: the state goes back to what churn says, and the
 	// question goes with it rather than being left on a row nobody is asking
 	// about.
+	//
+	// This is where a stamp made under the box does its damage. The row is
+	// working again, so the state is right, and the stale edge rides along
+	// underneath it -- newer than any `seen` on a device that has not viewed
+	// the pane, which shows `done` on an agent that is mid-run.
 	screens["%1"] = "answered, working again"
 	p.refresh(ctx)
 	if got := stateOf(t, p, "%1"); got.AgentState != StateWorking || got.Question != nil {
 		t.Errorf("after the dialog was answered = %+v, want working with no question", got)
+	}
+	if got := stateOf(t, p, "%1"); got.FinishedAt != 0 {
+		t.Errorf("a resumed agent carries a finish edge of %d, stamped while it was "+
+			"waiting on the owner: every unviewed device now shows `done` on a "+
+			"pane that is working", got.FinishedAt)
+	}
+}
+
+// The classifier is keyed by pane id, and pane ids restart at %0 with the tmux
+// server -- the same hazard the browser's `seen` map carries the generation for.
+//
+// While the server is down the snapshot fails and refresh returns before
+// classify, so nothing prunes the dead server's entries. On the first poll
+// against the new server a fresh pane reusing %1 is compared against them,
+// inherits an everChanged that was set by a run on a machine that no longer
+// exists, and stamps a finish edge two polls later. The browser cannot suppress
+// it: its map is keyed on the NEW generation and is empty.
+func TestRefreshResetsTheClassifierWhenTheServerRestarts(t *testing.T) {
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	screens := map[string]string{"%1": "old server, mid-run"}
+	captures := 0
+	connected := true
+	generation := "100"
+	p := agentPoller(&rows, screens, &captures, &connected)
+	p.startFn = func(context.Context) (string, error) { return generation, nil }
+	ctx := context.Background()
+
+	// A real change, so the old server's entry has everChanged set: that is the
+	// thing that must not cross the restart.
+	p.refresh(ctx)
+	screens["%1"] = "old server, still going"
+	p.refresh(ctx)
+
+	// The server restarts. %1 is now a different pane on a different server.
+	generation = "200"
+	screens["%1"] = "new server, a fresh agent"
+	p.refresh(ctx)
+	p.refresh(ctx)
+	p.refresh(ctx)
+	if got := stateOf(t, p, "%1"); got.AgentState != StateIdle || got.FinishedAt != 0 {
+		t.Errorf("the first pane on a new tmux server = %+v, want idle with NO "+
+			"finish edge: it inherited the dead server's %%1", got)
+	}
+
+	// The reset is keyed on the generation CHANGING, not on having read one. A
+	// reset that fired every poll -- or on every successful read -- would make
+	// every poll a first sight, so no pane could ever earn an edge again and
+	// the done badge would be dead. Same server, a real run, a real edge.
+	screens["%1"] = "new server, working"
+	p.refresh(ctx)
+	p.refresh(ctx)
+	p.refresh(ctx)
+	if got := stateOf(t, p, "%1"); got.AgentState != StateIdle || got.FinishedAt == 0 {
+		t.Errorf("a genuine run on the same server = %+v, want idle WITH a finish "+
+			"edge: the reset must fire on a restart, not on every poll", got)
 	}
 }
 

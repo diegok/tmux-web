@@ -139,6 +139,16 @@ func (c *Client) RenameSession(ctx context.Context, sessionID, name string) erro
 	if err := ValidateSessionName(name); err != nil {
 		return fmt.Errorf("rename session %s: %w", sessionID, err)
 	}
+	// The same refusal KillSessionID makes, for the same reason and against a
+	// reachable row: Dedupe deliberately keeps an app-owned session in the
+	// snapshot when it is a group's only member, so the app's own session can
+	// be right there in the sidebar to right-click. Renaming it breaks the
+	// teardown in ptybridge, which tears its session down BY NAME and would
+	// then fall through to the destroy-unattached crash net -- which client.go
+	// calls a crash net precisely because it is not the normal path.
+	if err := c.refuseAppSession(ctx, sessionID, "rename"); err != nil {
+		return err
+	}
 	// "--" ends the flags, and here it is load-bearing in a way it is not for
 	// an option value: verified that `rename-session -t $0 -z` answers
 	// "command rename-session: unknown flag -z", because a new name sits in a
@@ -251,20 +261,36 @@ func (c *Client) KillSessionID(ctx context.Context, sessionID string) error {
 	if err := ValidateSessionID(sessionID); err != nil {
 		return fmt.Errorf("kill session: %w", err)
 	}
+	if err := c.refuseAppSession(ctx, sessionID, "kill"); err != nil {
+		return err
+	}
+	_, err := c.Run(ctx, "kill-session", "-t", sessionID)
+	return err
+}
+
+// refuseAppSession reports an error if this session carries AppOption.
+//
+// Shared by the two verbs that must not touch the daemon's own sessions, so
+// that they cannot drift apart: a refusal one verb has and the other does not
+// is exactly the gap this function was extracted to close.
+//
+// Identified by the option, never by the name. "_web-" is a convention the app
+// follows, not a namespace it owns -- a user session called "_web-notes" is the
+// owner's and stays operable, which is the bug session.go already warns about.
+func (c *Client) refuseAppSession(ctx context.Context, sessionID, verb string) error {
 	// -q so that an unset option is empty rather than "invalid option", and so
-	// that a stale id is empty rather than an error here -- the kill below then
-	// fails with tmux's own "can't find session", which is the message the
-	// toast wants.
+	// that a stale id is empty rather than an error here -- the operation that
+	// follows then fails with tmux's own "can't find session", which is the
+	// message the toast wants.
 	app, err := c.Run(ctx, "show", "-t", sessionID, "-qv", AppOption)
 	if err != nil {
 		return err
 	}
 	if app == "1" {
-		return fmt.Errorf("kill session %s: refusing to kill a %s session, it belongs to the app",
-			sessionID, AppOption)
+		return fmt.Errorf("%s session %s: refusing to %s a %s session, it belongs to the app",
+			verb, sessionID, verb, AppOption)
 	}
-	_, err = c.Run(ctx, "kill-session", "-t", sessionID)
-	return err
+	return nil
 }
 
 // KillWindow kills the window with this id, and every pane in it.

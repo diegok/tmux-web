@@ -62,6 +62,21 @@ func IsBlocked(agent, screen string) bool {
 	return d.isBlocked(screen)
 }
 
+// MaxQuestion bounds a question's text, and each of its choices, in runes.
+//
+// Nothing else bounds them. `capture-pane -J` rejoins a question wrapped across
+// rows, and the claude extractor joins a choice's continuation lines the same
+// way, so one line of a wide pane is one long string -- and unlike a title,
+// which tmux at least normalises, this rides every 1.5s poll into the sidebar
+// and the tooltip. That is what MaxTitle exists for; this is the same hazard
+// through the other field.
+//
+// Runes rather than bytes, and for the same reason as MaxLabel: the cap is a
+// column budget for a row, and a byte cap would cut a readable question in half
+// in any language that is not English. The number matches MaxTitle because it
+// is the same row.
+const MaxQuestion = 256
+
 // Question is the request a blocked agent is waiting on.
 //
 // It is present only when AgentState is blocked, and omitted entirely when
@@ -88,7 +103,35 @@ func ExtractQuestion(agent, screen string) *Question {
 	if !ok {
 		return nil
 	}
-	return d.extractQuestion(screen)
+	q := d.extractQuestion(screen)
+	if q == nil {
+		return nil
+	}
+	// Capped here rather than in each grammar, so that an agent added to the
+	// table later cannot forget to do it: the rules table is meant to be edited
+	// as data, and a length cap is not part of reading a dialog.
+	q.Text = truncateRunes(q.Text, MaxQuestion)
+	for i := range q.Choices {
+		q.Choices[i] = truncateRunes(q.Choices[i], MaxQuestion)
+	}
+	return q
+}
+
+// truncateRunes cuts s to at most maxRunes runes.
+//
+// Ranging over the string rather than []rune(s): the index a range yields is a
+// byte offset at a rune boundary, so this slices without allocating a rune
+// slice the length of the screen, and cannot leave a half-rune on the wire the
+// way s[:n] can.
+func truncateRunes(s string, maxRunes int) string {
+	n := 0
+	for i := range s {
+		if n == maxRunes {
+			return s[:i]
+		}
+		n++
+	}
+	return s
 }
 
 // --- Claude Code ------------------------------------------------------------

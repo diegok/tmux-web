@@ -608,7 +608,32 @@ sidebar is better than it was.
 
 **Files:** `internal/tmux/target.go`, `internal/tmux/target_test.go`
 
-Validators for `%N`, `@N`, `$N`, and a session *name* (for create only). Session names reject a leading `-`, and `:` or `.`, which tmux uses as target separators.
+Validators for `%N`, `@N`, `$N`, and **names**.
+
+**Names are not "for create only"** — an earlier draft said so and it is wrong.
+`RenameSession`, `RenameWindow` and `NewWindow` all take a *new* name from the
+browser, so a name is an input on four verbs, not one. Window names carry the
+identical hazards (verified: tmux accepts `-n ''`, `-n 'w.y'` and `-n '-z'`), so
+either `ValidateSessionName` is reused for both or a sibling is added — decide
+and say which.
+
+Rejections, each verified against tmux 3.7b rather than assumed:
+
+- **Empty.** `new-session -s ''` **exits 0** and creates a session whose name is
+  the empty string; `kill-session -t '='` then answers `no mouse target`. An
+  invisible session that cannot be addressed by name. This is the most dangerous
+  input in the task.
+- **`:` and `.`** are target separators split off *before* exact matching, so
+  `kill-session -t '=a:b'` answers `can't find session: a`.
+- **A leading `-`** is read as a flag in the positional slot
+  (`rename-session -t =base -x` → `unknown flag -x`). Note `new-session -s -x`
+  *succeeds*, because getopt eats it as the flag's value — so tmux will create a
+  name it can never rename.
+- **Control characters, including C1.** tmux rejects C0 and DEL by a
+  byte-oriented check but **accepts U+009F**, which would then ride the poll into
+  the DOM. `unicode.IsControl` is load-bearing here, not decoration.
+- **Invalid UTF-8**, because `encoding/json` silently rewrites it to U+FFFD and
+  the sidebar would show a name tmux does not hold.
 
 Table-test every rejection with a comment naming what it prevents.
 
@@ -635,6 +660,10 @@ teardown path and name the new one `KillSessionID`.
 (`POST /api/sessions {name, path?}`), typed by the owner in the dialog, and
 stats it first for the same reason splits do.
 
+**Names come from the browser on four verbs**, not one: `NewSession`,
+`NewWindow`, `RenameSession`, `RenameWindow`. Every one validates before the
+name reaches a command line, using Task 7's validator.
+
 Requirements each needing its own test against real tmux:
 
 - **`SetLabel` rejects control bytes and caps length.** A label with a `0x1f` or a newline makes the pane vanish from the snapshot; tmux does not sanitise option values.
@@ -650,6 +679,12 @@ Requirements each needing its own test against real tmux:
 **Files:** `internal/front/manage.go`, `internal/front/manage_test.go`
 
 The routes from the design, all `cfg.Auth.Protect(...)`. Every `DELETE` requires `{"confirm": true}` in the body and returns 400 without it.
+
+**Delete the third copy of the pane-id rule.** `wsIsPaneID` in
+`internal/front/ws.go` is byte-for-byte the same check that Task 7 replaced in
+`internal/tmux/client.go`. `front` already imports `tmux`, so it becomes
+`tmux.ValidatePaneID`. Three copies of a validation rule is how one of them
+drifts.
 
 **Pane and session ids must be percent-encoded in the path.** `%3` is an invalid
 percent-escape, so `DELETE /api/panes/%3` is rejected by the mux before routing.

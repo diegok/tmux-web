@@ -22,6 +22,14 @@
  *   - Resize is debounced. tmux sizes a window to its most recently active
  *     client, so an undebounced drag would repeatedly yank the dimensions of
  *     the terminal the user is sitting in front of locally.
+ *   - Reconnecting stops when the base session is *gone* rather than merely
+ *     unreachable. v2 lets the owner kill the session their own tab is attached
+ *     to -- killing a base session's last window destroys the whole group, the
+ *     app's `@wterm_web` member included -- and against a session that no
+ *     longer exists the backoff would retry until the tab was closed. The
+ *     distinction cannot be read off the socket (see `probeSession`), so it is
+ *     asked of `/api/snapshot`, and only a fresh snapshot that has lost the
+ *     session stops the loop.
  *
  * The socket-driving half is `TerminalSession`, a plain class with no React in
  * it. That is deliberate: it is the part with ordering, timers and a state
@@ -50,6 +58,8 @@ import type { Ref } from 'react'
 import { installLinkOpener } from '@/lib/links'
 import { Transport } from '@/lib/transport'
 import type { TransportClose } from '@/lib/transport'
+import { fetchSnapshot } from '@/lib/useSnapshot'
+import type { FetchLike, SnapshotRow } from '@/lib/useSnapshot'
 
 // The terminal's own stylesheet: without it wterm renders as unstyled rows.
 // The package exposes it only through the extensionless "./css" export
@@ -113,9 +123,92 @@ export function backoffDelay(attempt: number, random: () => number = Math.random
  * that stops the loop. Everything else -- 1006 from a vanished peer, 1001 from
  * a daemon restart, 1005 from a socket that never opened -- is a fault, and a
  * fault is exactly what tmux's persistence exists to survive.
+ *
+ * This answers only "was this close deliberate?". Whether the session behind
+ * the socket still exists is a different question that no close code carries --
+ * see `probeSession` -- and the answer to it can stop the loop this one starts.
  */
 export function shouldReconnect(close: TransportClose): boolean {
   return close.code !== 1000
+}
+
+/**
+ * How long a presence probe may take before it is abandoned as unknown.
+ *
+ * Shorter than the snapshot poll's own timeout on purpose. A probe races the
+ * backoff it is trying to interrupt, and one still outstanding after several
+ * retries has already lost that race -- it would only pile a second and third
+ * request onto a daemon that is evidently not answering. Five seconds is far
+ * past a local daemon serving a cached snapshot out of memory.
+ */
+export const SESSION_PROBE_TIMEOUT_MS = 5000
+
+/**
+ * What a probe found out about the base session.
+ *
+ * "unknown" is not a failure to be retried here: it is the answer whenever the
+ * daemon could not be reached or could not reach tmux, and in that case the
+ * reconnect loop is already doing the right thing. Only "gone" changes
+ * anything, which is what keeps a network fault from being mistaken for a kill.
+ */
+export type SessionPresence = 'present' | 'gone' | 'unknown'
+
+/**
+ * Whether the snapshot still contains the session the socket targets.
+ *
+ * Matched on `sessionName`, not `groupKey`, because that is the exact question
+ * the daemon asks: `ServeHTTP` in `internal/front/ws.go` runs
+ * `has-session -t =<session>` before it upgrades, and that matches a session's
+ * *live name*. `groupKey` is `session_group`, which tmux freezes at the group's
+ * pre-rename name and keeps long after the namesake session has died -- so a
+ * group can still be full of panes (the app's own throwaway members, or a
+ * renamed survivor) while `?session=<key>` 404s. Matching on the group key
+ * would call that session present and leave the tab retrying forever, which is
+ * the whole bug this is here to fix.
+ */
+export function snapshotHasSession(panes: readonly SnapshotRow[], session: string): boolean {
+  return panes.some((pane) => pane.sessionName === session)
+}
+
+/**
+ * Ask `/api/snapshot` whether the base session still exists.
+ *
+ * This is a *probe*, not a socket close code, because the browser cannot see
+ * the one the daemon would want to send. `ws.go` refuses a missing session
+ * before the upgrade, with `404 no such session` -- and a WebSocket handshake
+ * that fails on an HTTP status is reported to script as `close` code 1006 with
+ * an empty reason, identical to a refused TCP connection or a dropped network.
+ * The status is not exposed by the WebSocket API at all. A distinct close code
+ * is therefore not available for the case that matters (the daemon never opens
+ * a socket it would send one on), so the only way for this tab to tell "killed"
+ * from "unreachable" is to ask a second question over a channel that can
+ * answer: the snapshot the sidebar is already polling.
+ *
+ * Every failure answers "unknown". A refused fetch, a 401 from an expired
+ * device cookie, a body that is not a snapshot -- none of them is evidence that
+ * a tmux session died, and treating them as such would stop reconnecting after
+ * an ordinary blip, which is the worse of the two failures by far.
+ *
+ * A *stale* snapshot answers "unknown" as well. Stale means the daemon's own
+ * poll of tmux failed and it is serving the last good rows; those rows cannot
+ * condemn a session, because the reason they are stale may be the same reason
+ * the socket dropped. Only a fresh snapshot gets to say "gone".
+ */
+export async function probeSession(
+  session: string,
+  fetchImpl?: FetchLike,
+): Promise<SessionPresence> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), SESSION_PROBE_TIMEOUT_MS)
+  try {
+    const snapshot = await fetchSnapshot(controller.signal, fetchImpl)
+    if (snapshot.stale) return 'unknown'
+    return snapshotHasSession(snapshot.panes, session) ? 'present' : 'gone'
+  } catch {
+    return 'unknown'
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 /**
@@ -158,6 +251,11 @@ export type TerminalPhase =
   | 'reconnecting'
   /** tmux ended the session. Nothing will be retried automatically. */
   | 'ended'
+  /**
+   * The base session no longer exists, so no retry can ever succeed. Terminal,
+   * until the user picks another session or asks for this name again.
+   */
+  | 'gone'
   /** `stop()` was called: the component unmounted or the session changed. */
   | 'closed'
 
@@ -187,6 +285,12 @@ export interface PaneStorage {
 export interface TerminalSessionOptions {
   /** WebSocket url, including `?session=`. */
   url: string
+  /**
+   * Base tmux session name this socket targets. Carried separately from `url`
+   * because it is what the presence probe asks about, and because `url` is
+   * overridable for stories and tests.
+   */
+  session: string
   /** `sessionStorage` key holding the remembered pane id. */
   paneKey: string
   /** Sink for PTY bytes. */
@@ -197,6 +301,11 @@ export interface TerminalSessionOptions {
   storage?: PaneStorage | null
   /** Injectable for tests. */
   random?: () => number
+  /**
+   * Answers whether the base session still exists, after a socket dropped.
+   * Defaults to a `/api/snapshot` probe; injectable for tests.
+   */
+  probe?: () => Promise<SessionPresence>
 }
 
 function defaultStorage(): PaneStorage | null {
@@ -246,10 +355,22 @@ export class TerminalSession {
   #retryTimer: ReturnType<typeof setTimeout> | null = null
   #stopped = false
 
+  readonly #probe: () => Promise<SessionPresence>
+  /** One probe at a time: a flapping socket must not fan out into requests. */
+  #probing = false
+  /**
+   * Bumped on every successful open. A probe carries the value it was fired
+   * under and is discarded if it changed, because an opened socket is proof
+   * the session exists -- the daemon runs `has-session` before it upgrades --
+   * and a snapshot that raced the kill would otherwise strand a live terminal.
+   */
+  #openEpoch = 0
+
   constructor(opts: TerminalSessionOptions) {
     this.#opts = opts
     this.#storage = opts.storage === undefined ? defaultStorage() : opts.storage
     this.#random = opts.random ?? Math.random
+    this.#probe = opts.probe ?? (() => probeSession(opts.session))
     this.#pane = this.#readPane()
   }
 
@@ -346,9 +467,11 @@ export class TerminalSession {
   }
 
   /**
-   * Reconnect now instead of waiting out the backoff, and from "ended" as well:
-   * there the user is explicitly asking for a new session, which is what a new
-   * socket is.
+   * Reconnect now instead of waiting out the backoff, and from "ended" or
+   * "gone" as well: there the user is explicitly asking for a new session,
+   * which is what a new socket is. A session name can be reused, so "gone" has
+   * to be an escapable state -- it says this tab stopped trying, not that
+   * trying is forbidden.
    */
   retryNow(): void {
     if (this.#stopped || this.#transport) return
@@ -381,6 +504,7 @@ export class TerminalSession {
     this.#attempt = 0
     this.#retryDelayMs = 0
     this.#inputDropped = false
+    this.#openEpoch++
 
     // The server attaches at 80x24 until told otherwise, so a reconnect that
     // skipped this would redraw the pane at the wrong size.
@@ -408,6 +532,11 @@ export class TerminalSession {
       this.#phase = 'ended'
       this.#retryDelayMs = 0
       this.#emit()
+      // "session ended" is what a kill looks like from inside an attached tab
+      // as well as what `exit` looks like, and the two want different words and
+      // a different button. Asking costs one request against a session that
+      // just died either way.
+      this.#checkGone()
       return
     }
 
@@ -419,6 +548,56 @@ export class TerminalSession {
       this.#retryTimer = null
       if (!this.#stopped) this.#connect()
     }, delay)
+    this.#emit()
+
+    // Fired *beside* the backoff rather than in front of it, deliberately. The
+    // retry is scheduled first and runs on time, so a dropped network
+    // reconnects exactly as fast as it did before this existed; the probe only
+    // ever cancels a retry that was going to fail. Waiting for an answer before
+    // scheduling would put a request that may never settle in the path of every
+    // ordinary blip.
+    this.#checkGone()
+  }
+
+  /**
+   * Ask whether the base session still exists, and stop for good if it does
+   * not.
+   *
+   * Nothing here retries the probe. It is fired again by the next close, and
+   * between now and then the backoff is doing its job, so a probe that could
+   * not get an answer costs a few more seconds of retrying rather than a
+   * permanently wrong state.
+   */
+  #checkGone(): void {
+    if (this.#stopped || this.#probing) return
+    this.#probing = true
+    const epoch = this.#openEpoch
+    void this.#probe()
+      // A probe that throws is not evidence of anything; `probeSession` already
+      // answers "unknown" rather than rejecting, and this covers an injected one.
+      .catch(() => 'unknown' as SessionPresence)
+      .then((presence) => {
+        this.#probing = false
+        if (this.#stopped || presence !== 'gone') return
+        if (epoch !== this.#openEpoch) return
+        this.#markGone()
+      })
+  }
+
+  /**
+   * The session is gone: stop, and say so. The design's answer for "my group is
+   * gone" is to report it and offer the session list, not to keep retrying
+   * against something that cannot come back on its own.
+   */
+  #markGone(): void {
+    this.#clearTimers()
+    // A retry may already have opened a socket that is still connecting. It is
+    // aimed at a session the daemon will refuse; closing it here means the
+    // refusal does not arrive as a fresh close and start the loop again.
+    this.#transport?.close(1000, 'session gone')
+    this.#transport = null
+    this.#phase = 'gone'
+    this.#retryDelayMs = 0
     this.#emit()
   }
 
@@ -533,6 +712,7 @@ export function Terminal({ session, url, className, onStatusChange, ref }: Termi
   useEffect(() => {
     const term = new TerminalSession({
       url: socketUrl,
+      session,
       paneKey: paneStorageKey(session),
       onData: write,
       onStatus: (next) => {
@@ -602,6 +782,7 @@ export function Terminal({ session, url, className, onStatusChange, ref }: Termi
       />
       <ConnectionPill
         status={status}
+        session={session}
         onRetry={() => sessionRef.current?.retryNow()}
       />
     </div>
@@ -618,12 +799,18 @@ export function Terminal({ session, url, className, onStatusChange, ref }: Termi
  * indistinguishable from an agent that hung. So the pill states the phase, the
  * dimmed terminal makes "not live" visible without reading it, and typing into
  * a dead socket escalates the wording rather than opening anything.
+ *
+ * Exported only so its copy can be rendered and asserted. What this says is the
+ * whole of what the user is told when a session they killed cannot come back,
+ * and it is not reachable from `TerminalSession`'s tests.
  */
-function ConnectionPill({
+export function ConnectionPill({
   status,
+  session,
   onRetry,
 }: {
   status: TerminalStatus
+  session: string
   onRetry: () => void
 }) {
   const { phase, attempt, inputDropped } = status
@@ -645,6 +832,14 @@ function ConnectionPill({
       text = 'Session ended'
       action = 'New session'
       break
+    case 'gone':
+      // Names the session, because the sidebar is right there and the next
+      // thing to do is pick a different one from it. "Try again" stays because
+      // a tmux session name can be reused: if the owner recreates it, one
+      // click is the whole recovery.
+      text = `Session "${session}" is gone — pick another in the sidebar`
+      action = 'Try again'
+      break
     default:
       text = 'Connection is failing — some keystrokes were dropped'
       break
@@ -657,7 +852,7 @@ function ConnectionPill({
       className="bg-background/90 text-foreground absolute top-2 right-2 z-10 flex items-center gap-2 rounded-md border px-3 py-1.5 text-xs shadow-sm backdrop-blur"
     >
       <span
-        className={`size-2 rounded-full ${phase === 'ended' ? 'bg-muted-foreground' : 'bg-destructive animate-pulse'}`}
+        className={`size-2 rounded-full ${phase === 'ended' || phase === 'gone' ? 'bg-muted-foreground' : 'bg-destructive animate-pulse'}`}
         aria-hidden
       />
       <span>{text}</span>

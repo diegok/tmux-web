@@ -1,19 +1,26 @@
+import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { FRAME_CONTROL, FRAME_DATA } from '@/lib/transport'
+import { SNAPSHOT_URL } from '@/lib/useSnapshot'
+import type { SnapshotRow } from '@/lib/useSnapshot'
 
 import {
   BACKOFF_BASE_MS,
   BACKOFF_MAX_MS,
+  ConnectionPill,
   RESIZE_DEBOUNCE_MS,
+  SESSION_PROBE_TIMEOUT_MS,
   TerminalSession,
   backoffDelay,
   isPaneId,
   paneStorageKey,
+  probeSession,
   shouldReconnect,
+  snapshotHasSession,
   terminalUrl,
 } from './Terminal'
-import type { PaneStorage, TerminalStatus } from './Terminal'
+import type { PaneStorage, SessionPresence, TerminalStatus } from './Terminal'
 
 // What is tested here is TerminalSession: the socket lifecycle, the ordering
 // rule that a keystroke can never overtake the select that positions the new
@@ -115,12 +122,74 @@ function memoryStorage(seed: Record<string, string> = {}): PaneStorage & { map: 
   }
 }
 
-function makeSession(opts: { storage?: PaneStorage | null; onStatus?: (s: TerminalStatus) => void } = {}) {
+/**
+ * Drain the microtask queue.
+ *
+ * The probe's result reaches the session through `.catch().then()`, which is
+ * two hops past the resolve; a handful of turns is plenty and, unlike a timer,
+ * is unaffected by `vi.useFakeTimers`.
+ */
+async function flush() {
+  for (let i = 0; i < 5; i++) await Promise.resolve()
+}
+
+/**
+ * A presence probe whose answers the test controls.
+ *
+ * Deliberately never auto-resolving: every existing test in this file runs with
+ * an unanswered probe, which is exactly the "the daemon has not said anything
+ * yet" case, and proves the reconnect behaviour they pin does not depend on one.
+ */
+function makeProbe() {
+  interface Deferred {
+    resolve: (p: SessionPresence) => void
+    reject: (e: Error) => void
+  }
+  const pending: Deferred[] = []
+  let calls = 0
+  const take = (): Deferred => {
+    const next = pending.shift()
+    if (!next) throw new Error('no probe is outstanding')
+    return next
+  }
+  return {
+    probe: () => {
+      calls++
+      return new Promise<SessionPresence>((resolve, reject) => pending.push({ resolve, reject }))
+    },
+    get calls() {
+      return calls
+    },
+    get outstanding() {
+      return pending.length
+    },
+    /** Answer the oldest outstanding probe and let the session react. */
+    async answer(presence: SessionPresence) {
+      take().resolve(presence)
+      await flush()
+    },
+    /** Reject it instead, as an injected probe with a bug would. */
+    async fail() {
+      take().reject(new Error('boom'))
+      await flush()
+    },
+  }
+}
+
+function makeSession(
+  opts: {
+    storage?: PaneStorage | null
+    onStatus?: (s: TerminalStatus) => void
+    probe?: () => Promise<SessionPresence>
+  } = {},
+) {
   const statuses: TerminalStatus[] = []
   const received: Uint8Array[] = []
   const storage = opts.storage === undefined ? memoryStorage() : opts.storage
+  const probe = makeProbe()
   const term = new TerminalSession({
     url: 'ws://localhost/ws?session=work',
+    session: 'work',
     paneKey: paneStorageKey('work'),
     onData: (bytes) => void received.push(bytes),
     onStatus: (s) => {
@@ -130,8 +199,42 @@ function makeSession(opts: { storage?: PaneStorage | null; onStatus?: (s: Termin
     storage,
     // Neutral jitter, so delays are exactly the exponential schedule.
     random: () => 0.5,
+    probe: opts.probe ?? probe.probe,
   })
-  return { term, statuses, received, storage }
+  return { term, statuses, received, storage, probe }
+}
+
+/** A snapshot row, with only the fields this file cares about spelled out. */
+function row(over: Partial<SnapshotRow> & Pick<SnapshotRow, 'sessionName'>): SnapshotRow {
+  return {
+    // Defaults to the session name, as tmux does for an ungrouped session.
+    groupKey: over.sessionName,
+    sessionId: '$1',
+    paneId: '%1',
+    paneIndex: 0,
+    appOwned: false,
+    label: '',
+    windowIndex: 0,
+    windowName: 'w',
+    paneActive: true,
+    command: 'zsh',
+    title: 't',
+    ...over,
+  }
+}
+
+/** A `fetch` that answers `/api/snapshot` with this body. */
+function snapshotFetch(body: unknown, status = 200) {
+  const calls: string[] = []
+  const fetchImpl = (url: string) => {
+    calls.push(url)
+    return Promise.resolve({
+      ok: status >= 200 && status < 300,
+      status,
+      json: () => Promise.resolve(body),
+    } as Response)
+  }
+  return { fetchImpl, calls }
 }
 
 beforeEach(() => {
@@ -568,6 +671,336 @@ describe('reconnect', () => {
     first.readyState = 1
     first.receive(new Uint8Array([FRAME_DATA, 0x78]))
     expect(received).toEqual([])
+  })
+})
+
+describe('session presence probe', () => {
+  it('matches the live session name, never the frozen group key', () => {
+    // tmux keeps session_group at the group's *pre-rename* name forever, so a
+    // group whose namesake died still carries rows keyed "work" -- the app's
+    // own `_web-` members. `has-session -t =work` fails against exactly that,
+    // so reading the group key here would report a dead session as present and
+    // leave the tab retrying against a 404 for good.
+    const rows = [row({ sessionName: '_web-abcd', groupKey: 'work', appOwned: true })]
+    expect(snapshotHasSession(rows, 'work')).toBe(false)
+    expect(snapshotHasSession(rows, '_web-abcd')).toBe(true)
+  })
+
+  it('finds the session among other groups', () => {
+    const rows = [row({ sessionName: '0' }), row({ sessionName: 'work' })]
+    expect(snapshotHasSession(rows, 'work')).toBe(true)
+    expect(snapshotHasSession(rows, 'wor')).toBe(false) // no prefix matching, as `=` pins
+    expect(snapshotHasSession([], 'work')).toBe(false)
+  })
+
+  it('reads a fresh snapshot as present or gone', async () => {
+    const present = snapshotFetch({ panes: [row({ sessionName: 'work' })], stale: false })
+    await expect(probeSession('work', present.fetchImpl)).resolves.toBe('present')
+    expect(present.calls).toEqual([SNAPSHOT_URL])
+
+    const gone = snapshotFetch({ panes: [row({ sessionName: '0' })], stale: false })
+    await expect(probeSession('work', gone.fetchImpl)).resolves.toBe('gone')
+  })
+
+  it('refuses to condemn a session on a stale snapshot', async () => {
+    // Stale means the daemon's own poll of tmux failed and it is serving the
+    // last good rows -- possibly for the same reason the socket dropped.
+    const { fetchImpl } = snapshotFetch({ panes: [row({ sessionName: '0' })], stale: true })
+    await expect(probeSession('work', fetchImpl)).resolves.toBe('unknown')
+  })
+
+  it('answers unknown for every way of not knowing', async () => {
+    const rejecting = () => Promise.reject(new Error('network down'))
+    await expect(probeSession('work', rejecting)).resolves.toBe('unknown')
+
+    // 401: the device cookie expired. Not a dead tmux session.
+    const unauthorized = snapshotFetch({}, 401)
+    await expect(probeSession('work', unauthorized.fetchImpl)).resolves.toBe('unknown')
+
+    const nonsense = snapshotFetch({ panes: 'not-a-list' })
+    await expect(probeSession('work', nonsense.fetchImpl)).resolves.toBe('unknown')
+
+    const throwing = () => {
+      throw new Error('sync throw')
+    }
+    await expect(probeSession('work', throwing)).resolves.toBe('unknown')
+  })
+
+  it('abandons a request that never settles', async () => {
+    let aborted = false
+    const hanging = (_url: string, init: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => {
+          aborted = true
+          reject(new Error('AbortError'))
+        })
+      })
+
+    const result = probeSession('work', hanging)
+    vi.advanceTimersByTime(SESSION_PROBE_TIMEOUT_MS)
+    await expect(result).resolves.toBe('unknown')
+    expect(aborted).toBe(true)
+  })
+})
+
+describe('the session is gone', () => {
+  it('stops retrying, cancelling the retry that was already scheduled', async () => {
+    const { term, statuses, probe } = makeSession()
+    term.start()
+    MockWebSocket.last.open()
+    MockWebSocket.last.emitClose(1006)
+    expect(term.status.phase).toBe('reconnecting')
+
+    await probe.answer('gone')
+    expect(term.status.phase).toBe('gone')
+    expect(term.status.retryDelayMs).toBe(0)
+    // Announced, not merely readable: the pill and the sidebar only ever learn
+    // about this through onStatus, so a transition that does not emit is a
+    // terminal that dims and says nothing.
+    expect(statuses.at(-1)?.phase).toBe('gone')
+
+    vi.advanceTimersByTime(60_000)
+    expect(MockWebSocket.instances).toHaveLength(1)
+  })
+
+  it('keeps retrying after an ordinary drop', async () => {
+    // The worse of the two failures: a tab that stops reconnecting after a wifi
+    // handover looks exactly like a dead agent and needs a reload to recover.
+    const { term, probe } = makeSession()
+    term.start()
+    MockWebSocket.last.open()
+    MockWebSocket.last.emitClose(1006)
+
+    await probe.answer('present')
+    expect(term.status.phase).toBe('reconnecting')
+    vi.advanceTimersByTime(BACKOFF_BASE_MS)
+    expect(MockWebSocket.instances).toHaveLength(2)
+  })
+
+  it('keeps retrying when the probe could not find out', async () => {
+    const { term, probe } = makeSession()
+    term.start()
+    MockWebSocket.last.emitClose(1006)
+
+    await probe.answer('unknown')
+    expect(term.status.phase).toBe('reconnecting')
+    vi.advanceTimersByTime(BACKOFF_BASE_MS)
+    expect(MockWebSocket.instances).toHaveLength(2)
+  })
+
+  it('keeps retrying when the probe itself throws', async () => {
+    const { term, probe } = makeSession()
+    term.start()
+    MockWebSocket.last.emitClose(1006)
+
+    await probe.fail()
+    expect(term.status.phase).toBe('reconnecting')
+    vi.advanceTimersByTime(BACKOFF_BASE_MS)
+    expect(MockWebSocket.instances).toHaveLength(2)
+  })
+
+  it('does not wait for the probe before reconnecting', async () => {
+    // The probe runs beside the backoff, not in front of it, so a blip
+    // reconnects on exactly the schedule it did before any of this existed.
+    const { term } = makeSession()
+    term.start()
+    MockWebSocket.last.emitClose(1006)
+    vi.advanceTimersByTime(BACKOFF_BASE_MS)
+    expect(MockWebSocket.instances).toHaveLength(2)
+    expect(term.status.phase).toBe('reconnecting')
+  })
+
+  it('closes a socket the backoff already opened', async () => {
+    const { term, probe } = makeSession()
+    term.start()
+    MockWebSocket.last.emitClose(1006)
+    vi.advanceTimersByTime(BACKOFF_BASE_MS)
+    const second = MockWebSocket.last
+    expect(MockWebSocket.instances).toHaveLength(2)
+
+    // The answer lands while the second socket is still handshaking. Left open
+    // it would be refused by the daemon, and that refusal would arrive as a
+    // fresh close and start the loop over.
+    await probe.answer('gone')
+    expect(term.status.phase).toBe('gone')
+    expect(second.closedWith).toEqual({ code: 1000, reason: 'session gone' })
+    vi.advanceTimersByTime(60_000)
+    expect(MockWebSocket.instances).toHaveLength(2)
+  })
+
+  it('discards an answer that lost the race to a socket opening', async () => {
+    // An open is proof: the daemon runs `has-session` before it upgrades. A
+    // snapshot taken before the session came back must not strand a live tab.
+    const { term, probe } = makeSession()
+    term.start()
+    MockWebSocket.last.emitClose(1006)
+    vi.advanceTimersByTime(BACKOFF_BASE_MS)
+    MockWebSocket.last.open()
+    expect(term.status.phase).toBe('ready')
+
+    await probe.answer('gone')
+    expect(term.status.phase).toBe('ready')
+    expect(term.write('x')).toBe(true)
+  })
+
+  it('upgrades a clean "session ended" close to gone', async () => {
+    // Killing the base session's last window destroys the whole group, so the
+    // tab sees the same 1000 it sees when the user typed `exit`. Only the probe
+    // tells those apart, and they deserve different words and a different button.
+    const { term, probe } = makeSession()
+    term.start()
+    MockWebSocket.last.open()
+    MockWebSocket.last.emitClose(1000, 'session ended', true)
+    expect(term.status.phase).toBe('ended')
+
+    await probe.answer('gone')
+    expect(term.status.phase).toBe('gone')
+  })
+
+  it('leaves a plain exit as ended', async () => {
+    const { term, probe } = makeSession()
+    term.start()
+    MockWebSocket.last.open()
+    MockWebSocket.last.emitClose(1000, 'session ended', true)
+
+    await probe.answer('present')
+    expect(term.status.phase).toBe('ended')
+  })
+
+  it('refuses input while gone', async () => {
+    const { term, probe } = makeSession()
+    term.start()
+    MockWebSocket.last.open()
+    MockWebSocket.last.emitClose(1006)
+    await probe.answer('gone')
+
+    expect(term.write('x')).toBe(false)
+    expect(term.status.inputDropped).toBe(true)
+  })
+
+  it('reconnects from gone when the user asks, and can go gone again', async () => {
+    // A tmux session name can be reused, so this state has to be escapable --
+    // and having escaped it, the tab has to be able to re-enter it.
+    const { term, probe } = makeSession()
+    term.start()
+    MockWebSocket.last.emitClose(1006)
+    await probe.answer('gone')
+    expect(term.status.phase).toBe('gone')
+
+    term.retryNow()
+    expect(MockWebSocket.instances).toHaveLength(2)
+    expect(term.status.phase).toBe('connecting')
+    MockWebSocket.last.open()
+    expect(term.status.phase).toBe('ready')
+
+    MockWebSocket.last.emitClose(1006)
+    expect(probe.calls).toBe(2)
+    await probe.answer('gone')
+    expect(term.status.phase).toBe('gone')
+  })
+
+  it('keeps only one probe in flight while a socket flaps', async () => {
+    const { term, probe } = makeSession()
+    term.start()
+    MockWebSocket.last.emitClose(1006)
+    vi.advanceTimersByTime(BACKOFF_BASE_MS)
+    MockWebSocket.last.emitClose(1006)
+    vi.advanceTimersByTime(BACKOFF_BASE_MS * 2)
+    MockWebSocket.last.emitClose(1006)
+
+    expect(probe.calls).toBe(1)
+    expect(probe.outstanding).toBe(1)
+    await probe.answer('unknown')
+
+    // ...and the next drop asks again, rather than never asking twice.
+    vi.advanceTimersByTime(60_000)
+    MockWebSocket.last.emitClose(1006)
+    expect(probe.calls).toBe(2)
+    await probe.answer('gone')
+    expect(term.status.phase).toBe('gone')
+  })
+
+  it('ignores an answer that arrives after stop', async () => {
+    const { term, probe } = makeSession()
+    term.start()
+    MockWebSocket.last.emitClose(1006)
+    term.stop()
+
+    await probe.answer('gone')
+    expect(term.status.phase).toBe('closed')
+  })
+
+  it('wires the default probe to /api/snapshot, asking about its own session', async () => {
+    // No `probe` option: this is the wiring the app actually ships, and the one
+    // place the session *name* has to reach the snapshot query. Both directions
+    // are asserted, because a probe that asked about the wrong name -- or about
+    // nothing at all -- would still answer "gone" for a snapshot that happens
+    // not to contain it, and would look correct from the failing side alone.
+    const dropAndProbe = async (panes: SnapshotRow[]) => {
+      const { fetchImpl, calls } = snapshotFetch({ panes, stale: false })
+      vi.stubGlobal('fetch', fetchImpl)
+      const term = new TerminalSession({
+        url: 'ws://localhost/ws?session=work',
+        session: 'work',
+        paneKey: paneStorageKey('work'),
+        onData: () => {},
+        onStatus: () => {},
+        storage: null,
+        random: () => 0.5,
+      })
+      term.start()
+      MockWebSocket.last.emitClose(1006)
+      await flush()
+      expect(calls).toEqual([SNAPSHOT_URL])
+      return term
+    }
+
+    const gone = await dropAndProbe([row({ sessionName: '0' })])
+    expect(gone.status.phase).toBe('gone')
+    gone.stop()
+
+    const alive = await dropAndProbe([row({ sessionName: '0' }), row({ sessionName: 'work' })])
+    expect(alive.status.phase).toBe('reconnecting')
+    alive.stop()
+  })
+})
+
+describe('the pill', () => {
+  const pill = (status: Partial<TerminalStatus>, session = 'work') =>
+    renderToStaticMarkup(
+      <ConnectionPill
+        status={{
+          phase: 'connecting',
+          attempt: 0,
+          retryDelayMs: 0,
+          pane: null,
+          inputDropped: false,
+          ...status,
+        }}
+        session={session}
+        onRetry={() => {}}
+      />,
+    )
+
+  it('names the session and points at the sidebar when it is gone', () => {
+    const html = pill({ phase: 'gone' }, 'work')
+    expect(html).toContain('Session &quot;work&quot; is gone')
+    expect(html).toContain('sidebar')
+    // Not "Reconnecting": the whole point is that this tab stopped.
+    expect(html).not.toContain('Reconnecting')
+    // Still a way back, because the name can be reused.
+    expect(html).toContain('Try again')
+  })
+
+  it('does not pulse a dot at a session that will not come back', () => {
+    expect(pill({ phase: 'gone' })).not.toContain('animate-pulse')
+    expect(pill({ phase: 'reconnecting', attempt: 2 })).toContain('animate-pulse')
+  })
+
+  it('still says the other phases', () => {
+    expect(pill({ phase: 'ended' })).toContain('Session ended')
+    expect(pill({ phase: 'reconnecting', attempt: 2 })).toContain('Reconnecting (2)')
+    expect(pill({ phase: 'ready' })).toBe('')
   })
 })
 

@@ -336,33 +336,39 @@ func TestClassifierWorkingAndIdle(t *testing.T) {
 func TestClassifierForgetsClosedPanes(t *testing.T) {
 	c := NewClassifier()
 	now := time.Unix(0, 0)
-	c.Observe("%1", "a", now)
-	c.Observe("%2", "b", now)
+
+	// Both panes get a REAL change first, so both have everChanged set. That is
+	// what makes kept and forgotten distinguishable: a retained pane settles
+	// with a finish edge, a forgotten one comes back as first sight and settles
+	// without. Asserting only that both report working -- or only Len() -- is
+	// vacuous, because a forgotten pane reports working too.
+	for _, id := range []string{"%1", "%2"} {
+		c.Observe(id, "a", now)
+		now = now.Add(1500 * time.Millisecond)
+		c.Observe(id, "b", now) // a real change: everChanged
+	}
 
 	c.Retain([]string{"%2"})
 
-	// Asserting only Len()==1 passes just as happily if the WRONG pane was
-	// kept. Assert which one survived, by behaviour.
+	// %2 was kept: its run continues and settling stamps an edge.
 	now = now.Add(1500 * time.Millisecond)
-	if st := c.Observe("%2", "b", now); st.State != StateWorking {
-		// %2 was retained, so this is its second identical capture: still=1,
-		// not yet settled.
-		t.Fatalf("retained pane %%2 = %q, want its run to have continued", st.State)
+	c.Observe("%2", "b", now)
+	now = now.Add(1500 * time.Millisecond)
+	if st := c.Observe("%2", "b", now); st.State != StateIdle || st.FinishedAt == 0 {
+		t.Fatalf("retained pane = %+v, want idle with a finish edge", st)
 	}
+
+	// %1 was dropped: it is first sight again, so settling stamps nothing.
 	now = now.Add(1500 * time.Millisecond)
-	if st := c.Observe("%1", "a", now); st.State != StateWorking {
-		t.Fatal("dropped pane %1 should be first-sight again")
-	}
-	// First sight cannot stamp a finish edge, which is how we know it was
-	// genuinely forgotten rather than resumed.
+	c.Observe("%1", "b", now)
 	now = now.Add(1500 * time.Millisecond)
-	c.Observe("%1", "a", now)
+	c.Observe("%1", "b", now)
 	now = now.Add(1500 * time.Millisecond)
-	if st := c.Observe("%1", "a", now); st.FinishedAt != 0 {
-		t.Fatal("a forgotten pane must come back as first sight, stamping no edge")
+	if st := c.Observe("%1", "b", now); st.FinishedAt != 0 {
+		t.Fatalf("forgotten pane = %+v, want no finish edge: it must come back "+
+			"as first sight, not resume its old run", st)
 	}
 }
-```
 
 **Step 2: Run, expect FAIL.**
 

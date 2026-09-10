@@ -114,98 +114,133 @@ git commit -m "feat: recognise which pane commands are coding agents"
 
 ---
 
-### Task 2: The title as a label
+### Task 2: Session identity, title and label in the snapshot
 
 **Files:**
 - Modify: `internal/tmux/snapshot.go` (`Format`, `fieldCount`, `Row`, `ParseRows`)
 - Modify: `internal/tmux/snapshot_test.go`
+- Modify: `internal/front/server.go` (`snapshotResponse`)
 
-Adds three fields to the snapshot: `SessionID`, `SessionName`, `Title`. All three come free in the existing `list-panes` call.
+Four new fields, all free in the existing `list-panes` call, plus the tmux server
+generation on the response envelope.
+
+**There is exactly one authoritative field list. It has 12 fields.** An earlier
+draft of this task printed two different lists and described a third in prose;
+if you find yourself reconciling versions, you are reading a stale copy.
+
+| # | format field | Row field |
+| --- | --- | --- |
+| 1 | `#{?#{session_group},#{session_group},#{session_name}}` | `GroupKey` |
+| 2 | `#{session_id}` | `SessionID` |
+| 3 | `#{session_name}` | `SessionName` |
+| 4 | `#{pane_id}` | `PaneID` |
+| 5 | `#{pane_index}` | `PaneIndex` |
+| 6 | `#{@wterm_web}` | `AppOwned` |
+| 7 | `#{@wterm_label}` | `Label` |
+| 8 | `#{window_index}` | `WindowIndex` |
+| 9 | `#{window_name}` | `WindowName` |
+| 10 | `#{pane_active}` | `PaneActive` |
+| 11 | `#{pane_current_command}` | `Command` |
+| 12 | `#{pane_title}` | `Title` |
+
+`fieldCount` is **12**. Field 1 stays the group key and field 3 is the live
+session name: they are separate fields *because they differ after a rename*, and
+that difference is the entire point of carrying session identity.
 
 **Step 1: Write the failing tests**
 
-Add to `TestParseRows`:
+`rec(...)` already exists in `snapshot_test.go:11` — use it, do not add a second
+join helper.
 
 ```go
-t.Run("carries session identity and title", func(t *testing.T) {
-	line := join("work", "$3", "%1", "0", "", "1", "api", "1", "claude", "✳ writing tests")
+t.Run("carries session identity, label and title", func(t *testing.T) {
+	// The group key and the live session name are DELIBERATELY different.
+	// tmux keeps the pre-rename name in session_group, so a fixture where they
+	// match would pass against an implementation that reads the group key --
+	// which is exactly the bug this field exists to fix.
+	line := rec("work3", "$3", "api", "%1", "0", "", "reviewer", "1", "win", "1", "claude", "✳ writing tests")
 	got, dropped, err := ParseRows(line)
 	if err != nil || dropped != 0 || len(got) != 1 {
 		t.Fatalf("got %+v dropped=%d err=%v", got, dropped, err)
 	}
 	r := got[0]
-	if r.SessionID != "$3" || r.SessionName != "work" || r.Title != "✳ writing tests" {
-		t.Fatalf("bad row: %+v", r)
+	if r.GroupKey != "work3" {
+		t.Errorf("GroupKey = %q, want the group name work3", r.GroupKey)
+	}
+	if r.SessionName != "api" {
+		t.Errorf("SessionName = %q, want the live name api: reading the group key "+
+			"here is the pre-rename bug this field exists to fix", r.SessionName)
+	}
+	if r.SessionID != "$3" || r.Label != "reviewer" || r.Title != "✳ writing tests" {
+		t.Errorf("bad row: %+v", r)
 	}
 })
 
-// tmux sanitises titles, but not length: an 8KB title was observed stored and
-// reported in full, and it would ride a 1.5s poll into the DOM.
-t.Run("a huge title is truncated", func(t *testing.T) {
-	huge := strings.Repeat("x", 5000)
-	line := join("work", "$0", "%1", "0", "", "1", "api", "1", "claude", huge)
+t.Run("a huge title is truncated on a rune boundary", func(t *testing.T) {
+	// Multi-byte runes straddling the cap: a byte slice would cut one in half
+	// and put invalid UTF-8 into the DOM.
+	huge := strings.Repeat("é", 4000)
+	line := rec("w", "$0", "w", "%1", "0", "", "", "1", "win", "1", "claude", huge)
 	got, _, _ := ParseRows(line)
 	if len(got[0].Title) > MaxTitle {
 		t.Fatalf("title kept %d bytes, want <= %d", len(got[0].Title), MaxTitle)
 	}
+	if !utf8.ValidString(got[0].Title) {
+		t.Fatal("truncation split a rune; the title is not valid UTF-8")
+	}
+})
+
+// tmux sanitises titles but NOT user option values, so a label is the one
+// new field that can carry a separator or a newline.
+t.Run("a label containing control bytes cannot remove a pane", func(t *testing.T) {
+	line := rec("w", "$0", "w", "%1", "0", "", "EV"+Sep+"IL", "1", "win", "1", "claude", "t")
+	got, dropped, _ := ParseRows(line)
+	if dropped == 0 {
+		t.Fatal("a malformed record must be counted")
+	}
+	if len(got) != 0 {
+		t.Fatalf("a malformed record must not produce a row: %+v", got)
+	}
+	// The point is that it is DROPPED AND COUNTED, never merged into a
+	// neighbour and never silently ignored.
 })
 ```
 
-Add a `join` helper next to the tests:
-
-```go
-// join builds a record in the wire order, so a field-order change breaks one
-// helper rather than every fixture.
-func join(fields ...string) string { return strings.Join(fields, Sep) }
-```
-
-**Step 2: Run, expect FAIL** (`undefined: MaxTitle`, unknown fields).
+**Step 2: Run, expect FAIL** (`undefined: MaxTitle`, unknown fields, wrong count).
 
 **Step 3: Implement**
 
-`fieldCount` becomes 10. `Format` gains three fields — **note the order, and that `session_id` and `session_name` come from the row's own session:**
-
-```go
-const Format = "#{?#{session_group},#{session_group},#{session_name}}" + Sep +
-	"#{session_id}" + Sep +
-	"#{pane_id}" + Sep +
-	"#{pane_index}" + Sep +
-	"#{@wterm_web}" + Sep +
-	"#{window_index}" + Sep +
-	"#{window_name}" + Sep +
-	"#{pane_active}" + Sep +
-	"#{pane_current_command}" + Sep +
-	"#{pane_title}"
-```
-
-`SessionName` is **not** a new format field: it is `#{session_name}`, which the existing first field already falls back to. Keep the group key as field 0 and add `session_name` as its own field so the two are independent — the group name and the live name differ after a rename, and that difference is the whole point.
-
-So `Format` is the above with `"#{session_name}"` inserted after `session_id`, and `fieldCount` is 11.
-
-`Row` gains:
+Set `fieldCount = 12`, write `Format` from the table above, add to `Row`:
 
 ```go
 SessionID   string `json:"sessionId"`   // $N; what management operations target
 SessionName string `json:"sessionName"` // live name, for display
+Label       string `json:"label"`       // @wterm_label; user-set, may be ""
 Title       string `json:"title"`       // tmux-sanitised, truncated
 ```
 
 ```go
 // MaxTitle bounds a pane title. tmux normalises control bytes out of titles but
-// does not cap length; an 8KB title was observed stored and reported in full.
+// does not cap length; an 8KB title was observed stored and reported in full,
+// and it would ride a 1.5s poll into the DOM.
 const MaxTitle = 256
 ```
 
-Truncate in `ParseRows` on a rune boundary, not a byte one, or a multi-byte character can be cut in half and reach the DOM as invalid UTF-8.
+Truncate on a rune boundary.
 
-**Step 4: Run the package tests, expect PASS. Commit.**
+**Step 4: The tmux server generation**
+
+`snapshotResponse` gains `ServerStart string \`json:"serverStart"\``, read once per
+poll with `display-message -p '#{start_time}'`. Task 10 keys its `seen` map with
+it: pane ids restart at `%0` when the tmux server restarts, so without it a stale
+`seen["%3"]` silently suppresses the badge on an unrelated new pane.
+
+**Step 5: Run the package tests, expect PASS. Commit.**
 
 ```bash
-git add internal/tmux
-git commit -m "feat: carry session identity and the pane title in the snapshot"
+git add internal/tmux internal/front/server.go
+git commit -m "feat: carry session identity, label and title in the snapshot"
 ```
-
----
 
 ### Task 3: Classifying a capture
 
@@ -222,8 +257,9 @@ func TestClassifierWorkingAndIdle(t *testing.T) {
 	c := NewClassifier()
 	now := time.Unix(0, 0)
 
-	// First sight of a pane cannot be a transition: the previous capture is
-	// unknown, not different. It settles to idle without ever claiming work.
+	// First sight reports working -- there is no previous capture to compare,
+	// and the design accepts a settle rather than guessing. What it must NOT do
+	// is stamp a finish edge when it later settles.
 	st := c.Observe("%1", "screen A", now)
 	if st.State != StateWorking {
 		t.Fatalf("first observation = %q, want working", st.State)
@@ -256,15 +292,58 @@ func TestClassifierWorkingAndIdle(t *testing.T) {
 	if st.State != StateIdle || st.FinishedAt == 0 {
 		t.Fatalf("observed work then stillness = %+v, want idle with a finish edge", st)
 	}
+	first := st.FinishedAt
+
+	// A SECOND run must stamp a NEW edge. Guarding the stamp with
+	// "finishedAt == 0" makes the done badge work exactly once per pane for
+	// the life of the daemon, and the earlier assertions cannot see it.
+	now = now.Add(1500 * time.Millisecond)
+	c.Observe("%1", "screen C", now)
+	now = now.Add(1500 * time.Millisecond)
+	c.Observe("%1", "screen C", now)
+	now = now.Add(1500 * time.Millisecond)
+	st = c.Observe("%1", "screen C", now)
+	if st.FinishedAt <= first {
+		t.Fatalf("second finish edge = %d, want later than the first (%d): "+
+			"FinishedAt is the LAST working->idle edge, not the first", st.FinishedAt, first)
+	}
+
+	// ... but an idle pane that keeps sitting still does not keep re-stamping,
+	// or the badge could never be cleared by looking at it.
+	now = now.Add(1500 * time.Millisecond)
+	again := c.Observe("%1", "screen C", now)
+	if again.FinishedAt != st.FinishedAt {
+		t.Fatal("a pane that is merely still must not re-stamp its finish edge")
+	}
 }
 
 func TestClassifierForgetsClosedPanes(t *testing.T) {
 	c := NewClassifier()
-	c.Observe("%1", "a", time.Unix(0, 0))
-	c.Observe("%2", "b", time.Unix(0, 0))
+	now := time.Unix(0, 0)
+	c.Observe("%1", "a", now)
+	c.Observe("%2", "b", now)
+
 	c.Retain([]string{"%2"})
-	if c.Len() != 1 {
-		t.Fatalf("classifier holds %d panes after retaining one, want 1", c.Len())
+
+	// Asserting only Len()==1 passes just as happily if the WRONG pane was
+	// kept. Assert which one survived, by behaviour.
+	now = now.Add(1500 * time.Millisecond)
+	if st := c.Observe("%2", "b", now); st.State != StateWorking {
+		// %2 was retained, so this is its second identical capture: still=1,
+		// not yet settled.
+		t.Fatalf("retained pane %%2 = %q, want its run to have continued", st.State)
+	}
+	now = now.Add(1500 * time.Millisecond)
+	if st := c.Observe("%1", "a", now); st.State != StateWorking {
+		t.Fatal("dropped pane %1 should be first-sight again")
+	}
+	// First sight cannot stamp a finish edge, which is how we know it was
+	// genuinely forgotten rather than resumed.
+	now = now.Add(1500 * time.Millisecond)
+	c.Observe("%1", "a", now)
+	now = now.Add(1500 * time.Millisecond)
+	if st := c.Observe("%1", "a", now); st.FinishedAt != 0 {
+		t.Fatal("a forgotten pane must come back as first sight, stamping no edge")
 	}
 }
 ```
@@ -296,10 +375,20 @@ const settleAfter = 2
 - hash the capture (FNV-64a is fine and stdlib)
 - unknown pane: record, `still=0`, `everChanged=false`, return working
 - hash differs: `still=0`, `everChanged=true`, return working
-- hash same: `still++`; when `still >= settleAfter`, return idle — and stamp
-  `finishedAt = now` **only if `everChanged`** and it is not already stamped
+- hash same: `still++`; return idle once `still >= settleAfter` — and stamp
+  `finishedAt = now` **at the moment `still` first reaches `settleAfter`**, and
+  only if `everChanged`
 
-`everChanged` is the whole of the restart-storm fix. Write the comment saying so.
+The stamp is **per transition, not per lifetime**. Guarding it with
+`finishedAt == 0` would make the done badge fire exactly once per pane for the
+life of the daemon; guarding it with nothing would re-stamp on every idle poll,
+so the badge could never be cleared by looking at it. Stamp on the edge:
+`still == settleAfter` exactly.
+
+`everChanged` is the whole of the restart-storm fix: without it, a map rebuilt
+on restart or on client reconnect synthesises a working run on every agent pane,
+every run settles, every settle stamps an edge newer than every browser's `seen`,
+and every device lights up. Write the comment saying so.
 
 **Step 4: Run, expect PASS. Commit.**
 
@@ -364,11 +453,59 @@ Match the **bottommost** box-drawing dialog in the capture, and require the stru
 
 ### Task 5: The blocked question
 
-Only after Task 4 is green and committed.
+Only after Task 4 is green and committed, and revertible on its own.
 
-Extract the request text and the numbered choices from the matched box into `Question{Text, Choices}`. Truncate the text. If extraction fails on a screen that matched as blocked, **return no question and keep the blocked state** — the state is the load-bearing part.
+**Files:**
+- Modify: `internal/tmux/blocked.go`, `internal/tmux/blocked_test.go`
+- Modify: `internal/tmux/snapshot.go` (`Row` gains `Question`)
 
-Commit separately so it can be reverted without losing the badge.
+**Fixtures: the same rule as Task 4.** This needs a real captured screen whose
+question text and choices are known. If you cannot produce one, stop and ask. A
+grammar tuned against an invented dialog matches nothing that occurs in life,
+and every test passes.
+
+**Step 1: The wire shape**
+
+```go
+// Question is the request a blocked agent is waiting on. Present only when
+// AgentState is blocked, and omitted entirely when extraction failed -- the
+// state is load-bearing, the text is a convenience.
+type Question struct {
+	Text    string   `json:"text"`
+	Choices []string `json:"choices,omitempty"`
+}
+```
+
+`Row` gains `Question *Question \`json:"question,omitempty"\``.
+
+**Step 2: Write the failing tests**
+
+```go
+func TestExtractQuestion(t *testing.T) {
+	q := ExtractQuestion("claude", readFixture(t, "claude-blocked.txt"))
+	if q == nil {
+		t.Fatal("no question extracted from a screen that IsBlocked matches")
+	}
+	if q.Text == "" || len(q.Choices) == 0 {
+		t.Fatalf("extracted %+v, want text and choices", q)
+	}
+}
+
+// Extraction failing must not take the state with it.
+func TestExtractionFailureKeepsTheState(t *testing.T) {
+	// A screen that matches the box structure but whose inner text we cannot
+	// parse -- the shape a restyle produces.
+	screen := readFixture(t, "claude-blocked-unparseable.txt")
+	if !IsBlocked("claude", screen) {
+		t.Fatal("fixture must still match as blocked")
+	}
+	if q := ExtractQuestion("claude", screen); q != nil {
+		t.Fatalf("want no question rather than a wrong one, got %+v", q)
+	}
+}
+```
+
+**Step 3–5:** implement, run, commit separately from Task 4.
 
 ---
 
@@ -399,7 +536,25 @@ The poller gains a `Classifier`, a `func() bool` reporting whether any client is
 
 - if no client is connected: skip captures entirely, leave every `AgentState` empty, and **reset the classifier** so the next connection settles from scratch rather than resuming a stale run
 - otherwise, for each row where `KnownAgent(row.Command) != ""`: capture, `Observe`, and if `IsBlocked` matches, override the state with `blocked`
-- `Retain` the pane ids present, so closed panes are forgotten
+- `Retain` **only the ids of currently-known-agent panes**, not every pane in the
+  snapshot. A pane that goes claude → zsh → claude would otherwise keep its old
+  hash; the relaunched agent's differing capture sets `everChanged`, and the next
+  settle stamps a finish edge for an agent that just started
+
+**Step 2b: The wiring, which is part of this task**
+
+None of this works until something answers "is a client connected", and no
+existing type does. This task owns all three edits:
+
+- `internal/front/registry.go` gains `func (r *Registry) Live() bool`, true when
+  any closer is registered. The design defines connected as **live terminal
+  sockets** — the `/ws` registrations — so if a non-socket registration is ever
+  added it must not count.
+- `internal/tmux/poller.go` takes the classifier, the capture func, and the
+  liveness func. Prefer an options struct or a second constructor over widening
+  `NewPoller`, whose existing callers should not have to care.
+- `internal/front/server.go`'s `newDaemon` (~line 918) builds the poller, so it
+  passes `registry.Live` in. The registry is constructed there already.
 
 **Step 3: Tests**
 
@@ -407,6 +562,21 @@ The poller gains a `Classifier`, a `func() bool` reporting whether any client is
 - integration test against real tmux: a pane running `sh -c 'while :; do date; sleep 0.2; done'` **reads as working**, and a pane running a static `cat` of a file **settles to idle**. Use a fake agent name added to `Agents` for the test rather than requiring claude to be installed.
 
 **Step 4: Commit.**
+
+---
+
+### Task 6b: Show the title, before anything else lands
+
+The design says the title as a sidebar label "ships regardless of everything
+below", and it is true: it is useful with no state detection at all. Phase C is
+otherwise the first point where anything is demonstrable, which is a long way to
+go on trust.
+
+**Files:** `web/src/components/AppSidebar.tsx`, its test.
+
+Show `title` in place of `command` for panes where a title exists and differs
+from the command. Nothing else — no state, no dot, no logo. One commit, and the
+sidebar is better than it was.
 
 ---
 
@@ -426,9 +596,22 @@ Table-test every rejection with a comment naming what it prevents.
 
 **Files:** `internal/tmux/manage.go`, `internal/tmux/manage_integration_test.go`
 
-`NewSession`, `NewWindow`, `SplitPane`, `RenameSession`, `RenameWindow`, `SetLabel`, `ToggleZoom`, `KillSession`, `KillWindow`, `KillPane`.
+`NewSession`, `NewWindow`, `SplitPane`, `RenameSession`, `RenameWindow`,
+`SetLabel`, `ToggleZoom`, `KillSessionID`, `KillWindow`, `KillPane`.
 
-Every one takes an id (`$N`, `@N`, `%N`) except `NewSession`, which takes a name.
+Every one takes an id (`$N`, `@N`, `%N`) except `NewSession`, which takes a name
+and an optional path.
+
+**`KillSession` already exists and must not be reused.**
+`internal/tmux/client.go:163` has `KillSession(ctx, name string)`, called from
+`internal/ptybridge/session.go:188` to tear down a tab's throwaway session by
+name. Same receiver, same name, different contract: a new id-taking
+`KillSession` will not compile. Keep the existing one as the app-session
+teardown path and name the new one `KillSessionID`.
+
+**`NewSession` takes the optional path** the design specifies
+(`POST /api/sessions {name, path?}`), typed by the owner in the dialog, and
+stats it first for the same reason splits do.
 
 Requirements each needing its own test against real tmux:
 
@@ -446,33 +629,96 @@ Requirements each needing its own test against real tmux:
 
 The routes from the design, all `cfg.Auth.Protect(...)`. Every `DELETE` requires `{"confirm": true}` in the body and returns 400 without it.
 
-Tests: each route rejects a foreign Origin; each `DELETE` rejects a missing confirm; a stale id returns the tmux error rather than a 500.
+**Pane and session ids must be percent-encoded in the path.** `%3` is an invalid
+percent-escape, so `DELETE /api/panes/%3` is rejected by the mux before routing.
+The browser sends `encodeURIComponent("%3")` → `%253`, and `r.PathValue` decodes
+it back to `%3`. Pin the encoded form in the tests, or the frontend will be
+written against a route that cannot be reached.
+
+Tests: each route rejects a foreign Origin; each `DELETE` rejects a missing
+confirm; a stale id returns the tmux error rather than a 500; an id arriving
+un-encoded is refused rather than mis-routed.
 
 ---
 
 ## Phase C — the browser
 
-### Task 10: State in the sidebar
+### Task 10: State and identity in the sidebar
 
-Row shows label, else title, else command. State dot. Roll-up `blocked > done > working > idle`. `done` from `finishedAt` vs `localStorage`, keyed with the tmux server generation so a restarted server's `%0` cannot inherit a stale entry.
+**Files:** `web/src/lib/useSnapshot.ts`, `web/src/components/AppSidebar.tsx`, tests.
+
+- Row shows `label`, else `title`, else `command`.
+- **Session rows display `sessionName`, not `groupKey`.** `useSnapshot.ts:222-225`
+  groups and labels by `groupKey` today, and tmux keeps the *pre-rename* name
+  there forever — so without this change, renaming from the browser still appears
+  to do nothing and Task 8's rename is invisible. Keep `groupKey`/`sessionId` for
+  identity; change only what is displayed.
+- State dot per pane; roll-up `blocked > done > working > idle` to window and
+  session.
+- `done` from `finishedAt` vs `localStorage`, **keyed `${serverStart}:${paneId}`**
+  using the `serverStart` Task 2 puts on the response. Pane ids restart at `%0`
+  when the tmux server restarts.
+- Blocked rows show the question text truncated, with the choices in the tooltip
+  (skip until Task 5 ships; the state alone is useful).
 
 ### Task 11: Agent logos
 
-One inline monochrome SVG per agent, ~16px, source recorded beside each file. An agent with no mark falls back to a two-letter monogram — never an invented logo.
+One inline monochrome SVG per agent, ~16px, source recorded beside each file. An
+agent with no mark available falls back to a two-letter monogram — never an
+invented logo for someone else's project. Driven by the same `Agents` list, so a
+pane with no state never gets a logo.
 
-### Task 12: Context menus and dialogs
+### Task 12: Context menus, dialogs, and failures
 
-Right-click and long-press per row type. Rename and create dialogs. **Kill dialog: names what dies including a running agent, a toggle to arm, then a red button; dismissing resets the toggle.** Copy must say when the kill closes the session and disconnects this tab.
+**Files:** `web/src/components/AppSidebar.tsx`, a new `web/src/components/KillDialog.tsx`, `web/src/components/Palette.tsx`, `web/src/App.tsx`.
 
-### Task 13: Tab badge
+- Right-click and long-press per row type: rename, new window, split right/down,
+  zoom, then a separated red kill.
+- **The same actions in the `Ctrl+Alt+K` palette.** `Palette.tsx` exists and
+  carries panes and copy-mode today; these are added entries, not a new surface.
+- **A `+` on the session row**, for the one case with nothing to right-click: an
+  empty tmux server, which v1 cannot fix from the browser at all.
+- **Kill dialog**: names exactly what dies including any running agent
+  (`kill window "api" — 3 panes, one running claude`), a toggle to arm, then a
+  red button; dismissing resets the toggle. **When the target is the session this
+  tab is attached to, or its last window or pane, the copy says it closes the
+  session and disconnects this tab.**
+- **Failures surface as a `sonner` toast** naming the attempt and tmux's own
+  message, and the sidebar refreshes immediately rather than waiting for the next
+  poll. Nothing is retried.
+- **One line of copy where zoom is offered**, saying it zooms the window for
+  every client — zoom is a window property, so it moves the local terminal too,
+  joining v1's shared-property family.
 
-`(2) tmux-web` and a favicon dot when anything is blocked or done.
+### Task 13: Reconnect when the session is gone
 
-### Task 14: End to end
+**Files:** `web/src/components/Terminal.tsx`.
 
-Extend `e2e/`: state appears for a scripted fake agent; the two-step kill; rename visible after; the roll-up.
+Today a dropped socket reconnects to the same session forever. After a kill that
+destroyed the group, that session no longer exists and the retry can never
+succeed. Detect it, stop retrying, and report it with the session list offered —
+the design's defined behaviour for "my group is gone".
 
----
+### Task 14: Tab badge
+
+`(2) tmux-web` in the title and a favicon dot when anything is blocked or done.
+Note in a comment that a hidden tab's polling is throttled and a locked phone's
+stops, so the badge is late or absent exactly while you are away — the accepted
+consequence of choosing a badge over push.
+
+### Task 15: End to end
+
+Extend `e2e/`:
+
+- a scripted fake agent (a copy of `sh` on `PATH` named so `pane_current_command`
+  matches an entry added to `Agents`) shows working while it redraws and idle
+  when it stops
+- the two-step kill: the red button does nothing until the toggle is armed
+- rename a session from the browser and assert the sidebar shows the new name —
+  **against a grouped session**, i.e. with a tab attached, since on an ungrouped
+  session field 1 is already the live name and the test would pass even under the
+  group-key bug
+- the roll-up: a blocked pane makes its window and session read blocked
 
 ## Definition of done
 

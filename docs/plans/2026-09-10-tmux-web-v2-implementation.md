@@ -492,6 +492,23 @@ question text and choices are known. If you cannot produce one, stop and ask. A
 grammar tuned against an invented dialog matches nothing that occurs in life,
 and every test passes.
 
+**`claude-blocked-unparseable.txt` does not exist and cannot be recorded.**
+Step 2 below asks for a screen that IsBlocked still matches but extraction
+cannot read. Task 4's detector needs a cursored choice, two lines matching
+`^(?:❯ )?\d+\. ` and a line ending in "?" -- and that trailing space means a
+line stops counting as a choice as soon as its text is taken away. The one "?"
+on the captured screen is the question itself, above the choices. So every
+deletion that defeats extraction (the question, an option, an option's text)
+defeats detection too, and there is no shape left to record.
+
+What shipped instead is the same test name over a table of transforms of the
+real capture, each with the `blocked` verdict spelled out as a claim. It pins
+the coincidence rather than inventing a screen, so the day the detector's
+grammar changes the test says so and the fixture becomes recordable. The
+property the plan actually wanted -- a blocked state surviving a failed
+extraction -- is structural in Task 6's poller: the state comes from IsBlocked
+and the question is assigned separately, and a nil question changes nothing.
+
 **Step 1: The wire shape**
 
 ```go
@@ -542,6 +559,15 @@ func TestExtractionFailureKeepsTheState(t *testing.T) {
 **Files:**
 - Modify: `internal/tmux/client.go` (add `Capture`)
 - Modify: `internal/tmux/poller.go`
+- Modify: `internal/tmux/snapshot.go` — **`Row` gains `AgentState` and
+  `FinishedAt`.** The design lists both and no other task claims them; without
+  them there is nowhere for a classified state to go.
+- Modify: `web/src/lib/useSnapshot.ts` and its test — the frontend contract test
+  parses `type Row` out of the Go source and compares its json names against the
+  TypeScript fixture's keys, so any field added here turns `pnpm test` red until
+  it is mirrored. `rowsEqual` has to compare the new fields too, or a state that
+  changes in tmux never reaches the DOM; `question` is the first non-scalar on
+  the wire and needs a comparison of its own rather than `===`.
 - Test: `internal/tmux/poller_test.go`, `internal/tmux/client_integration_test.go`
 
 **Step 1: `Capture`**
@@ -587,7 +613,35 @@ existing type does. This task owns all three edits:
 **Step 3: Tests**
 
 - table test: no client connected → every state empty, no captures attempted (count calls)
-- integration test against real tmux: a pane running `sh -c 'while :; do date; sleep 0.2; done'` **reads as working**, and a pane running a static `cat` of a file **settles to idle**. Use a fake agent name added to `Agents` for the test rather than requiring claude to be installed.
+- integration test against real tmux: one agent pane **reads as working** while
+  its screen keeps changing, and a still one **settles to idle**.
+
+Three things about that integration test, all found the hard way:
+
+- **`sh -c 'while :; do date; sleep 0.2; done'` is not a usable agent pane.**
+  `pane_current_command` reports whatever is in the foreground at the instant
+  the poll lands -- `sh`, `sleep` or `date` -- so the pane drifts on and off the
+  agent list between polls. A single long-lived binary is what is needed.
+- **Do not append a fake name to `Agents`.** It is a package-level variable that
+  `KnownAgent` reads from the poll goroutine, and restoring it in a cleanup
+  races that goroutine: cancelling the poller's context does not wait for a poll
+  already in flight. Copy `cat` to a file named `claude` instead --
+  `pane_current_command` comes from the kernel's process name, which is the
+  basename of the file that was exec'd, so the pane is indistinguishable from a
+  real one and the real `Agents` list is what decides. `testutil.FakeAgent`
+  does this.
+- **Type something different each time** into the pane that is supposed to read
+  working. Sending the same character repeatedly fills the pane with identical
+  lines, and scrolling one more onto a screen of identical lines leaves the
+  capture byte for byte the same -- the pane reads idle while it is being typed
+  into.
+
+- wiring test: none of Step 2b is reachable from a test that does not go through
+  the daemon. A poller built without `Capture`/`Connected` classifies nothing
+  while every test in `tmux` and `front` stays green, so build a daemon with
+  `newDaemon` against a throwaway tmux server and assert that an agent pane has
+  no state until something is registered in the registry -- and none again once
+  it is removed.
 
 **Step 4: Commit.**
 

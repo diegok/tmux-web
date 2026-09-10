@@ -13,19 +13,20 @@ func rec(fields ...string) string { return strings.Join(fields, Sep) }
 
 // A valid record, as a named baseline the malformed cases can be varied from.
 // Field order matches Format: group, session id, session name, pane id, pane
-// index, app marker, label, window id, window index, window name, pane active,
-// command, title.
+// index, app marker, window id, window index, window name, pane active,
+// command, title, label. The label is last because it is the one field tmux
+// hands over unsanitised; see Format.
 //
 // The window id is derived from the index rather than taken as a parameter:
 // every caller varies the pane, and two panes reported with the same window
 // index are in the same window, so they must carry the same id.
 func goodRow(paneID, paneIndex, windowIndex string) string {
-	return rec("work", "$0", "work", paneID, paneIndex, "", "", "@"+windowIndex, windowIndex, "api", "1", "claude", "a title")
+	return rec("work", "$0", "work", paneID, paneIndex, "", "@"+windowIndex, windowIndex, "api", "1", "claude", "a title", "")
 }
 
 func TestParseRows(t *testing.T) {
 	t.Run("one well formed row", func(t *testing.T) {
-		got, dropped, err := ParseRows(rec("work", "$0", "work", "%3", "0", "", "", "@1", "1", "api", "1", "claude", "a title"))
+		got, dropped, err := ParseRows(rec("work", "$0", "work", "%3", "0", "", "@1", "1", "api", "1", "claude", "a title", ""))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -50,7 +51,7 @@ func TestParseRows(t *testing.T) {
 	// Pins the false side of both booleans: a parser hardcoding either to true
 	// passes every other subtest.
 	t.Run("app owned row with an inactive pane", func(t *testing.T) {
-		got, dropped, err := ParseRows(rec("work", "$0", "work", "%3", "2", "1", "", "@0", "0", "w", "0", "zsh", "t"))
+		got, dropped, err := ParseRows(rec("work", "$0", "work", "%3", "2", "1", "@0", "0", "w", "0", "zsh", "t", ""))
 		if err != nil || dropped != 0 || len(got) != 1 {
 			t.Fatalf("ParseRows = %+v, %d, %v", got, dropped, err)
 		}
@@ -102,10 +103,12 @@ func TestParseRows(t *testing.T) {
 		out := strings.Join([]string{
 			goodRow("%1", "0", "0"),
 			"nonsense", // too few fields
+			// One field short: the boundary of the tolerance, and the shape a
+			// record takes when a newline elsewhere splits it.
+			rec("work", "$0", "work", "%6", "0", "", "@0", "0", "w", "1", "zsh"),
 			// Numeric indices, so that only the field count can reject it.
-			rec("work", "$0", "work", "%7", "0", "", "", "@0", "0", "w", "1", "zsh", "t", "extra"),
-			rec("work", "$0", "work", "%9", "0", "", "", "@0", "notanint", "w", "1", "zsh", "t"), // bad window index
-			rec("work", "$0", "work", "%8", "notanint", "", "", "@0", "0", "w", "1", "zsh", "t"), // bad pane index
+			rec("work", "$0", "work", "%9", "0", "", "@0", "notanint", "w", "1", "zsh", "t", ""), // bad window index
+			rec("work", "$0", "work", "%8", "notanint", "", "@0", "0", "w", "1", "zsh", "t", ""), // bad pane index
 			goodRow("%2", "1", "0"),
 		}, "\n")
 		got, dropped, err := ParseRows(out)
@@ -156,7 +159,7 @@ func TestParseRows(t *testing.T) {
 		// tmux keeps the pre-rename name in session_group, so a fixture where they
 		// match would pass against an implementation that reads the group key --
 		// which is exactly the bug this field exists to fix.
-		line := rec("work3", "$3", "api", "%1", "0", "", "reviewer", "@7", "1", "win", "1", "claude", "✳ writing tests")
+		line := rec("work3", "$3", "api", "%1", "0", "", "@7", "1", "win", "1", "claude", "✳ writing tests", "reviewer")
 		got, dropped, err := ParseRows(line)
 		if err != nil || dropped != 0 || len(got) != 1 {
 			t.Fatalf("got %+v dropped=%d err=%v", got, dropped, err)
@@ -193,7 +196,7 @@ func TestParseRows(t *testing.T) {
 	// boolean). Here no two values are equal, so any misread lands a value the
 	// assertion names.
 	t.Run("every field lands in its own slot", func(t *testing.T) {
-		line := rec("grp", "$1", "sess", "%2", "5", "1", "lbl", "@3", "9", "winname", "1", "cmd", "the title")
+		line := rec("grp", "$1", "sess", "%2", "5", "1", "@3", "9", "winname", "1", "cmd", "the title", "lbl")
 		got, dropped, err := ParseRows(line)
 		if err != nil || dropped != 0 || len(got) != 1 {
 			t.Fatalf("ParseRows = %+v, %d, %v", got, dropped, err)
@@ -220,7 +223,7 @@ func TestParseRows(t *testing.T) {
 		// also what Claude Code actually puts at the head of a title.
 		for _, r := range []string{"é", "✳"} {
 			huge := strings.Repeat(r, 4000)
-			line := rec("w", "$0", "w", "%1", "0", "", "", "@1", "1", "win", "1", "claude", huge)
+			line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", huge, "")
 			got, _, _ := ParseRows(line)
 			if len(got[0].Title) > MaxTitle {
 				t.Fatalf("%q title kept %d bytes, want <= %d", r, len(got[0].Title), MaxTitle)
@@ -238,7 +241,7 @@ func TestParseRows(t *testing.T) {
 
 	t.Run("a title that fits is not touched", func(t *testing.T) {
 		title := "✳ writing tests"
-		line := rec("w", "$0", "w", "%1", "0", "", "", "@1", "1", "win", "1", "claude", title)
+		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", title, "")
 		got, _, _ := ParseRows(line)
 		if got[0].Title != title {
 			t.Fatalf("Title = %q, want %q unchanged", got[0].Title, title)
@@ -246,27 +249,158 @@ func TestParseRows(t *testing.T) {
 	})
 
 	// tmux sanitises titles but NOT user option values, so a label is the one
-	// new field that can carry a separator or a newline.
-	t.Run("a label containing control bytes cannot remove a pane", func(t *testing.T) {
-		line := rec("w", "$0", "w", "%1", "0", "", "EV"+Sep+"IL", "@1", "1", "win", "1", "claude", "t")
+	// field that can carry a separator or a newline. These subtests run with the
+	// tmux-side substitution absent by construction -- the record is
+	// hand-written -- so they pin what the parser alone guarantees.
+	// TestSnapshotHostileLabelCannotRemoveAPane pins the whole stack against a
+	// real server.
+	t.Run("a separator inside the label does not remove the pane", func(t *testing.T) {
+		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "EV"+Sep+"IL")
 		got, dropped, _ := ParseRows(line)
-		if dropped == 0 {
-			t.Fatal("a malformed record must be counted")
+		if dropped != 0 {
+			t.Fatalf("dropped = %d, want 0: a surplus field is the label's, not a broken record", dropped)
 		}
-		if len(got) != 0 {
-			t.Fatalf("a malformed record must not produce a row: %+v", got)
+		if len(got) != 1 {
+			t.Fatalf("the pane must survive its own label: %+v", got)
 		}
-		// The point is that it is DROPPED AND COUNTED, never merged into a
-		// neighbour and never silently ignored.
+		if got[0].PaneID != "%1" || got[0].Command != "claude" || got[0].Title != "t" {
+			t.Fatalf("the label disturbed another field: %+v", got[0])
+		}
+		// Rejoined and then sanitised: the separator becomes a space rather
+		// than vanishing, so the label reads as tampered with instead of as one
+		// somebody chose.
+		if got[0].Label != "EV IL" {
+			t.Errorf("Label = %q, want %q", got[0].Label, "EV IL")
+		}
+	})
+
+	t.Run("several separators inside the label are all rejoined", func(t *testing.T) {
+		// One surplus field could be absorbed by a parser that takes
+		// fields[12] and fields[13] and forgets the rest.
+		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t",
+			"a"+Sep+"b"+Sep+"c"+Sep+"d")
+		got, dropped, _ := ParseRows(line)
+		if dropped != 0 || len(got) != 1 {
+			t.Fatalf("ParseRows = %+v, dropped %d", got, dropped)
+		}
+		if got[0].Label != "a b c d" {
+			t.Errorf("Label = %q, want %q", got[0].Label, "a b c d")
+		}
+	})
+
+	// The newline case cannot be written as one record: a newline in a label IS
+	// two lines by the time Go sees it. What has to hold is that the first line
+	// still carries the whole pane, because every field except the label
+	// precedes it.
+	t.Run("a newline inside the label leaves the pane intact on the first line", func(t *testing.T) {
+		out := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "EV") +
+			"\nIL" + Sep + "trailing garbage\n" + goodRow("%2", "1", "0")
+		got, dropped, _ := ParseRows(out)
+		if dropped != 1 {
+			t.Fatalf("dropped = %d, want 1 (the orphaned tail)", dropped)
+		}
+		if len(got) != 2 || got[0].PaneID != "%1" || got[1].PaneID != "%2" {
+			t.Fatalf("both panes must survive: %+v", got)
+		}
+		if got[0].Label != "EV" {
+			t.Errorf("Label = %q, want the part before the newline", got[0].Label)
+		}
+		if got[0].Title != "t" || got[0].Command != "claude" || got[0].WindowID != "@1" {
+			t.Fatalf("the truncated label cost the row another field: %+v", got[0])
+		}
+	})
+
+	t.Run("a label of nothing but dangerous bytes degrades to no label", func(t *testing.T) {
+		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t",
+			Sep+Sep+"\t"+Sep)
+		got, dropped, _ := ParseRows(line)
+		if dropped != 0 || len(got) != 1 {
+			t.Fatalf("ParseRows = %+v, dropped %d", got, dropped)
+		}
+		if got[0].Label != "" {
+			t.Errorf("Label = %q, want \"\": a row titled with blanks is not a label", got[0].Label)
+		}
+	})
+
+	// C1 controls and invalid UTF-8 do not break the record -- they break what
+	// is downstream of it. tmux's own check is byte-oriented and lets both
+	// through, and encoding/json rewrites the second silently.
+	t.Run("a label is repaired, not just split-proofed", func(t *testing.T) {
+		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t",
+			"a\u009fb\x7fc"+string([]byte{0xff})+"d")
+		got, _, _ := ParseRows(line)
+		if got[0].Label != "a b c\ufffdd" {
+			t.Errorf("Label = %q, want %q", got[0].Label, "a b c\ufffdd")
+		}
+		if !utf8.ValidString(got[0].Label) {
+			t.Error("the label reached the wire as invalid UTF-8")
+		}
+	})
+
+	t.Run("a huge label is truncated on a rune boundary", func(t *testing.T) {
+		// 4-byte runes: MaxLabel is a rune count, so an implementation that
+		// slices MaxLabel BYTES cuts one of these in four and puts invalid
+		// UTF-8 on the wire. "é" would not catch it -- 2 divides 128 -- which
+		// is the vacuous version of this test.
+		for _, r := range []string{"🌍", "✳", "é"} {
+			huge := strings.Repeat(r, 4000)
+			line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", huge)
+			got, dropped, _ := ParseRows(line)
+			if dropped != 0 || len(got) != 1 {
+				t.Fatalf("%q: ParseRows = %+v, dropped %d", r, got, dropped)
+			}
+			if n := utf8.RuneCountInString(got[0].Label); n != MaxLabel {
+				t.Errorf("%q: label kept %d runes, want exactly %d", r, n, MaxLabel)
+			}
+			if !utf8.ValidString(got[0].Label) {
+				t.Errorf("%q: truncation split a rune; the label is not valid UTF-8", r)
+			}
+		}
+	})
+
+	t.Run("a label that fits is not touched", func(t *testing.T) {
+		// Not merely "unchanged": a sanitiser that dropped every non-ASCII
+		// rune, or collapsed inner spaces, would still pass the hostile cases.
+		label := "reviewer #2 — ñ/é (main)"
+		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", label)
+		got, _, _ := ParseRows(line)
+		if got[0].Label != label {
+			t.Errorf("Label = %q, want %q unchanged", got[0].Label, label)
+		}
 	})
 }
 
 // Format and fieldCount must agree, or every record is dropped at runtime while
 // the parser's own tests keep passing.
+//
+// Counted from formatFields rather than from separators in the finished string:
+// labelField carries a raw Sep inside its regex, so strings.Count(Format, Sep)
+// is 13 for a 13-field format and would go on agreeing with fieldCount for the
+// wrong reason.
 func TestFormatFieldCount(t *testing.T) {
-	if n := strings.Count(Format, Sep); n != fieldCount-1 {
-		t.Fatalf("Format has %d separators (%d fields), want %d (%d fields)",
-			n, n+1, fieldCount-1, fieldCount)
+	if n := len(formatFields); n != fieldCount {
+		t.Fatalf("formatFields has %d fields, want %d", n, fieldCount)
+	}
+	if got := len(strings.Split(Format, Sep)); got != fieldCount+1 {
+		t.Fatalf("Format splits into %d fields, want %d (%d fields plus the one "+
+			"labelField's own regex adds); if labelField no longer contains a "+
+			"separator this number should come down, not this test go away",
+			got, fieldCount+1, fieldCount)
+	}
+	// The whole point of the position: a raw separator can then only add fields
+	// after the last one, where ParseRows rejoins them, and a raw newline can
+	// only cut the record short after every other field is already on the line.
+	if formatFields[fieldCount-1] != labelField {
+		t.Fatalf("the label must be the last field, got %q", formatFields[fieldCount-1])
+	}
+	for i, f := range formatFields[:fieldCount-1] {
+		if strings.Contains(f, Sep) {
+			t.Fatalf("field %d (%q) contains a raw separator: it silently becomes "+
+				"two fields and shifts every field after it", i, f)
+		}
+	}
+	if !strings.Contains(labelField, LabelOption) {
+		t.Fatalf("labelField %q no longer reads %s", labelField, LabelOption)
 	}
 	if strings.Contains(Format, "pane_current_path") {
 		t.Fatal("pane_current_path must not be in the snapshot: an unsanitized " +

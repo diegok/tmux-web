@@ -178,11 +178,18 @@ func (c *Client) RenameWindow(ctx context.Context, windowID, name string) error 
 // Validation here is not cosmetic. tmux sanitises pane *titles* through its own
 // OSC parser, but it does not touch user option values: a label containing a
 // 0x1f adds a field to the snapshot record and a newline splits the record in
-// two, ParseRows drops what it cannot parse, and **the pane disappears from the
-// sidebar** -- the worst failure this project has. Rejecting on write is
-// necessary but not sufficient (anything with access to the socket can set the
-// option out of band), which is why ParseRows also tolerates it; the residual
-// is one row missing until the option is cleared.
+// two, and a snapshot that could not read such a record would show **the pane
+// as gone from the sidebar** -- the worst failure this project has.
+//
+// Rejecting on write is necessary but not sufficient: anything holding the
+// socket can set the option out of band, and from v2 things do -- the pi
+// extension and the opencode plugin write this option from third-party code,
+// carrying text derived from prompts and tool calls. The snapshot therefore
+// defends itself as well (snapshot.go: labelField strips the two bytes in
+// tmux's own format expansion, the label is the last field so a raw one cannot
+// shift a record, and sanitizeLabel repairs what arrives). This validator is
+// what keeps the app's own writes honest and gives the browser an error it can
+// show instead of a label that silently changes shape on the way back.
 //
 // Unlike a name, a label is never a target, so the rules that keep names
 // addressable do not apply: a label may start with "-", contain ":" or ".",

@@ -154,13 +154,30 @@ if you find yourself reconciling versions, you are reading a stale copy.
 | 4 | `#{pane_id}` | `PaneID` |
 | 5 | `#{pane_index}` | `PaneIndex` |
 | 6 | `#{@wterm_web}` | `AppOwned` |
-| 7 | `#{@wterm_label}` | `Label` |
-| 8 | `#{window_id}` | `WindowID` |
-| 9 | `#{window_index}` | `WindowIndex` |
-| 10 | `#{window_name}` | `WindowName` |
-| 11 | `#{pane_active}` | `PaneActive` |
-| 12 | `#{pane_current_command}` | `Command` |
-| 13 | `#{pane_title}` | `Title` |
+| 7 | `#{window_id}` | `WindowID` |
+| 8 | `#{window_index}` | `WindowIndex` |
+| 9 | `#{window_name}` | `WindowName` |
+| 10 | `#{pane_active}` | `PaneActive` |
+| 11 | `#{pane_current_command}` | `Command` |
+| 12 | `#{pane_title}` | `Title` |
+| 13 | `#{s/[\n\x1f]/ /:@wterm_label}` | `Label` |
+
+**Field 13 changed shape and position in the label-hardening task; this table is
+the current one.** The label used to sit at field 7 as a bare
+`#{@wterm_label}`, which is how a hostile or buggy writer of that option could
+remove a pane from the sidebar. It is now (a) stripped of the two bytes that
+break the record by tmux's own `s///` substitution — the pattern is a bracket
+set of the literal `0x1f` and newline, and `[[:cntrl:]]` cannot be used because
+the `:` ends the modifier's pattern — and (b) last, so that a raw byte getting
+through can only add fields after the final one or cut the line short after
+every other field is already on it. `ParseRows` accepts **13 or more** fields
+and rejoins the surplus into the label. `Format` is therefore built by joining
+`formatFields` rather than concatenating a constant: `labelField` contains a
+`0x1f` of its own, inside the regex, so counting separators no longer counts
+fields.
+
+The JSON names on `Row` did not change, so the frontend contract test is
+untouched.
 
 `fieldCount` is **13**. Field 1 stays the group key and field 3 is the live
 session name: they are separate fields *because they differ after a rename*, and
@@ -808,7 +825,7 @@ name reaches a command line, using Task 7's validator.
 
 Requirements each needing its own test against real tmux:
 
-- **`SetLabel` rejects control bytes and caps length.** A label with a `0x1f` or a newline makes the pane vanish from the snapshot; tmux does not sanitise option values.
+- **`SetLabel` rejects control bytes and caps length.** A label with a `0x1f` or a newline used to make the pane vanish from the snapshot; tmux does not sanitise option values. Since the label-hardening task the snapshot no longer depends on this validator holding — see Task 2's field table — but it still keeps the app's own writes honest and gives the browser an error instead of a label that changes shape on the way back.
 - **`SplitPane` and `NewWindow` resolve the working directory server-side** from `#{pane_current_path}` and pass `-c`. The path never comes from the browser.
 - **A path that no longer exists is reported, not silently ignored.** `tmux split-window -c /gone` exits 0 and lands in `$HOME`. Stat first.
 - **Kill refuses an `@wterm_web` session** on the direct session path.

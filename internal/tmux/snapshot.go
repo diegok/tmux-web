@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -12,6 +13,9 @@ import (
 // unsafe because window names may contain one.
 const Sep = "\x1f"
 
+// fieldCount is how many fields a record must have to be read. It is a
+// minimum, not an equality: the label is the last field and may contain the
+// separator, so a record can legitimately arrive with more. See ParseRows.
 const fieldCount = 13
 
 // MaxTitle bounds a pane title. tmux normalises control bytes out of titles but
@@ -33,7 +37,12 @@ type Row struct {
 	PaneID      string `json:"paneId"`      // e.g. "%3", stable for the pane's lifetime
 	PaneIndex   int    `json:"paneIndex"`   // position within the window, in layout order
 	AppOwned    bool   `json:"appOwned"`    // set from the @wterm_web user option
-	Label       string `json:"label"`       // @wterm_label; user-set, may be ""
+	// Label is @wterm_label, and it may be "": the user never set one, or what
+	// they set sanitised away to nothing. It is the only field here whose value
+	// tmux hands over exactly as written, by anything holding the socket --
+	// from v2 that includes third-party agent integrations -- so it is the only
+	// one ParseRows repairs rather than trusts.
+	Label string `json:"label"`
 	// WindowID is @N, and it is what window operations target -- the same
 	// reason SessionID is here rather than a name. WindowIndex is a position,
 	// not an address: tmux renumbers indices on move-window and reuses them
@@ -67,13 +76,48 @@ type Row struct {
 	Question *Question `json:"question,omitempty"`
 }
 
-// Format is the -F argument producing rows this package can parse.
+// labelField is #{@wterm_label} with the two bytes that break this wire format
+// substituted out by tmux, before the value ever reaches Go.
+//
+// tmux's s/// modifier is a POSIX regex substitution over the variable's value,
+// applied to every match, and its pattern can carry the raw bytes: probed on
+// tmux 3.7b, a label of "a\x1fb\nc" reports as "a b c" through this expression
+// and as itself through a bare #{@wterm_label}. The pattern is a bracket SET of
+// the two literal bytes rather than a range or a class, deliberately:
+//
+//   - [[:cntrl:]] does not survive tmux's own parse. The modifier's variable is
+//     introduced by ":", so the ":" inside the class terminates the pattern
+//     early; measured, the whole expression then expands to "" for every value,
+//     including a label with nothing wrong with it.
+//   - A range such as [\x0a-\x1f] compiles, but POSIX leaves the endpoints of a
+//     bracket range to the locale's collation order, and the tmux server's
+//     locale is whatever started it. A set of literal bytes has no such
+//     freedom.
+//
+// A space rather than "": "EV\x1fIL" reads as "EV IL", which shows the label
+// was tampered with, where "EVIL" would read as a label somebody chose.
+//
+// This is the first of three defences, and the only one that can fail open: a
+// pattern that stopped compiling would leave tmux echoing the value untouched
+// and exiting 0 (measured with a deliberately broken "[" pattern). That is why
+// the label also sits in the last field, and why ParseRows sanitises what
+// arrives. TestFormatAloneKeepsEveryRecordWellFormed pins this layer on its own
+// terms, against a real server -- with a tolerant parser behind it, a pattern
+// that quietly stopped covering one of the two bytes produces identical rows,
+// so no test downstream of the parser can see it weaken.
+const labelField = "#{s/[\n" + Sep + "]/ /:" + LabelOption + "}"
+
+// formatFields are the -F fields in the order ParseRows indexes them. It is a
+// slice rather than one concatenated constant so that the field count is
+// something a test can count directly: labelField contains a raw Sep of its
+// own, inside a regex, so counting separators in the finished string no longer
+// tells you how many fields there are.
 //
 // pane_current_path is deliberately absent. tmux sanitizes session and window
 // names but not the path, so a pane sitting in a directory whose name contains
 // a 0x1f or a newline can forge a whole extra record or swallow the following
 // pane's -- either way the sidebar shows something other than the truth, and a
-// pane that exists can vanish from it. Being the last field does not bound the
+// pane that exists can vanish from it. Being the last field would not bound the
 // damage: a newline simply starts a fresh line whose every field is
 // attacker-controlled. tmux's #{q:} modifier does not escape either byte.
 // Nothing in v1 renders the path; the deferred git panel can query it per pane,
@@ -85,34 +129,51 @@ type Row struct {
 //
 // pane_title is safe for the opposite reason to the path: tmux normalises a
 // title through its own OSC parser, so a title set to "EVIL\x1fFORGED\nMORE"
-// reads back as one line with the control bytes gone.
+// reads back as one line with the control bytes gone. It used to hold the last
+// slot for that reason; the label needs it more.
 //
-// @wterm_label is NOT safe in the same way: tmux does not sanitize user option
-// values, so a label carrying a 0x1f or a newline forges or splits a record and
-// makes its pane vanish from the sidebar. It is validated on write, and ParseRows
-// drops what it cannot parse -- one row missing until the option is cleared,
-// rather than a neighbouring pane's record silently rewritten.
-const Format = "#{?#{session_group},#{session_group},#{session_name}}" + Sep +
-	"#{session_id}" + Sep +
-	"#{session_name}" + Sep +
-	"#{pane_id}" + Sep +
-	"#{pane_index}" + Sep +
-	"#{@wterm_web}" + Sep +
-	"#{" + LabelOption + "}" + Sep +
-	"#{window_id}" + Sep +
-	"#{window_index}" + Sep +
-	"#{window_name}" + Sep +
-	"#{pane_active}" + Sep +
-	"#{pane_current_command}" + Sep +
-	"#{pane_title}"
+// @wterm_label is the one field tmux will hand over exactly as somebody wrote
+// it, and from v2 that somebody includes third-party agent integrations. It is
+// last so that the damage a raw byte can do is bounded by arithmetic rather
+// than by the sanitiser holding: a 0x1f only adds fields past the end, which
+// ParseRows rejoins, and a newline only truncates the last field, leaving the
+// twelve before it -- the whole identity of the pane -- already complete on the
+// line. Any other position turns both into a shifted or unparseable record,
+// which is a pane missing from the sidebar.
+var formatFields = []string{
+	"#{?#{session_group},#{session_group},#{session_name}}",
+	"#{session_id}",
+	"#{session_name}",
+	"#{pane_id}",
+	"#{pane_index}",
+	"#{@wterm_web}",
+	"#{window_id}",
+	"#{window_index}",
+	"#{window_name}",
+	"#{pane_active}",
+	"#{pane_current_command}",
+	"#{pane_title}",
+	labelField,
+}
+
+// Format is the -F argument producing rows this package can parse.
+var Format = strings.Join(formatFields, Sep)
 
 // ParseRows parses raw `tmux list-panes` output into one Row per line.
 //
-// Any line that is not a well-formed record -- wrong field count, or a
-// non-numeric index -- is skipped and counted in dropped. Lines are independent:
-// a malformed one never merges into or alters a neighbouring row. dropped is
+// Any line that is not a well-formed record -- too few fields, or a non-numeric
+// index -- is skipped and counted in dropped. Lines are independent: a
+// malformed one never merges into or alters a neighbouring row. dropped is
 // returned rather than logged so the caller can surface a snapshot that is
 // quietly losing panes instead of it passing unnoticed.
+//
+// More fields than expected is NOT malformed. The surplus can only come from a
+// separator inside a field value, and the label -- the one field tmux does not
+// sanitize -- is last, so the surplus is rejoined into it. Dropping the row
+// instead would lose the pane, which is worse than showing it with a label that
+// has a stray byte in it; and the alternative reading, that some earlier field
+// grew a separator, would shift every field after it and mislabel the pane
+// anyway.
 //
 // The error is always nil today. It is part of the signature because Snapshot
 // calls this in a context where an error is the natural shape.
@@ -123,14 +184,14 @@ func ParseRows(out string) (rows []Row, dropped int, err error) {
 	}
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Split(line, Sep)
-		if len(fields) != fieldCount {
+		if len(fields) < fieldCount {
 			dropped++
 			continue
 		}
 		// Distinct names: shadowing the named err return here would be
 		// harmless today only because it is always nil.
 		pidx, perr := strconv.Atoi(fields[4])
-		widx, werr := strconv.Atoi(fields[8])
+		widx, werr := strconv.Atoi(fields[7])
 		if perr != nil || werr != nil {
 			dropped++
 			continue
@@ -142,16 +203,64 @@ func ParseRows(out string) (rows []Row, dropped int, err error) {
 			PaneID:      fields[3],
 			PaneIndex:   pidx,
 			AppOwned:    fields[5] == "1",
-			Label:       fields[6],
-			WindowID:    fields[7],
+			WindowID:    fields[6],
 			WindowIndex: widx,
-			WindowName:  fields[9],
-			PaneActive:  fields[10] == "1",
-			Command:     fields[11],
-			Title:       truncateAtRuneBoundary(fields[12], MaxTitle),
+			WindowName:  fields[8],
+			PaneActive:  fields[9] == "1",
+			Command:     fields[10],
+			Title:       truncateAtRuneBoundary(fields[11], MaxTitle),
+			// Rejoined with the separator it was split on, so a label that
+			// arrived with a raw 0x1f in it is reconstructed rather than
+			// silently reassembled into something else.
+			Label: sanitizeLabel(strings.Join(fields[fieldCount-1:], Sep)),
 		})
 	}
 	return rows, dropped, nil
+}
+
+// sanitizeLabel makes an arbitrary @wterm_label value safe to put on the wire
+// and in the DOM, and bounds it.
+//
+// The last of the three defences, and the only one that runs on bytes that have
+// already reached Go. It exists because neither of the others is a promise
+// about content: the tmux-side substitution removes exactly the two bytes that
+// break the record, and the field's position stops those two from removing a
+// pane -- neither says anything about a C1 control, a lone 0x7f, invalid UTF-8,
+// or a label of a length that would ride the poll into the sidebar every 1.5s.
+//
+// The rules are validateLabel's, applied instead of refused: what SetLabel
+// rejects on the way in is what this repairs on the way out, so there is one
+// notion of a safe label rather than two.
+//
+//   - Every control rune becomes a space. unicode.IsControl, not a byte range,
+//     for the reason validateLabel gives: it is what catches the C1 controls
+//     that tmux's own byte-oriented check lets through.
+//   - Invalid UTF-8 becomes U+FFFD. Ranging over a string yields RuneError per
+//     bad byte and WriteRune re-encodes it, so what the browser is told is what
+//     the daemon holds. encoding/json would substitute the same rune silently
+//     and later, where nothing bounds it.
+//   - MaxLabel runes, counted rather than sliced: a byte cut lands mid-rune for
+//     any width that does not divide the cap. Runes, not bytes, because MaxLabel
+//     is the writer's cap and it is a column budget.
+//
+// The result is trimmed, so a label of nothing but dangerous bytes degrades to
+// "" -- an unlabelled pane, which is what SetLabel stores for a label of
+// whitespace -- rather than to a row titled with blanks.
+func sanitizeLabel(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	runes := 0
+	for _, r := range s {
+		if runes == MaxLabel {
+			break
+		}
+		if unicode.IsControl(r) {
+			r = ' '
+		}
+		b.WriteRune(r)
+		runes++
+	}
+	return strings.TrimSpace(b.String())
 }
 
 // truncateAtRuneBoundary cuts s to at most maxBytes without splitting a rune.

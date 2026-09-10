@@ -91,7 +91,13 @@ export interface SnapshotRow {
   paneIndex: number
   /** Row came from a session this app created (`@wterm_web`). */
   appOwned: boolean
-  /** `@wterm_label`: a name the user gave this pane, or "" when unset. */
+  /**
+   * `@wterm_label`: a name given to this pane, or "" when unset -- and also ""
+   * when what was set sanitised away to nothing. The daemon repairs this field
+   * rather than trusting it (control bytes to spaces, invalid UTF-8 to U+FFFD,
+   * capped and trimmed): it is the one thing on the wire that anything holding
+   * the tmux socket can write, agent integrations included.
+   */
   label: string
   /**
    * `@N`: the window's identity, and what every window operation targets.

@@ -404,11 +404,34 @@ fields and the newline splits the record, so `ParseRows` drops the line and
 the worst this project has. This is the `pane_current_path` class, reintroduced.
 
 So labels are validated on write: control bytes rejected, length capped. That is
-necessary but not sufficient, and the residual is stated rather than hidden — any
-process with access to the tmux socket can set the option out of band, and that
-is the same uid that can already drive tmux directly. The damage is confined to
-one row disappearing until the option is cleared. Parsing must additionally
-tolerate it: a malformed row is dropped and counted, as v1 already does.
+necessary but not sufficient — any process with access to the tmux socket can
+set the option out of band, and from v2 things do: the pi extension and the
+opencode plugin write this option from third-party code, carrying text derived
+from prompts and tool calls.
+
+The residual this section originally accepted — "the damage is confined to one
+row disappearing until the option is cleared" — is no longer accepted, because
+a row disappearing is the worst failure this app has. The snapshot now defends
+itself, in three layers:
+
+1. **tmux strips the two bytes itself.** The format reads
+   `#{s/[<0x1f><newline>]/ /:@wterm_label}`. tmux's `s///` pattern can carry
+   those bytes literally; `[[:cntrl:]]` cannot be used, because the `:` inside
+   the class ends the modifier's pattern and the whole expression then expands
+   to empty for every label.
+2. **The label is the last field.** A raw separator can then only add fields
+   after the last one, and a raw newline can only cut the line short once every
+   other field is already on it. Neither can remove a pane, whatever layer 1
+   does — which matters because tmux answers a pattern it cannot compile by
+   echoing the value unchanged and exiting 0.
+3. **`ParseRows` repairs what arrives.** 13 or more fields, surplus rejoined
+   into the label; control runes (C1 included) become spaces, invalid UTF-8
+   becomes U+FFFD, the result is capped at `MaxLabel` runes and trimmed. The
+   rules are `validateLabel`'s, applied instead of refused, so there is one
+   notion of a safe label rather than two.
+
+A hostile label therefore degrades to a repaired or empty label. It cannot
+remove a pane, forge one, or disturb another pane's row.
 
 Sessions and windows rename through tmux itself, so the new name is visible
 everywhere, not only in the browser.
@@ -489,7 +512,13 @@ Following v1:
   poll would make every poll a first sight and kill the done badge outright,
   with the restart test still green.
 - **A regression test that a label containing `0x1f` or a newline cannot remove a
-  pane from the snapshot.**
+  pane from the snapshot** — against a real tmux server, since the bug exists
+  only because of what real tmux stores and prints. Done:
+  `TestSnapshotHostileLabelCannotRemoveAPane` (the whole stack),
+  `TestFormatAloneKeepsEveryRecordWellFormed` (layer 1 on its own terms, the
+  only test that fails when the substitution weakens) and
+  `TestParserAloneSurvivesARawLabelFromRealTmux` (layers 2 and 3, reading real
+  tmux output with layer 1 removed by construction).
 - **A test that rename is visible in the snapshot afterwards**, which is what
   revision 1's group-name bug would have failed.
 

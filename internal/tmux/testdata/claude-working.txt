@@ -1,0 +1,57 @@
+● Xxxxx xx: 8.891 xxxxx xx 3.675 xxxxxx (2.567 xxx xxxxx xxxxxxxxxx, 6.324 xxx). Xx xxxx xxxxx xxxxx xxxxxx xxxxxxxx+xxxxxxxx xxx 3.260.                                                      
+                                                                                                                                                                                               
+  Xxxxxxxx xxx xx xxxxxxxx xxxxxx xxx xx xxxxxxxxxx xxx xx xxxxxx.                                                                                            
+
+  Xxx 1 shell xxxxxxx                                                                                                                                                                       
+                                                                                                                                                                              
+● Xx xxxxxxxxxx xxxxxx xx xxxxx x xxxxx: 147 xxxxx, 3.675 xxxxxx. X xx xxxxxxxxx xxxxxx xxxxx xxx xxx xxxxx xx xxxx xxxxxxxx xxx xxxxxx:
+                                                                                                                                                                                            
+  #3 XXXXXX [XXXXX] Xxxxx Xxxx Xxxxxxxxx Xxxxx Xxxxx | 24 xxxx                                                                                                                            
+     x) xxxxxxxx [Xxxxxxxxx] Xxxx Xxxxxxxxx Xxxxx Xxxxx | 24 xxxx
+                                                                                                                                        
+  Xxxxx Xxxxxxxxx xx xxxxx xxxxx x xx xxxx xxxxxx xxxxxx xxx xxxxxxxx. Xxxxx xx xxxxx xxxxxx xx Xxxxxxxx xxxxxx x xxxxx xxxxxxxx x xx xxxxxxx xx xx xxxxxxx.
+                                                                                                                                                                                              
+  Xxxxx xx xxxxxx xxxxxxxx x xxxx xxxxxxxxx — xx xxx xxx xx xx xx.                                                                                          
+                                                                                                                                                            
+  Xxx 1 shell xxxxxxx                                                                                                                                       
+                                                                  
+● Xxxxxxx xx xxxxxxx — xxxxx xxxx                                                                                                       
+                                                                                                                                                            
+  Xxxxxxxxx xx xxxxxx, xxx xxxx xxxxx xxxxxx:                                                                                                                                          
+
+  1. Xxxxxxxx xxxxxxx. Xxxxxxxxx xxx xxxxx: 21.695 → 9.069. X xxxxxxxx xx xxx xxxxxxx: xxx xxxxxxxxxx xxxxxx xx xxxxxx (9.719 → 8.891 xxxxx) xxxxxx xxx tokens xx xxxxx xx xxxxxxx xx xxx
+  xxxxxxx. Xx xxx xx xxxx xx xx xxxx xxxx — 106.000 xxxxx xxx xx xxxxxxxx xxx xxxxx xxxxxxx xx xxxxxx xxxxxx, xxx xxx xxxxx xxxxx xxxxx xx xxxx.                                               
+                                                                                                                                                                                         
+  2. xxxx_xxxxx.xx xxxxxxx x xxxxxxxx. Xxxxxx xxxxxxxxxx xxxxxxx xxxxx xxxxxxxxxxxx: xxx xxx xxxxxxxx XX xxx xxxxx, xxx xx xxxxxxxx xx xxxxxx xxx xx=XX, xxxxx xxxx xx tokens x xxx xxxxx
+  xxxxxx xx xxx. Xxxxx xx xxxxx xxxxx.xxxx xxx xx xxxxxxxx xxxx_xxxxxxx.xx x xxxxx_xxxxx.xx.                                                                                                
+                                                                                                                                                                                         
+  Xxxxxxxxx: 8.891 xxxxx xx 3.675 xxxxxx, 147 xxxxx xxxxxx.                                                                                                                              
+                                                                                                                                                                                         
+  xxxxxxxx   + xxxxxxxx     3.260                                                                                                                                             
+  xxxxxxxx   + xxxxxxxxxx   1.924                                                                                                                                                           
+  xxxxxxxx   + xxxxx00      1.351                                                                                                                                                        
+  xxxxxxxxxx + xxxxxxxxxx     664                                                                                                               
+                                                                                                                                                                                         
+  3. xxxxxxx/xxxxxx-xx.xx. Xx xxx xxxxx xxx xx xx. Xx xxxxx xxxx xxx xxxxxxx xxx xxx xxxxx xxxxx (xxxxxxxx/xxxxxxxx/xxxxx00 xxxxxxxxx xxxxxxxxxxx; xxxxx00 xx xx xxx xx Xxxxxxxx) x xxxxx xx
+  xxxxx xxx xxxxx xx xx xxxxx xxxxxxx: xxxxx xxxxxxxx xxxxxx xxxxx xxxxxx xxxxx xx xx xxxxx xxxxxxxx.
+                                                                                                                                                                                            
+  Xx xxx xxx xx xxxx xxx xx xxxxxx: xxxxxxxxxxx() xx xxxxxx.xx xxx xxx xxxxxx xxxxx/xxxx x xxx xxxxx xxx xxxxxxx xxxx x/x, xxx xxx xxxxxxxx 0 x xxxxxx 0 xxxxx. Xxxxxxxxx xxxxxxxxxx xxxxx xxx
+  tokens xx xxxxxxxxxxxxx.                                                                                                                                                                  
+                                                                                                                                                                                              
+  Xx xxxxxxxxx                                                                                                                                                                                
+                                                                                                                                                                                              
+  Xxxxxx. Xxx ~3.675 xxxxxx x ~600 tokens xxxx xxx, xxxx 2,0X. Xx plan xxxx xxxxxx xxxxxxxxxxxxx xxxxx xx xxxxxxx, x xxx xxxxx: xx xx xx xxxx xxx xxxxx xxxxxxxxxx xxxxxx 81% x xx xxxx xxx
+  xxxxx 47%, x xxxx xx xxxxxxx xx 2.567 / 6.324, x xxx xxx xx xxxxx xxxxx xxx xxxxxxx xxxx xx xx xxxx xxxx.                                                                                 
+                                                                                                                                                                                              
+  Xxxxx xx xxxxxx xx 3 xxxxxxx × 4 xxxxx (300 xxxxxx), xxxx xx xxxxxxxxxxx xxxx xxx xxxx, x xxx xxx xxxx xxxxxxxxx xx xxxxxxx xxx 147. ¿Xxxx?                                              
+                                                                                                                                                                                               
+✻ Xxxxxxxxx for 4m 14s · done 12:53 PM                                                                                                                                                        
+                                                                                                                                                                                         
+● Xxxxxxxxxx xxxxxxx "Xxxx for and xxxx xxx xxx-xxx xxxxxx" xxx xxxxxxx                                                                                                                       
+
+✢ Xxxxxxxxxxx…                                                                                                                                                                              
+                                                                                                                                                                                             
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯                                                                                                                                                                                     
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · esc to interrupt · ← 1 agent                                                                                                                     /xx

@@ -43,34 +43,25 @@ to reach it. To try it locally instead, skip the certificate:
 ### On a private network
 
 ACME cannot help with a name no public CA can validate -- an invented hostname
-like `devbox.ss`, or anything that only resolves on your VPN. There are two ways
-to run there, and `--dev` is not one of them: it only binds loopback, and the
-session cookie requires a secure context, so reaching a `--dev` daemon from
-another machine fails to sign in with no useful error.
-
-The clean option, if you can install a CA on your devices, is
-[mkcert](https://github.com/FiloSottile/mkcert) or your own internal CA.
-Browsers trust it silently:
+like `devbox.ss`, or anything that only resolves on your VPN. The daemon issues
+its own certificate instead:
 
 ```sh
-mkcert devbox.ss
-./wterm-web serve --host devbox.ss --tls-cert devbox.ss.pem --tls-key devbox.ss-key.pem
+./wterm-web serve --host devbox.ss --self-signed --tls-port 8443
 ```
 
-Otherwise the daemon can issue its own:
+`--dev` is not an alternative here: it binds loopback only, and the session
+cookie requires a secure context, so reaching a `--dev` daemon from another
+machine fails to sign in with no useful error.
 
-```sh
-./wterm-web serve --host devbox.ss --self-signed
-```
+The certificate is written next to the device store and reused, so each browser
+warns once and remembers. Before accepting that warning, compare the SHA-256 the
+daemon logs at startup with the one the browser shows -- with no CA involved,
+that comparison is the only thing distinguishing your daemon from someone else's
+certificate on the same network.
 
-It logs the certificate's SHA-256 fingerprint at startup. Check that against
-what the browser shows before accepting the exception -- that comparison is the
-only thing a self-signed setup has in place of a CA. The certificate is written
-next to the device store and reused, so each device warns once rather than on
-every restart.
-
-Both need the name to resolve: a VPN DNS entry, or a line in `/etc/hosts` on
-each machine. Add `--tls-port 8443` to run without root.
+The name has to resolve: a VPN DNS entry, or a line in `/etc/hosts` on each
+machine. `--tls-port` avoids needing root.
 
 Then enrol a browser. There are no passwords and no login form:
 

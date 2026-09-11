@@ -1362,3 +1362,249 @@ func TestAPaneHeldAtADialogUnderAReportStampsNoFinishEdge(t *testing.T) {
 			"interrupted by a question earns a done badge it never finished for", row.FinishedAt)
 	}
 }
+
+// --- the rejection slot ------------------------------------------------------
+
+// rejectedPane is one claude pane whose report has been overturned on evidence,
+// with a client connected and the screen, the standing report and the tmux
+// server's generation all under the test's control.
+type rejectedPane struct {
+	p          *Poller
+	ctx        context.Context
+	screens    map[string]string
+	reports    map[string]string
+	reportTS   int64
+	generation *string
+}
+
+// rejectedReportPoller drives a pane to a rejection by `rule`.
+//
+// The three setups differ only in how they reach the rejection; what happens
+// afterwards is one semantic and is asserted once, by the caller.
+func rejectedReportPoller(t *testing.T, rule string) rejectedPane {
+	t.Helper()
+	reportTS := time.Now().Add(-3 * time.Second).UnixMilli()
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	screens := map[string]string{}
+	reports := map[string]string{}
+	var captured []string
+	connected := true
+	p := reportPoller(&rows, reports, screens, &captured, &connected)
+	ctx := context.Background()
+	// A generation from the first poll on, so that nothing below is a
+	// generation CHANGE: the reset is keyed on the value changing, and a test
+	// that establishes it mid-run would reset the very memory it is building.
+	generation := "100"
+	p.startFn = func(context.Context) (string, error) { return generation, nil }
+
+	switch rule {
+	case "rule 1, a capture that moved":
+		reports["%1"] = FormatReport(StateBlocked, reportTS, "")
+		screens["%1"] = readFixture(t, "claude-blocked.txt")
+		p.refresh(ctx)
+		if row := stateOf(t, p, "%1"); row.StateSource != SourceEvent {
+			t.Fatalf("setup: %+v, want the blocked report in force", row)
+		}
+		// The dialog is gone and the agent is visibly running again, so rule 1
+		// drops it on this poll -- and no grammar matches, so the badge goes
+		// with it.
+		screens["%1"] = "the agent is running again"
+		p.refresh(ctx)
+	case "rule 2, settled with no registered form":
+		reports["%1"] = FormatReport(StateBlocked, reportTS, "")
+		screens["%1"] = readFixture(t, "claude-idle.txt")
+		for polls := 1; ; polls++ {
+			if polls > maxWindowPolls {
+				t.Fatalf("setup: rule 2 never dropped the report in %d polls", maxWindowPolls)
+			}
+			p.refresh(ctx)
+			if stateOf(t, p, "%1").StateSource == SourceScreen {
+				break
+			}
+		}
+	case "rule 3, a screen that never settled":
+		reports["%1"] = FormatReport(StateIdle, reportTS, "")
+		for polls := 1; ; polls++ {
+			if polls > maxWindowPolls {
+				t.Fatalf("setup: rule 3 never dropped the report in %d polls", maxWindowPolls)
+			}
+			// A capture that moves at every poll, for the whole window.
+			screens["%1"] = "frame " + strconv.Itoa(polls)
+			p.refresh(ctx)
+			if stateOf(t, p, "%1").StateSource == SourceScreen {
+				break
+			}
+		}
+	default:
+		t.Fatalf("unknown rule %q", rule)
+	}
+
+	row := stateOf(t, p, "%1")
+	if row.StateSource != SourceScreen {
+		t.Fatalf("setup for %s: %+v, want the report dropped and the pane back on the classifier", rule, row)
+	}
+	if row.FinishedAt == reportTS {
+		t.Fatalf("setup for %s: a dropped report derived finishedAt %d", rule, reportTS)
+	}
+	return rejectedPane{p: p, ctx: ctx, screens: screens, reports: reports, reportTS: reportTS, generation: &generation}
+}
+
+// One semantic for all three rules: a rejection is NOT cleared by the
+// classifier later reporting idle.
+//
+// Written as the negative, which is the only way it can hold. Revision 4 of the
+// design made a rule-3 rejection provisional and cleared it "the moment the
+// classifier reports idle"; revision 5 withdrew that on two measurements. The
+// case it was built for is measurably empty -- at NIdle = settleAfter + 2,
+// polls-to-settle was 3 or 4 in every one of 1,440 phase replays and never 5.
+// And the trigger is not safe: 4 of 88 measured turns went still while waiting
+// on the model, so mid-turn stillness on a root that is genuinely working can
+// clear a rejection that was CORRECT -- resurrecting a subagent's false idle,
+// deriving finishedAt from it, and landing the false done badge the rule exists
+// to prevent.
+//
+// The standing option still holds the overturned value on every one of these
+// polls, which is the whole reason the slot exists: without it the pane is
+// re-accepted the moment the screen settles and never returns to the grammars.
+func TestARejectionIsNotClearedByAClassifierIdle(t *testing.T) {
+	for _, rule := range []string{
+		"rule 1, a capture that moved",
+		"rule 2, settled with no registered form",
+		"rule 3, a screen that never settled",
+	} {
+		t.Run(rule, func(t *testing.T) {
+			f := rejectedReportPoller(t, rule)
+			p, ctx, screens, reportTS := f.p, f.ctx, f.screens, f.reportTS
+
+			// The screen settles, so the classifier -- which owns the pane now
+			// -- reaches an idle verdict and goes on reporting one.
+			screens["%1"] = "a settled screen with nothing left to decide"
+			var sawIdle bool
+			for poll := 1; poll <= maxWindowPolls; poll++ {
+				p.refresh(ctx)
+				row := stateOf(t, p, "%1")
+				if row.StateSource != SourceScreen {
+					t.Fatalf("poll %d after the drop = %+v, want the pane still on the classifier: "+
+						"a classifier idle is not evidence that the overturned report was right, "+
+						"and clearing on one resurrects a subagent's false idle", poll, row)
+				}
+				if row.FinishedAt == reportTS {
+					t.Fatalf("poll %d after the drop derived finishedAt from the overturned "+
+						"report's own timestamp %d", poll, reportTS)
+				}
+				if row.AgentState == StateIdle {
+					sawIdle = true
+				}
+			}
+			// Without this the test is vacuous: if the classifier never said
+			// idle, "a classifier idle changes nothing" was never exercised.
+			if !sawIdle {
+				t.Fatalf("the classifier never reached an idle verdict in %d polls, so the "+
+					"trigger this test exists to refuse was never pulled", maxWindowPolls)
+			}
+		})
+	}
+}
+
+// The claim that makes a permanent-sounding rejection affordable, and the
+// reason it has to be in the comment as well as in a test: a rejected report
+// hands the pane back to the classifier, and the classifier is an authority
+// that can stamp a finish.
+//
+// For rule 3 to have fired at all the screen must have churned through the
+// whole window, which sets everChanged; when it finally settles, Observe stamps
+// finishedAt = now in the ordinary way. A wrongly-dropped true turn end does
+// not lose its badge -- it gets one dated by when the daemon NOTICED instead of
+// by when the agent finished. Those are two different facts and the test says
+// which one it got.
+func TestARule3RejectionDoesNotCostTheBadge(t *testing.T) {
+	f := rejectedReportPoller(t, "rule 3, a screen that never settled")
+	p, ctx, screens, reportTS := f.p, f.ctx, f.screens, f.reportTS
+
+	before := time.Now().UnixMilli()
+	screens["%1"] = "the run really has ended now"
+	var row Row
+	for polls := 0; row.FinishedAt == 0; {
+		polls++
+		if polls > maxWindowPolls {
+			t.Fatalf("the classifier never stamped a finish in %d polls: a wrongly-dropped turn "+
+				"end must still earn a badge", maxWindowPolls)
+		}
+		p.refresh(ctx)
+		row = stateOf(t, p, "%1")
+	}
+	if row.AgentState != StateIdle || row.StateSource != SourceScreen {
+		t.Errorf("%+v, want idle decided by the classifier", row)
+	}
+	if row.FinishedAt == reportTS {
+		t.Fatalf("finishedAt = the overturned report's own timestamp %d: the badge must be dated "+
+			"by when the daemon noticed, not by a claim the evidence overturned", reportTS)
+	}
+	if row.FinishedAt < before {
+		t.Errorf("finishedAt = %d, want a stamp dated now (at or after %d)", row.FinishedAt, before)
+	}
+}
+
+// The question Task 5's implementer carried forward, settled here rather than
+// left as a derivation the next reader has to redo.
+//
+// refresh resets p.classifier on a tmux-server generation change; p.reports is
+// now reset beside it. The derivation that it was safe without one holds as far
+// as it goes -- a restarted server's panes carry no options, so the raw value
+// is "", ParseReport fails and Observe deletes the entry -- but it makes the
+// daemon's report memory depend for its correctness on what tmux happens to be
+// holding, and "across a restart both slots are empty" is a claim about the
+// DAEMON. The fixture makes the difference visible by keeping the option value
+// standing across the generation change, which the derivation assumes cannot
+// happen: with the reset the standing report is a first sight and re-enters the
+// window; without it, a rejection recorded against a dead server's %1 silently
+// condemns the report of a fresh agent that reused the id.
+//
+// Cheap, too: a pane id that really is gone is pruned by Retain one poll later
+// anyway, so the reset costs at most one re-verification of a live report.
+func TestAServerRestartEmptiesTheReportMemory(t *testing.T) {
+	f := rejectedReportPoller(t, "rule 3, a screen that never settled")
+	p, ctx, screens, reportTS := f.p, f.ctx, f.screens, f.reportTS
+	// The reset fires on the generation CHANGING, not on having read one. One
+	// more poll on the same server, to say so: a reset that fired on every poll
+	// would make every poll a first sight, and no report could ever be verified
+	// and no pane could ever earn an edge again.
+	p.refresh(ctx)
+	if row := stateOf(t, p, "%1"); row.StateSource != SourceScreen {
+		t.Fatalf("setup: %+v, want the overturned report still refused on the same server", row)
+	}
+
+	// The server restarts. %1 is a different pane on a different server now,
+	// and the report standing on it is one the daemon has never seen.
+	*f.generation = "200"
+	screens["%1"] = "new server, a fresh agent"
+	p.refresh(ctx)
+	row := stateOf(t, p, "%1")
+	if row.AgentState != StateIdle || row.StateSource != SourceEvent {
+		t.Fatalf("the first poll on a new tmux server = %+v, want the standing report accepted as "+
+			"a FIRST SIGHT: the rejection was recorded against the dead server's %%1", row)
+	}
+	if row.FinishedAt != 0 {
+		t.Errorf("finishedAt = %d on the first poll after a restart, want the report to ENTER the "+
+			"verification window rather than re-derive: a pre-restart report that is 'almost "+
+			"certainly a real turn end' is the subagent false-idle waved through by an adverb",
+			row.FinishedAt)
+	}
+
+	// Verified from scratch, on this server's screen, and only then does it
+	// derive. This is also what keeps the reset from being fired every poll --
+	// a memory reset on every poll would restart the window every poll and
+	// nothing could ever be verified.
+	for polls := 0; row.FinishedAt == 0; {
+		polls++
+		if polls > maxWindowPolls {
+			t.Fatalf("the window never closed in %d polls after the restart", maxWindowPolls)
+		}
+		p.refresh(ctx)
+		row = stateOf(t, p, "%1")
+	}
+	if row.FinishedAt != reportTS || row.StateSource != SourceEvent {
+		t.Errorf("%+v, want the report verified from scratch and finishedAt = its own timestamp %d",
+			row, reportTS)
+	}
+}

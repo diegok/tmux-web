@@ -300,3 +300,172 @@ func TestConfirmedWithoutAClientOrWithoutAReport(t *testing.T) {
 		t.Error("a verdict for a pane with no report in force was accepted")
 	}
 }
+
+// --- the rejection slot ------------------------------------------------------
+
+// A delayed older write neither wins nor rescues the rejected report.
+//
+// There is no report "newer than the rejected one but older than the last
+// accepted one" to test with: the rejected report IS st.accepted, so that
+// interval is empty, and a test written to that wording would have had to
+// invent a state the implementation cannot reach. The fixture that matters is
+// the one ordinary scheduling jitter actually produces -- every write is
+// fire-and-forget, so a working write from an earlier hook can land after the
+// turn end that superseded it.
+func TestARejectionSurvivesADelayedOlderWrite(t *testing.T) {
+	now := time.UnixMilli(1789075200000)
+	r := NewReports()
+	t0 := now.UnixMilli()
+	t1 := now.Add(2 * time.Second).UnixMilli()
+	idle := FormatReport(StateIdle, t1, "")
+
+	if _, ok := r.Observe("%1", FormatReport(StateWorking, t0, "run go"), "claude", now); !ok {
+		t.Fatal("setup: the turn's working report was not accepted")
+	}
+	if _, ok := r.Observe("%1", idle, "claude", now.Add(2*time.Second)); !ok {
+		t.Fatal("setup: the turn end was not accepted")
+	}
+	// Rule 3, the screen churning for the whole window. Driven to the verdict
+	// rather than counted out, so the fixture does not restate NIdle.
+	for polls := 1; r.Corroborate("%1", false); polls++ {
+		if polls > maxWindowPolls {
+			t.Fatalf("setup: the window never closed in %d polls", maxWindowPolls)
+		}
+	}
+	if _, ok := r.Observe("%1", idle, "claude", now.Add(3*time.Second)); ok {
+		t.Fatal("setup: the overturned report is still in force")
+	}
+
+	// (a) The late write is refused and NOTHING goes into force on this poll:
+	// the pane stays on the classifier. Both halves are asserted, and they
+	// catch different mutants.
+	late := FormatReport(StateWorking, now.Add(time.Second).UnixMilli(), "an earlier tool call")
+	got, ok := r.Observe("%1", late, "claude", now.Add(3*time.Second))
+	if ok {
+		switch got.State {
+		case StateWorking:
+			t.Fatalf("a delayed older write went into force: %+v. It is older than the report "+
+				"already accepted, and dropping the ordering comparison puts a stale working on "+
+				"the row", got)
+		case StateIdle:
+			t.Fatalf("the rejected report came back in force on the strength of an unrelated late "+
+				"write: %+v. The guard belongs on st.accepted at the RETURN, not on parsed at the "+
+				"entry -- the late write carries its own earlier timestamp, so it does not match "+
+				"the slot, an entry guard waves it through, the ordering filter refuses the write "+
+				"and the function then hands back st.accepted, which IS the rejected report", got)
+		default:
+			t.Fatalf("a delayed older write put %+v in force", got)
+		}
+	}
+
+	// (b) It cleared nothing, and the only way to see that is to keep polling:
+	// the option still holds idle@T1, so the next poll re-reads it, and it must
+	// still be refused. A mutant that clears the slot on any parsed value
+	// resurrects it here.
+	for poll := 1; poll <= 2; poll++ {
+		if got, ok := r.Observe("%1", idle, "claude", now.Add(time.Duration(3+poll)*time.Second)); ok {
+			t.Fatalf("poll %d after the delayed write re-read the standing option and put %+v back "+
+				"in force: refusing an older write must not clear the rejection", poll, got)
+		}
+	}
+}
+
+// What DOES clear the slot: a strictly newer value. The fixture is the next
+// turn's working write -- an edge, written unconditionally by the integration
+// without reading the standing option -- which is the thing that ends every
+// rejection in practice.
+func TestANewerValueClearsTheRejection(t *testing.T) {
+	now := time.UnixMilli(1789075200000)
+	r := NewReports()
+	t1 := now.UnixMilli()
+	idle := FormatReport(StateIdle, t1, "")
+
+	if _, ok := r.Observe("%1", idle, "claude", now); !ok {
+		t.Fatal("setup: the turn end was not accepted")
+	}
+	for polls := 1; r.Corroborate("%1", false); polls++ {
+		if polls > maxWindowPolls {
+			t.Fatalf("setup: the window never closed in %d polls", maxWindowPolls)
+		}
+	}
+	if _, ok := r.Observe("%1", idle, "claude", now.Add(time.Second)); ok {
+		t.Fatal("setup: the overturned report is still in force")
+	}
+
+	// The next turn starts.
+	next := now.Add(time.Minute)
+	working := FormatReport(StateWorking, next.UnixMilli(), "run go")
+	got, ok := r.Observe("%1", working, "claude", next)
+	if !ok || got.State != StateWorking || got.Activity != "run go" {
+		t.Fatalf("the next turn's working write = %+v, %v; want it in force -- a newer value is a "+
+			"different report and earns its own verdict", got, ok)
+	}
+	// And it stays in force when the same standing value is re-read, which is
+	// what separates a cleared slot from one that merely lost a comparison.
+	if got, ok := r.Observe("%1", working, "claude", next.Add(1500*time.Millisecond)); !ok || got.State != StateWorking {
+		t.Fatalf("re-reading the newer standing value = %+v, %v; want it still in force", got, ok)
+	}
+
+	// The new claim is checked afresh rather than inheriting the overturned
+	// one's fate: this turn's own end opens its own window.
+	end := next.Add(time.Minute)
+	if got, ok := r.Observe("%1", FormatReport(StateIdle, end.UnixMilli(), ""), "claude", end); !ok || got.State != StateIdle {
+		t.Fatalf("the next turn's end = %+v, %v; want it accepted on its own terms", got, ok)
+	}
+	if !r.NeedsScreen("%1") || r.Confirmed("%1", true) {
+		t.Error("the second turn's end inherited the first one's verdict instead of earning its own")
+	}
+}
+
+// A restart empties both slots. The standing report is accepted by the ordering
+// filter -- the daemon has no better information than the value tmux holds --
+// and then verified from scratch: a resting idle ENTERS the window rather than
+// deriving immediately.
+//
+// Revision 2 of the design re-derived immediately here, on the grounds that a
+// pre-restart report "is almost certainly a real turn end" -- which is the
+// subagent false-idle waved through by an adverb.
+//
+// That is the honest cost of holding the rejection in daemon memory rather than
+// in tmux: bounded, one-shot, and only on a restart. The alternative -- writing
+// the rejection back into @wterm_agent so it survives with the report -- is
+// refused on a rule this design has held since "Not @wterm_label": the daemon
+// READS that option, it does not write it, and a reader that edits the channel
+// it reads cannot be reasoned about when two of them run.
+func TestAfterARestartAStandingIdleEntersTheWindow(t *testing.T) {
+	now := time.UnixMilli(1789075200000)
+	standing := FormatReport(StateIdle, now.UnixMilli(), "")
+
+	r := NewReports()
+	if _, ok := r.Observe("%1", standing, "claude", now); !ok {
+		t.Fatal("setup: the report was not accepted")
+	}
+	for polls := 1; r.Corroborate("%1", false); polls++ {
+		if polls > maxWindowPolls {
+			t.Fatalf("setup: the window never closed in %d polls", maxWindowPolls)
+		}
+	}
+	if _, ok := r.Observe("%1", standing, "claude", now.Add(time.Second)); ok {
+		t.Fatal("setup: the overturned report is still in force")
+	}
+
+	// The daemon restarts: a fresh memory over the very same tmux state.
+	r2 := NewReports()
+	got, ok := r2.Observe("%1", standing, "claude", now.Add(time.Hour))
+	if !ok || got.State != StateIdle {
+		t.Fatalf("the standing report after a restart = %+v, %v; want a first sight, accepted by "+
+			"the ordering filter -- the rejection lived in the memory that has just gone", got, ok)
+	}
+	if !r2.NeedsScreen("%1") {
+		t.Error("a resting idle after a restart must enter the verification window")
+	}
+	if r2.Confirmed("%1", true) {
+		t.Error("a resting idle after a restart derived finishedAt immediately, with a client " +
+			"connected and the window still open: that is the subagent false-idle waved through")
+	}
+	// Unchanged by any of this: with nobody connected there is no screen to
+	// check and the derivation is immediate, restart or no restart.
+	if !r2.Confirmed("%1", false) {
+		t.Error("with no client connected the derivation must still be immediate")
+	}
+}

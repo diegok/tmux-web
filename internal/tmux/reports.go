@@ -94,15 +94,65 @@ type reportState struct {
 	// constants that count it look like one number, which is the mistake this
 	// whole task exists to keep from being made again.
 	settledPolls int
-	// rejected is the timestamp of the newest report the evidence overturned.
+	// rejected is the timestamp of the report the evidence overturned, or 0 for
+	// none.
 	//
 	// It is what stops a dropped report coming straight back: the standing
 	// option still holds the same value, and Observe reads it again on the very
-	// next poll. Minimal on purpose -- Task 9 gives the rejection its full
-	// semantics across all three evidence rules; all this does is refuse
-	// anything not strictly newer than what was overturned.
+	// next poll. Without a memory of the drop the report is re-accepted the
+	// moment the screen settles again, the pane stays on the report path
+	// forever, and the screen grammars never run on it again -- so a dialog
+	// raised after a drop would never be seen.
+	//
+	// ONE SLOT, not a set, and one semantic for all three evidence rules: the
+	// option holds exactly one value, so the only report that can be re-seen is
+	// the current one. Whichever rule condemned it, the report in force is
+	// re-rejected WITHOUT re-evaluating the evidence for as long as its own
+	// timestamp matches this -- the evidence that condemned it was a screen
+	// that has since moved on, and re-running the test against a screen that
+	// has since settled is exactly how a dropped report comes back to life.
+	//
+	// Do not make it provisional. Revision 4 of the design cleared a rule-3
+	// rejection "the moment the classifier reports idle" and revision 5
+	// withdrew that on two measurements: the case it was built for is
+	// measurably empty (polls-to-settle was 3 or 4 in every one of 1,440 phase
+	// replays and never 5), and the trigger is not safe (4 of 88 measured turns
+	// went still while waiting on the model, so mid-turn stillness on a root
+	// that is genuinely working would clear a rejection that was CORRECT --
+	// resurrecting a subagent's false idle and landing the false done badge the
+	// rule exists to prevent).
+	//
+	// What a permanent-sounding rejection actually costs is much less than it
+	// sounds. A rejected report hands the pane back to the classifier, and the
+	// classifier is an authority that can stamp a finish: for rule 3 to have
+	// fired the screen must have churned through the whole window, which sets
+	// everChanged, so when it does settle Observe stamps finishedAt = now in
+	// the ordinary way. A wrongly-dropped true turn end does not lose its badge
+	// -- it gets one dated by when the daemon noticed instead of by when the
+	// agent finished. And the rejection lasts only until the agent next does
+	// anything: the next turn's start writes working, which is an edge, which
+	// is a newer value, which clears the slot.
+	//
+	// It lives here and not in @wterm_agent. The daemon READS that option, it
+	// does not write it; a reader that edits the channel it reads cannot be
+	// reasoned about when two of them run, and nothing promises wterm-web is a
+	// singleton. The price is that the slot does not survive a restart -- see
+	// Observe's first sight, and Poller.refresh, which empties both slots on a
+	// tmux-server generation change for the same reason.
 	rejected int64
 }
+
+// reject records that the evidence overturned the report in force, so that
+// reading the same standing value again does not put it back.
+//
+// A rejection changes what is BELIEVED, not what was accepted, and the two are
+// easy to conflate. A report reaches the evidence rules only by passing the
+// ordering filter first, so the condemned report IS st.accepted and stays
+// there: the slot marks it as not in force, it does not rewind the filter. The
+// filter therefore goes on measuring against that same timestamp, which is what
+// makes a delayed older write a non-event -- it is refused for being older, and
+// refusing it must not clear the rejection.
+func (st *reportState) reject() { st.rejected = st.accepted.Timestamp }
 
 // NewReports returns a report memory that has seen nothing.
 func NewReports() *Reports { return &Reports{panes: make(map[string]*reportState)} }
@@ -147,15 +197,27 @@ func (r *Reports) Observe(paneID, raw, command string, now time.Time) (Report, b
 		// afresh. Inheriting the previous report's verdict would let one
 		// verified turn end vouch for every turn end after it.
 		st.windowPolls, st.verified, st.settledPolls = 0, false, 0
-	}
-	if st.accepted.Timestamp <= st.rejected {
-		// The evidence overturned this report and the option still holds it.
-		return Report{}, false
+		// A newer value is a different report and earns its own verdict.
+		st.rejected = 0
 	}
 	// Anything not newer is either the same report we already hold or an
 	// out-of-order write -- ordinary scheduling jitter between two
 	// fire-and-forget writes, not a broken integration -- and either way what
 	// stands is st.accepted.
+	//
+	// The guard is on what is ABOUT TO GO INTO FORCE, which is st.accepted --
+	// never on `parsed` at the top of the function. A delayed older write does
+	// not match the rejection slot (it carries its own, earlier timestamp), so
+	// an entry guard waves it through; the ordering filter then refuses it for
+	// being older, leaves st.accepted alone -- and st.accepted IS the report
+	// that was rejected on evidence, which the function would then return with
+	// ok = true. The rejected report would come back in force on the strength
+	// of an unrelated late write. Written here, the same poll returns nothing
+	// in force, whichever value tmux happened to be holding.
+	if st.accepted.Timestamp == st.rejected {
+		// The evidence overturned this report and the option still holds it.
+		return Report{}, false
+	}
 	if st.accepted.State == StateWorking &&
 		now.Sub(time.UnixMilli(st.accepted.Timestamp)) > workingTTL {
 		return Report{}, false
@@ -216,7 +278,7 @@ func (r *Reports) Corroborate(paneID string, idle bool) bool {
 		return true
 	}
 	if st.windowPolls >= NIdle {
-		r.reject(paneID, st.accepted.Timestamp)
+		st.reject()
 		return false
 	}
 	return true
@@ -251,7 +313,7 @@ func (r *Reports) CorroborateBlocked(paneID string, changed, formOnScreen bool) 
 		// the pane visibly resumed work. The badge does not necessarily go with
 		// the report: a dropped report hands the pane back to the grammars on
 		// this same capture, and a dialog still on screen is matched there.
-		r.reject(paneID, st.accepted.Timestamp)
+		st.reject()
 		return false
 	}
 	if formOnScreen {
@@ -266,7 +328,7 @@ func (r *Reports) CorroborateBlocked(paneID string, changed, formOnScreen bool) 
 		// and the agent finished before anyone reconnected: nothing ever
 		// changes again, so rule 1 never fires and without this the blocked
 		// rests forever on a finished agent.
-		r.reject(paneID, st.accepted.Timestamp)
+		st.reject()
 		return false
 	}
 	return true
@@ -287,14 +349,6 @@ func (r *Reports) Confirmed(paneID string, connected bool) bool {
 		return true
 	}
 	return st.verified
-}
-
-// reject records that the evidence overturned the report in force, so that
-// reading the same standing value again does not put it back.
-func (r *Reports) reject(paneID string, ts int64) {
-	if st := r.panes[paneID]; st != nil && ts > st.rejected {
-		st.rejected = ts
-	}
 }
 
 // Retain forgets every pane that is not in keep, on the same terms as

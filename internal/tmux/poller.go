@@ -197,8 +197,24 @@ func (p *Poller) refresh(ctx context.Context) {
 	// which is every v1 caller -- does not reset on every poll, and so that a
 	// generation read that failed leaves the run alone rather than reading its
 	// own empty answer as a restart.
+	//
+	// The report memory goes with it, and not only by symmetry. It was left out
+	// at first on a derivation -- a restarted server's panes carry no options,
+	// so the raw value is "", ParseReport fails and Observe deletes the entry --
+	// which holds as far as it goes but makes the daemon's memory depend for its
+	// correctness on what tmux happens to be holding. Both of its slots are
+	// keyed on a pane id the new server has renumbered: an accepted timestamp
+	// would be an ordering floor a fresh agent's first report could fall under,
+	// and a rejection recorded against the dead server's %1 would silently
+	// condemn the report of whatever reused the id. Across a restart both slots
+	// are empty and the standing report is a FIRST SIGHT -- accepted by the
+	// ordering filter, then verified from scratch, so a resting idle enters the
+	// verification window rather than deriving immediately. That is the honest
+	// cost of holding the rejection in daemon memory rather than in tmux:
+	// bounded, one-shot, and only on a restart.
 	if p.classifier != nil && haveStart && start != p.ServerStart() {
 		p.classifier.Retain(nil)
+		p.reports.Retain(nil)
 	}
 
 	// Before publishing, so no reader ever sees a row between its snapshot

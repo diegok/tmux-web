@@ -12,7 +12,11 @@ export default mergeConfig(
       // constructor, which its tests replace anyway. A component test added
       // later can opt in per file with `// @vitest-environment jsdom`.
       environment: 'node',
-      include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+      // The integrations' shared queue lives in internal/integrations/,
+      // because that tree is what the installer //go:embed's, and its test
+      // lives beside it. Reaching outside this root keeps one copy of the
+      // module rather than two that drift.
+      include: ['src/**/*.test.ts', 'src/**/*.test.tsx', '../internal/integrations/*.test.ts'],
     },
   }),
 )

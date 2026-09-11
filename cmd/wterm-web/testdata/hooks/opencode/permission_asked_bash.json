@@ -1,0 +1,22 @@
+{
+  "id": "evt_08ece0f69002WY67pR5VKvOitq",
+  "type": "permission.asked",
+  "properties": {
+    "id": "per_08ece0f69001jf2nIjRPjjvefX",
+    "sessionID": "ses_f7132011affer5jFmicxr0GtEq",
+    "permission": "bash",
+    "patterns": [
+      "echo hello from opencode"
+    ],
+    "metadata": {
+      "command": "echo hello from opencode"
+    },
+    "always": [
+      "echo *"
+    ],
+    "tool": {
+      "messageID": "msg_08ecdff3c001BJui1zK6sp1ZHl",
+      "callID": "call_3dbb4a84e3ef43628ad65b76"
+    }
+  }
+}

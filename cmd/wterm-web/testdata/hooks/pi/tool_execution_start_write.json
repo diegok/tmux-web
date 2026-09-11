@@ -1,0 +1,9 @@
+{
+  "type": "tool_execution_start",
+  "toolCallId": "call_616c7458215b4e44b7efb712",
+  "toolName": "write",
+  "args": {
+    "path": "out.txt",
+    "content": "done"
+  }
+}

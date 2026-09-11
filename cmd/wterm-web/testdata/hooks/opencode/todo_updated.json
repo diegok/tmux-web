@@ -1,0 +1,24 @@
+{
+  "id": "evt_08ecb268a001dteWAvf0EKjVgp",
+  "type": "todo.updated",
+  "properties": {
+    "sessionID": "ses_f7135fcc9ffebuJVObk3PCMWN8",
+    "todos": [
+      {
+        "content": "Run `wc -l sample.txt`",
+        "status": "completed",
+        "priority": "medium"
+      },
+      {
+        "content": "Read sample.txt",
+        "status": "in_progress",
+        "priority": "medium"
+      },
+      {
+        "content": "Write out.txt containing the word done",
+        "status": "pending",
+        "priority": "medium"
+      }
+    ]
+  }
+}

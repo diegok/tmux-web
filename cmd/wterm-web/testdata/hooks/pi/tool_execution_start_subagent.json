@@ -1,0 +1,10 @@
+{
+  "type": "tool_execution_start",
+  "toolCallId": "call_9ac52a09125e4b8b822ee17c",
+  "toolName": "subagent",
+  "args": {
+    "agent": "delegate",
+    "async": false,
+    "task": "Write a two-line poem about terminal windows. Return only the two-line poem, nothing else."
+  }
+}

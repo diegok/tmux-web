@@ -1,0 +1,10 @@
+{
+  "session_id": "1f498509-8cf5-4b81-9c9b-dd638b5746b1",
+  "transcript_path": "/home/user/.claude/projects/-tmp-wterm-capture-cc-proj/1f498509-8cf5-4b81-9c9b-dd638b5746b1.jsonl",
+  "cwd": "/tmp/wterm-capture/cc/proj",
+  "scratchpad_dir": "/tmp/wterm-capture/-tmp-wterm-capture-cc-proj/1f498509-8cf5-4b81-9c9b-dd638b5746b1/scratchpad",
+  "prompt_id": "9fd41de7-d1f4-4072-ac9f-fa175ad240ea",
+  "hook_event_name": "Notification",
+  "message": "Claude Code needs your approval for the plan",
+  "notification_type": "permission_prompt"
+}

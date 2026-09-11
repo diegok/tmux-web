@@ -1,0 +1,37 @@
+{
+  "input": {
+    "sessionID": "ses_f7133db4cffe0EZNl6K9sGw9IX",
+    "agent": "general",
+    "model": {
+      "modelID": "example-model",
+      "providerID": "example-provider"
+    },
+    "messageID": "msg_08ecc24be001pzqpdGfw84vEQY",
+    "variant": "high"
+  },
+  "output": {
+    "message": {
+      "id": "msg_08ecc24be001pzqpdGfw84vEQY",
+      "role": "user",
+      "sessionID": "ses_f7133db4cffe0EZNl6K9sGw9IX",
+      "time": {
+        "created": 1789102138560
+      },
+      "agent": "general",
+      "model": {
+        "providerID": "example-provider",
+        "modelID": "example-model",
+        "variant": "high"
+      }
+    },
+    "parts": [
+      {
+        "type": "text",
+        "text": "write a two-line poem about terminal windows and return only the poem",
+        "messageID": "msg_08ecc24be001pzqpdGfw84vEQY",
+        "sessionID": "ses_f7133db4cffe0EZNl6K9sGw9IX",
+        "id": "prt_08ecc24c50017vKzRDFgIURcus"
+      }
+    ]
+  }
+}

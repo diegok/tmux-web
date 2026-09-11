@@ -1,0 +1,28 @@
+{
+  "input": {
+    "tool": "todowrite",
+    "sessionID": "ses_f7135fcc9ffebuJVObk3PCMWN8",
+    "callID": "call_9abde590c4654c21b75c2ff2"
+  },
+  "output": {
+    "args": {
+      "todos": [
+        {
+          "content": "Run `wc -l sample.txt`",
+          "status": "in_progress",
+          "priority": "medium"
+        },
+        {
+          "content": "Read sample.txt",
+          "status": "pending",
+          "priority": "medium"
+        },
+        {
+          "content": "Write out.txt containing the word done",
+          "status": "pending",
+          "priority": "medium"
+        }
+      ]
+    }
+  }
+}

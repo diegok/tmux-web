@@ -1,0 +1,12 @@
+{
+  "input": {
+    "tool": "bash",
+    "sessionID": "ses_f7135fcc9ffebuJVObk3PCMWN8",
+    "callID": "call_27b92d5f77d342cd91d7d64c"
+  },
+  "output": {
+    "args": {
+      "command": "wc -l sample.txt"
+    }
+  }
+}

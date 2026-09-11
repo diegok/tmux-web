@@ -1,0 +1,19 @@
+{
+  "session_id": "1f498509-8cf5-4b81-9c9b-dd638b5746b1",
+  "transcript_path": "/home/user/.claude/projects/-tmp-wterm-capture-cc-proj/1f498509-8cf5-4b81-9c9b-dd638b5746b1.jsonl",
+  "cwd": "/tmp/wterm-capture/cc/proj",
+  "scratchpad_dir": "/tmp/wterm-capture/-tmp-wterm-capture-cc-proj/1f498509-8cf5-4b81-9c9b-dd638b5746b1/scratchpad",
+  "prompt_id": "5292dbf5-f932-48cc-81df-1b864339395b",
+  "permission_mode": "auto",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Agent",
+  "tool_input": {
+    "description": "Write two-line poem",
+    "prompt": "Write a two-line poem about terminal windows. Do not search the filesystem or use any tools — just compose the poem and report it back as your final answer, exactly two lines.",
+    "subagent_type": "Explore"
+  },
+  "tool_use_id": "toolu_01FSot5FHWvW4o3dHYgcdghC"
+}

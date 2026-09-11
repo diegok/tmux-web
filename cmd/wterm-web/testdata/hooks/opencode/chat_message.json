@@ -1,0 +1,36 @@
+{
+  "input": {
+    "sessionID": "ses_f7135fcc9ffebuJVObk3PCMWN8",
+    "agent": "build",
+    "model": {
+      "providerID": "example-provider",
+      "modelID": "example-model"
+    },
+    "variant": "high"
+  },
+  "output": {
+    "message": {
+      "id": "msg_08eca0373001LpOJ7fTVPGL93K",
+      "role": "user",
+      "sessionID": "ses_f7135fcc9ffebuJVObk3PCMWN8",
+      "time": {
+        "created": 1789101998963
+      },
+      "agent": "build",
+      "model": {
+        "providerID": "example-provider",
+        "modelID": "example-model",
+        "variant": "high"
+      }
+    },
+    "parts": [
+      {
+        "type": "text",
+        "text": "Write a haiku about tmux panes. Do not use any tools.",
+        "messageID": "msg_08eca0373001LpOJ7fTVPGL93K",
+        "sessionID": "ses_f7135fcc9ffebuJVObk3PCMWN8",
+        "id": "prt_08eca03760012N9oWJUjWCGXE4"
+      }
+    ]
+  }
+}

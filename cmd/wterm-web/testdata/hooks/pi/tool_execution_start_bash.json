@@ -1,0 +1,8 @@
+{
+  "type": "tool_execution_start",
+  "toolCallId": "call_09dcb1b5fbb94ad0ae71ca4a",
+  "toolName": "bash",
+  "args": {
+    "command": "wc -l sample.txt"
+  }
+}

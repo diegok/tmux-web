@@ -1,0 +1,8 @@
+{
+  "type": "tool_execution_start",
+  "toolCallId": "call_6685c6d2f3d448e2a265f183",
+  "toolName": "read",
+  "args": {
+    "path": "sample.txt"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "session_id": "1f498509-8cf5-4b81-9c9b-dd638b5746b1",
+  "transcript_path": "/home/user/.claude/projects/-tmp-wterm-capture-cc-proj/1f498509-8cf5-4b81-9c9b-dd638b5746b1.jsonl",
+  "cwd": "/tmp/wterm-capture/cc/proj",
+  "scratchpad_dir": "/tmp/wterm-capture/-tmp-wterm-capture-cc-proj/1f498509-8cf5-4b81-9c9b-dd638b5746b1/scratchpad",
+  "prompt_id": "9fd41de7-d1f4-4072-ac9f-fa175ad240ea",
+  "permission_mode": "plan",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/home/user/.claude/plans/fizzy-wobbling-gadget.md",
+    "content": "# Add `echo` line to sample.txt\n\n## Context\n\n`sample.txt` currently holds four lines (`alpha`, `bravo`, `charlie`, `delta`) and is used in this session as a small test fixture. The request is to extend it with one more line containing the word `echo`, continuing the NATO-alphabet sequence.\n\n## Plan\n\nAppend a single line `echo` to the end of `/tmp/wterm-capture/cc/proj/sample.txt`, preserving the existing four lines and the trailing newline. Verify with `cat sample.txt` (expect five lines ending in `echo`) and `wc -l sample.txt` (expect `5`).\n"
+  },
+  "tool_use_id": "toolu_012qqk6HtsPyJ5GV5HDGbgZc"
+}

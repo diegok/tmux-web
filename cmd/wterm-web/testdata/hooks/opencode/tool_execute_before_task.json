@@ -1,0 +1,14 @@
+{
+  "input": {
+    "tool": "task",
+    "sessionID": "ses_f7135fcc9ffebuJVObk3PCMWN8",
+    "callID": "call_8099fd0687e846e09ebe1c33"
+  },
+  "output": {
+    "args": {
+      "description": "Two-line terminal poem",
+      "prompt": "write a two-line poem about terminal windows and return only the poem",
+      "subagent_type": "general"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "session_id": "1f498509-8cf5-4b81-9c9b-dd638b5746b1",
+  "transcript_path": "/home/user/.claude/projects/-tmp-wterm-capture-cc-proj/1f498509-8cf5-4b81-9c9b-dd638b5746b1.jsonl",
+  "cwd": "/tmp/wterm-capture/cc/proj",
+  "scratchpad_dir": "/tmp/wterm-capture/-tmp-wterm-capture-cc-proj/1f498509-8cf5-4b81-9c9b-dd638b5746b1/scratchpad",
+  "prompt_id": "59d80c72-9243-4731-ba54-9117927b094a",
+  "permission_mode": "auto",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Write a haiku about tmux panes. Do not use any tools."
+}

@@ -1,0 +1,5 @@
+{
+  "type": "input",
+  "text": "Write a haiku about tmux panes. Do not use any tools.",
+  "source": "interactive"
+}

@@ -1,0 +1,6 @@
+{
+  "type": "ui_prompt_start",
+  "reason": "ui_prompt",
+  "kind": "input",
+  "title": "Which sample color do you prefer?"
+}

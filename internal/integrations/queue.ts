@@ -1,3 +1,13 @@
+// @ts-nocheck -- see "THIS FILE'S BODY IS PLAIN JAVASCRIPT" below. The types
+// in this file are JSDoc, and TypeScript reads JSDoc types only in `.js`
+// files: in a `.ts` file they are comments, so `new Promise((resolve) => ...)`
+// infers `Promise<unknown>` and every `resolve()` in here is an arity error
+// that annotating the file -- the one thing this file may not have -- is the
+// only fix for. The pragma is a comment, so it survives into the `.js` the
+// installer ships, where the JSDoc below starts being read for real. Its cost
+// is that pi.ts sees these two exports as `any`; pi.ts's own body is checked
+// in full by web/tsconfig.integrations.json.
+//
 // One report in flight per pane, and the argv that report is made of.
 //
 // THIS FILE'S BODY IS PLAIN JAVASCRIPT, deliberately, even though it is named

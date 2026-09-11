@@ -1,0 +1,55 @@
+{
+  /* The integrations' own TypeScript project: `internal/integrations/*.ts`,
+     the sources the installer //go:embed's.
+
+     WHY IT IS A PROJECT OF ITS OWN rather than another `include` entry on
+     tsconfig.test.json. Measured, not assumed: before this file existed, a
+     deliberate `const probe: number = "not a number"` in
+     internal/integrations/queue.test.ts left `pnpm typecheck` at EXIT 0 --
+     nothing was looking at that directory at all. That cost nothing while the
+     directory held only queue.ts, whose body is plain JavaScript with JSDoc
+     types by design (Task 16) so that the installer can ship it into a `.js`
+     context unchanged. It costs something now that pi.ts is real TypeScript:
+     folded into the app/test project it would either drag queue.ts's
+     JavaScript body under the app's rules or drag the app under queue.ts's.
+
+     It lives under web/ rather than in internal/integrations/ for the same
+     reason vitest.config.ts's `include` reaches out instead of a copy reaching
+     in: that directory is embedded into the binary, and a tsconfig.json is not
+     part of what ships to a user's ~/.pi/extensions.
+
+     The `paths` entry is not decoration. Module resolution walks UP from the
+     importing file, and internal/integrations/ has no node_modules above it
+     that holds vitest -- the only install is web/node_modules -- so without
+     this line pi.test.ts's `import ... from 'vitest'` cannot resolve and the
+     whole project fails on an error that says nothing about types. Paths are
+     resolved relative to this file (TypeScript 6 deprecated baseUrl). */
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.integrations.tsbuildinfo",
+    "target": "es2023",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "skipLibCheck": true,
+
+    "paths": {
+      "vitest": ["./node_modules/vitest"]
+    },
+
+    /* Bundler mode, matching the rest of the repo: these files are read by
+       pi's and opencode's own loaders, which take the `.ts` extension on an
+       import specifier. */
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true
+  },
+  "include": ["../internal/integrations/*.ts"]
+}

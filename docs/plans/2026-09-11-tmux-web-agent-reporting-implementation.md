@@ -3033,7 +3033,9 @@ Only what needs a **runtime object** (pi's `ctx`) or **memory across events** (o
 **This logic has no test story today, which is how it would ship untested.** It goes in a tiny pure module with the spawn injected. Two exports, and Tasks 17 and 18 both import them rather than reimplementing either:
 
 - `makeQueue(spawn)` — the slot. `spawn(item)` returns a promise; the queue never looks inside an item.
-- `spawnReport(agent)` — the argv, in one place: it returns a `spawn` that runs `wterm-web report --agent <agent> --event <item.event>` with `JSON.stringify(item.payload ?? {})` on stdin, and never awaits the child. Neither integration builds a command line of its own.
+- `spawnReport(agent)` — the argv, in one place: it returns a `spawn` that runs `wterm-web report --agent <agent> --event <item.event>` with `JSON.stringify(item.payload ?? {})` on stdin. **Its promise settles when the child exits, and it never rejects** -- a failed report is silence, never a thrown error inside an agent's hook. Do not settle it at spawn time: the queue's whole guarantee is that the collapsed spawn starts only after the in-flight one has *finished*, so that the process it starts stamps a strictly later millisecond. Settle early and "finished" degrades to "spawned", two children can stamp out of order, and the daemon's ordering filter silently drops the newer state -- the exact failure this queue exists to prevent, and one no test here can catch, because the queue's own tests inject the spawn. The queue waits; the handlers never do. Neither integration builds a command line of its own.
+
+**`queue.ts`'s body must be valid JavaScript** -- no type annotations, no TS-only syntax. Both distribution shapes in Task 20 deliver this file into a `.js` context, so TS-only syntax there forces Task 20 to strip types or to reopen a file it has already shipped.
 
 **What it is for:** a burst of tool calls must not become a queue of forks. At most one `report` in flight per pane; if a new state arrives while one is running, keep only the latest and drop what it replaced. Both pi and opencode are long-lived runtimes and can hold the slot in module scope. **Claude Code gets no queue**, because each hook is a fresh process and there is nowhere to put one; the daemon's ordering rule is what stands in for the queue it cannot have.
 
@@ -3648,7 +3650,7 @@ func TestAShortTurnStillStamps(t *testing.T) {
 	// first sight, one changed capture, then settleAfter identical ones.
 	// It must stamp, because nothing was stamped before it -- the dwell is
 	// about the gap since the LAST stamp, not about how much movement this run
-	// had. On this clock the stamp lands about 6s past the epoch, which is
+	// had. On this clock the stamp lands 4.5s past the epoch, which is
 	// INSIDE the dwell: without the `finishedAt == 0` disjunct this test is red,
 	// and so is every stamp assertion in TestClassifierWorkingAndIdle.
 }
@@ -3695,7 +3697,7 @@ and the guard, which needs no new state — `p.finishedAt` is already there — 
 	// obviously more than 15s" is true only when `now` is a real wall clock.
 	// Every test in this file starts at `now := time.Unix(0, 0)` (state_test.go
 	// lines 12, 102, 130, 151, 203, 244) and advances in 1.5s steps, so at the
-	// first genuine stamp `now` is nine seconds past the epoch and
+	// first genuine stamp `now` is 7.5 seconds past the epoch and
 	// time.UnixMilli(0) IS the epoch: the subtraction gives 9s, which is less
 	// than the dwell, and the first stamp of the existing v2 suite is refused.
 	if p.still == settleAfter && p.everChanged && !blocked &&
@@ -3713,7 +3715,7 @@ and the guard, which needs no new state — `p.finishedAt` is already there — 
 | Mutant | Killed by |
 | --- | --- |
 | Drop the dwell conjunct | `TestObserveDoesNotRestampWithinTheDwell`'s middle assertion |
-| Drop the `p.finishedAt == 0` disjunct (the "it is trivially true anyway" simplification) | `TestAShortTurnStillStamps` **and the whole existing v2 stamp suite** — `TestClassifierWorkingAndIdle` first, because on a `time.Unix(0, 0)` clock the first genuine stamp is nine seconds from the epoch. Run `go test ./internal/tmux/` after applying it: if only the new test goes red, a fixture has drifted onto a wall clock |
+| Drop the `p.finishedAt == 0` disjunct (the "it is trivially true anyway" simplification) | `TestAShortTurnStillStamps` **and the whole existing v2 stamp suite** — `TestClassifierWorkingAndIdle` first, because on a `time.Unix(0, 0)` clock the first genuine stamp is 7.5 seconds from the epoch (0 -> 1.5 -> 3.0 settles without stamping -> 4.5 changes -> 6.0 -> 7.5 stamps), and the next one 4.5s later is refused too. Run `go test ./internal/tmux/` after applying it: if only the new test goes red, a fixture has drifted onto a wall clock |
 | `>=` to `>` , or the subtraction reversed | the beyond-the-dwell assertion |
 | `lateRepaintDwell = 0` | the middle assertion |
 | Guard with `p.finishedAt == 0` instead (stamp once per pane, ever) | the beyond-the-dwell assertion. This is v2's own recorded trap arriving through a new door |

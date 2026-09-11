@@ -11,13 +11,31 @@
  *
  * ## What a pane row says, and on which line
  *
- * `paneText` picks one of label, title or `pane_current_command` -- and *where*
- * it goes follows from which one won. A command is a program's name: one short
- * word, and it keeps the monospaced capsule it has always had, on the same line
- * as the window name. A title is what an agent is working on: prose, routinely
- * longer than the sidebar is wide, and it gets **a second line of its own** --
- * no capsule, a step smaller and a step dimmer than the name above it, cut with
- * an ellipsis and scrolled on hover (see `.row-line` in `index.css`).
+ * `paneText` picks one of a blocked question, a label, an activity, a title or
+ * `pane_current_command` -- and *where* it goes follows from which one won. A
+ * command is a program's name: one short word, and it keeps the monospaced
+ * capsule it has always had, on the same line as the window name. The other
+ * four are prose, routinely longer than the sidebar is wide, and they get **a
+ * second line of their own** -- no capsule, a step smaller and a step dimmer
+ * than the name above, cut with an ellipsis and scrolled on hover (see
+ * `.row-line` in `index.css`).
+ *
+ * A title is **what this pane is**, not what it is doing. That it was the
+ * latter was v2's premise and it collapsed: Claude Code generates its title on
+ * the first turn and then freezes it -- held byte-identical across three turns
+ * with unrelated prompts, and stale while the agent sits blocked -- opencode
+ * derives its from the first message and never revises it, and pi's is
+ * `π - <cwd basename>`, which never mentions the task at all. What an agent is
+ * doing *now* can only come from the agent, and does: `SnapshotRow.activity`,
+ * written to `@wterm_agent` by its own integration. It sits above the title for
+ * exactly that reason.
+ *
+ * One row can say two things at once. A labelled pane with an activity puts the
+ * **label on the first line beside the name** and keeps the activity on the
+ * second: the label still wins the precedence -- it is a name the user gave
+ * this pane on purpose -- but a row has two lines and spending both on the same
+ * question throws away one of the two answers. Identity above, description
+ * below. See `PaneText.label`.
  *
  * That split is the point. Cramming a sentence into the capsule that held `zsh`
  * squeezed the window name it sat beside, and cut both; giving every `zsh` row
@@ -45,6 +63,17 @@
  * shell. `done` is the one state this browser works out for itself, by
  * comparing the daemon's `finishedAt` with what it remembers being shown -- see
  * `useSeenPanes`, which App calls and passes in as `seen`.
+ *
+ * **How the daemon decided is not part of how the row looks.** `stateSource`
+ * says which authority settled the state -- `"event"` for the agent's own
+ * report, `"screen"` for the classifier reading the pane -- and it is on the
+ * wire so that tests can tell the two apart, not so that a row can. Two
+ * visibly different kinds of state dot would teach a user to trust one and
+ * ignore the other, which is the badge-integrity failure this whole design is
+ * about, arriving through a third door. A tooltip saying which would be fine; a
+ * class is not. `AppSidebar.test.tsx` renders a row both ways and compares the
+ * markup, because a prohibition with no test is one that gets violated
+ * silently.
  *
  * A session row shows the **live session name**, never the group key it is
  * identified by: tmux freezes `session_group` at the pre-rename name, so a
@@ -819,6 +848,16 @@ function withoutAgentPrefix(title: string, command: string): string {
 interface PaneText {
   text: string
   /**
+   * A user label to sit beside the row's name on the first line.
+   *
+   * Set only when the label and the agent's activity both exist: the label
+   * wins the *precedence* -- it is a name the user gave this pane on purpose --
+   * but the row has two lines, and making the label take the second one would
+   * throw away the activity readout that is the whole point of the feature.
+   * Identity on the first line, description on the second.
+   */
+  label?: string
+  /**
    * The native tooltip, when the row has more to say than it shows. A blocked
    * agent's question always does -- its choices are what you need in order to
    * decide whether it is worth switching to -- and a title does whenever it is
@@ -838,14 +877,26 @@ interface PaneText {
 }
 
 /**
- * What a pane row says: **label, else title, else command**.
+ * What a pane row says: **question, else label, else activity, else title, else
+ * command** -- and, when a label and an activity both exist, both of them.
  *
  * The label is a name the user gave this pane and wins outright, including over
- * a title a program is rewriting underneath it -- that is the whole point of
- * having one. (Nothing sets a label from the browser until Task 12's rename;
- * `tmux set -p @wterm_label` already does, and the field is already on the
- * wire, so the order is honoured now rather than left as a field that is read
- * and ignored.)
+ * a title a program is rewriting underneath it and over the activity an agent
+ * is reporting -- that is the whole point of having one. (Nothing sets a label
+ * from the browser until the rename task; `tmux set -p @wterm_label` already
+ * does, and the field is already on the wire, so the order is honoured now
+ * rather than left as a field that is read and ignored.) But winning the
+ * precedence is not the same as taking the second line: where there is an
+ * activity to show, the label rides beside the name instead and the activity
+ * keeps the line below it. Nothing is dropped, which is what the precedence on
+ * its own did to whichever of the two lost.
+ *
+ * The activity is the agent's own account of what it is doing right now, from
+ * its integration -- and it outranks the title because the title is not that.
+ * All three agents write a title once and leave it; see the note at the top of
+ * this file. An activity that is blank or all whitespace is not an activity:
+ * it falls straight through to the title, because a dim, empty second line is
+ * a worse row than no second line.
  *
  * A title has to earn the row. Claude Code sets it to what it is working on,
  * which is far better than three rows all reading `claude`, but two kinds of
@@ -875,7 +926,7 @@ interface PaneText {
  * is something this may edit.
  */
 function paneText(
-  pane: Pick<PaneNode, 'command' | 'title' | 'label' | 'agentState' | 'question'>,
+  pane: Pick<PaneNode, 'command' | 'title' | 'label' | 'activity' | 'agentState' | 'question'>,
 ): PaneText {
   // A blocked agent's own words outrank both. The whole app exists to answer
   // "which one needs me, and for what", and once one of them is asking, the
@@ -893,6 +944,19 @@ function paneText(
   }
 
   const label = pane.label.trim()
+  const activity = pane.activity.trim()
+
+  // The label outranks the activity, and takes the first line rather than the
+  // second when there is an activity to put there. `undefined` rather than `''`
+  // for the lone-activity case: a row with no label must render no label
+  // element at all, not an empty one beside the name.
+  if (activity !== '')
+    return {
+      text: activity,
+      label: label === '' ? undefined : label,
+      fromCommand: false,
+      tooltip: activity,
+    }
   if (label !== '') return { text: label, fromCommand: false, tooltip: label }
 
   const title = pane.title.trim()
@@ -930,11 +994,24 @@ function PaneLines({
   /** The tmux-active marker, on a split window's pane rows. */
   afterName?: ReactNode
 }) {
-  const { text, fromCommand, tooltip } = paneText(pane)
+  const { text, label, fromCommand, tooltip } = paneText(pane)
   return (
     <span className="flex min-w-0 flex-1 flex-col justify-center gap-0.5">
       <span className="flex min-w-0 items-center gap-2">
         <span className="truncate">{name}</span>
+        {label !== undefined && (
+          // Identity, beside the identity above it -- the second line is the
+          // activity's. Quieter than the window name so that the tree still
+          // reads by scanning the names, and `truncate` so that a long label
+          // is cut here rather than widening the sidebar.
+          <span
+            data-row-label
+            className="text-sidebar-foreground/70 truncate text-xs font-normal"
+            title={label}
+          >
+            {label}
+          </span>
+        )}
         {afterName}
         {fromCommand && (
           // Unchanged, deliberately: a command is a program's name, and a row

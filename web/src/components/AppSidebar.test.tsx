@@ -171,6 +171,20 @@ function rowText(markup: string): { kind: 'command' | 'title'; tag: string; text
   )
 }
 
+/**
+ * The user label riding on each row's first line, in document order.
+ *
+ * Matched *through* the name span, so a label rendered anywhere else -- on the
+ * second line, where a lone label still belongs -- is not found by this. A
+ * helper that searched the whole markup for the words would report a label on
+ * the first line whichever line it was actually on, which is the one thing
+ * these tests are here to tell apart.
+ */
+function rowLabels(markup: string): string[] {
+  const re = /<span class="truncate">[^<]*<\/span><span data-row-label[^>]*>([^<]*)<\/span>/g
+  return [...markup.matchAll(re)].map((m) => m[1])
+}
+
 const splitWindow: SnapshotRow[] = [
   row({ windowIndex: 1, windowName: 'api', paneId: '%4', paneIndex: 0, command: 'claude' }),
   row({
@@ -395,6 +409,115 @@ describe('what a pane row says', () => {
   it('treats a blank label as no label', () => {
     const [said] = rowText(render(fromRows([row({ command: 'zsh', label: '   ' })])))
     expect(said).toMatchObject({ kind: 'command', text: 'zsh' })
+  })
+
+  it('shows the activity under the name', () => {
+    const markup = render(
+      fromRows([row({ command: 'claude', title: task, activity: 'run go test ./...' })]),
+    )
+    // Above the title, and that ordering is the whole of what this feature is
+    // worth: the title says what this pane *is* and is frozen at the first
+    // turn, the activity says what the agent is doing now.
+    expect(rowText(markup)).toEqual([
+      expect.objectContaining({ kind: 'title', text: 'run go test ./...' }),
+    ])
+    expect(markup).not.toContain(shown)
+    // And it takes the second line's whole bargain, not just its slot: clipped
+    // in CSS and carried entire in `title=`, which is the whole of what a phone
+    // and a reduced-motion reader get in place of the hover marquee. An
+    // activity is capped at 128 bytes and the sidebar is 16rem wide, so it is
+    // cut about as often as a title is.
+    const [said] = rowText(markup)
+    expect(said.tag).toContain('row-line')
+    expect(said.tag).toContain('title="run go test ./..."')
+  })
+
+  it('puts a user label on the first line when there is an activity for the second', () => {
+    // Both present. The label is identity and rides with the name; the activity
+    // is description and keeps the second line. Neither is dropped -- which is
+    // what the old precedence did to whichever one lost.
+    const markup = render(
+      fromRows([row({ command: 'claude', label: 'prod db', activity: 'run go test ./...' })]),
+    )
+    expect(rowLabels(markup)).toEqual(['prod db'])
+    expect(rowText(markup)).toEqual([
+      expect.objectContaining({ kind: 'title', text: 'run go test ./...' }),
+    ])
+    // The first line now has two things on it and a fixed 16rem to put them
+    // in, so the label makes the same bargain the second line does: cut here
+    // rather than widening the sidebar, and carried whole in `title=`.
+    expect(markup).toMatch(
+      /<span data-row-label[^>]*class="[^"]*truncate[^"]*"[^>]*title="prod db"/,
+    )
+  })
+
+  it('keeps a lone label on the second line, exactly as before', () => {
+    // The layout change is scoped to "both exist". A labelled pane with no
+    // integration must look exactly as it looks today.
+    const markup = render(fromRows([row({ command: 'zsh', label: 'notes' })]))
+    expect(rowText(markup)).toEqual([
+      expect.objectContaining({ kind: 'title', text: 'notes' }),
+    ])
+    // And nothing joined the name: not the label on the first line as well as
+    // the second, and not an empty first-line slot waiting for one.
+    expect(markup).not.toContain('data-row-label')
+  })
+
+  it('prefers a blocked question to both', () => {
+    const markup = render(
+      fromRows([
+        row({
+          command: 'claude',
+          label: 'prod db',
+          activity: 'run go test ./...',
+          agentState: 'blocked',
+          question: { text: 'Do you want to run `rm -rf build`?' },
+        }),
+      ]),
+    )
+    expect(rowText(markup)).toEqual([
+      expect.objectContaining({ kind: 'title', text: 'Do you want to run `rm -rf build`?' }),
+    ])
+    // The question takes the whole row, first line included: what it is asking
+    // outranks both the name the user gave the pane and the tool call the
+    // agent is stopped in front of.
+    expect(markup).not.toContain('run go test')
+    expect(markup).not.toContain('prod db')
+  })
+
+  it('falls back to the title, then the command, when there is no activity', () => {
+    // The whole v2 ladder still has to work: most panes will never have an
+    // integration, and that is the floor this design degrades to everywhere.
+    const titled = render(fromRows([row({ command: 'claude', title: task, activity: '' })]))
+    expect(rowText(titled)).toEqual([expect.objectContaining({ kind: 'title', text: shown })])
+
+    const plain = render(fromRows([row({ command: 'zsh', title: 'devbox', activity: '' })]))
+    expect(rowText(plain)).toEqual([expect.objectContaining({ kind: 'command', text: 'zsh' })])
+
+    // Whitespace is not an activity either. An empty second line is a worse row
+    // than no second line, and the sanitizer can hand back a string that
+    // trimmed to nothing.
+    const blank = render(fromRows([row({ command: 'claude', title: task, activity: '  ' })]))
+    expect(rowText(blank)).toEqual([expect.objectContaining({ kind: 'title', text: shown })])
+  })
+
+  it('renders a row identically whichever authority decided its state', () => {
+    // `stateSource` is on the wire so that the daemon's tests can tell the two
+    // authorities apart. It must never reach the browser's output: two visibly
+    // different kinds of state dot teach a user to trust one and ignore the
+    // other, which is the badge-integrity failure arriving through a third
+    // door. A tooltip saying which is fine; a class is not.
+    const base = { command: 'claude', agentState: 'idle', activity: 'run go' }
+    const fromEvent = render(fromRows([row({ ...base, stateSource: 'event' })]))
+    const fromScreen = render(fromRows([row({ ...base, stateSource: 'screen' })]))
+    expect(fromEvent).toBe(fromScreen)
+    // Not vacuously equal: the row really is in there.
+    expect(fromEvent).toContain('run go')
+
+    // Positive control: something the row IS allowed to change on must differ,
+    // or the comparison above is measuring nothing.
+    const blocked = render(fromRows([row({ ...base, agentState: 'blocked', stateSource: 'event' })]))
+    expect(blocked).not.toBe(fromEvent)
   })
 
   it('cuts the title in CSS and carries the whole of it in title=', () => {

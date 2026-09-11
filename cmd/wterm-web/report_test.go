@@ -102,7 +102,7 @@ func TestReportAlwaysExitsZero(t *testing.T) {
 			"", `{"notification_type":"auth_success"}`, mapEnv(full)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rec := &recordingRunner{}
+			rec := &recordingTmux{}
 			var out, errb bytes.Buffer
 			code := runReport(tc.args, strings.NewReader(tc.stdin), &out, &errb, tc.env,
 				func(string) tmuxRunner { return rec })
@@ -140,7 +140,7 @@ func TestReportAlwaysExitsZero(t *testing.T) {
 // other pane -- is a claim about tmux's option hierarchy, which only a real
 // server can answer; see report_integration_test.go.
 func TestReportWritesThroughTheInjectedDial(t *testing.T) {
-	rec := &recordingRunner{}
+	rec := &recordingTmux{}
 	var dialled []string
 	dial := func(socket string) tmuxRunner {
 		dialled = append(dialled, socket)
@@ -178,7 +178,7 @@ func TestReportWritesThroughTheInjectedDial(t *testing.T) {
 // stderr, where the agent's own log may or may not keep it, and the exit code
 // stays 0.
 func TestATmuxFailureIsStillExitZero(t *testing.T) {
-	rec := &recordingRunner{err: errTmuxFailed}
+	rec := &recordingTmux{err: errTmuxFailed}
 	var out, errb bytes.Buffer
 	code := runReport([]string{"--state", "idle"}, strings.NewReader(""), &out, &errb,
 		mapEnv(map[string]string{"TMUX": "/tmp/sock,7,0", "TMUX_PANE": "%12"}),
@@ -198,16 +198,50 @@ func TestATmuxFailureIsStillExitZero(t *testing.T) {
 
 var errTmuxFailed = errors.New("no server running on /tmp/sock")
 
-// recordingRunner is the tmuxRunner stub. Task 14 grows it into one that
-// answers a `show-options` read as well; today it records and returns.
-type recordingRunner struct {
-	calls [][]string
-	err   error
+// recordingTmux is the tmuxRunner stub: it records every command, answers a
+// `show-options` read with the report already standing on the pane, and counts
+// the two kinds of call separately.
+//
+// The two counters are what Task 14's tests assert on, and they assert on them
+// rather than on the value that ends up stored because "wrote nothing" and
+// "wrote the same state again under a newer timestamp" store values that look
+// alike and badge differently. Only the call log can tell them apart.
+type recordingTmux struct {
+	// standing is what a read answers with: the value already in
+	// @wterm_agent. The empty string is the unset option -- which is also what
+	// a real tmux read of an unset user option amounts to, since it exits 1
+	// with "invalid option" (measured on 3.7b) and Run returns "" on error.
+	standing string
+	calls    [][]string
+	shows    int
+	sets     int
+	err      error
 }
 
-func (r *recordingRunner) Run(_ context.Context, args ...string) (string, error) {
+func (r *recordingTmux) Run(_ context.Context, args ...string) (string, error) {
 	r.calls = append(r.calls, append([]string(nil), args...))
+	// Matched on the command word rather than on a flag, because the flags are
+	// what the integration test checks against a real server and a stub that
+	// guessed at them here would be checking itself. "show" is tmux's own
+	// alias for "show-options"; both count as a read.
+	if len(args) > 0 && (args[0] == "show-options" || args[0] == "show") {
+		r.shows++
+		return r.standing, r.err
+	}
+	r.sets++
 	return "", r.err
+}
+
+// lastSet is the last write this stub was asked to make, or nil if there was
+// none. A re-assertion's read is in calls too, so "the last call" is not the
+// same thing as "the write".
+func (r *recordingTmux) lastSet() []string {
+	for i := len(r.calls) - 1; i >= 0; i-- {
+		if r.calls[i][0] != "show-options" && r.calls[i][0] != "show" {
+			return r.calls[i]
+		}
+	}
+	return nil
 }
 
 // mapEnv reads the environment from a map, so a test never sets a process-wide

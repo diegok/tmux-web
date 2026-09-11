@@ -32,26 +32,80 @@ import (
 
 // eventKind is whether a mapping's write is an edge or a repair.
 //
-// Task 14 owns it and adds the read-before-write that makes a re-assertion
-// different from an edge. It is declared here because two of the whitelist's
-// entries -- idle_prompt and quota_auto_resume_disabled -- are specified as
-// repairs *in this table*, and a table that cannot say so would have to be
-// restructured rather than filled in. Today every write is unconditional.
+// THE CRITERION, because this is a safety property and "these are the ones I
+// thought of" is not one:
+//
+//	A write is a RE-ASSERTION if the state it would write is a resting state
+//	and the event that produces it can fire more than once within one resting
+//	period. Everything else is an EDGE. An edge writes unconditionally; a
+//	re-assertion reads the standing option first and writes only if the
+//	standing report's state differs from the one it would write.
+//
+// It is per (event, state) pair and not per event: an event that writes working
+// on one branch and a resting state on another is an edge on the first and a
+// re-assertion on the second. pi's session_start is exactly that and is the
+// reason the criterion cannot be written per event.
+//
+// Why it exists at all. Stop at T writes 1;idle;T, a device glances, its `seen`
+// marker stores T, the badge clears. Sixty seconds later idle_prompt fires --
+// it does that after EVERY turn the user does not type into -- and would write
+// 1;idle;T+60. It is strictly newer, so the daemon's ordering filter takes it;
+// the screen has been settled for a minute, so evidence rule 3 has nothing to
+// object to; finishedAt is derived statelessly from the report's own timestamp,
+// so it becomes T+60. Every device that saw the finish re-badges, one minute
+// after every turn, on a pane nothing happened to.
+//
+// What this costs, stated rather than discovered: A STALE OR BUGGY INTEGRATION
+// STILL STORMS. The daemon cannot tell a re-assertion from a genuine finish --
+// both are 1;idle;<ts> -- so this is a promise the writer keeps and the reader
+// cannot check. It is the one place in this design where a reader-side
+// invariant rests on writer-side behaviour.
 type eventKind int
 
 const (
+	// kindUnclassified is the zero value and means nobody decided. It is not
+	// an alias for edge, and that is deliberate: revision 3 of the design
+	// carried pi's session_start without classifying it, and a zero value that
+	// meant "edge" would have turned that omission into a badge storm silently.
+	// reassertsFor gives it the design's stated default instead -- a resting
+	// state whose cardinality is unknown is a re-assertion -- and
+	// TestEveryMappingIsClassified stops the table leaning on it.
+	kindUnclassified eventKind = iota
 	// kindEdge writes unconditionally, without reading the standing option.
-	// That is safe only because of the turn-start invariant: every integration
-	// writes working at turn start, so a turn end always has a non-resting
-	// state in front of it. Task 14 tests that.
-	kindEdge eventKind = iota
-	// kindReassertion writes only when the standing report disagrees. It is
-	// what stops Notification(idle_prompt), which fires about 60 s after every
-	// turn, from re-badging every device once per turn: finishedAt is derived
-	// from the report's own timestamp, so a fresh idle over a standing idle is
-	// a new finish as far as the browser is concerned.
+	// For the three turn-end events that is safe only because of the turn-start
+	// invariant: every integration writes working at turn start, so a turn end
+	// always has a non-resting state in front of it, and the end cannot fire
+	// twice inside one resting period. A turn that reached its end with no
+	// working before it would have that end suppressed and lose its badge.
+	kindEdge
+	// kindReassertion writes only when the standing report disagrees.
 	kindReassertion
 )
+
+// reassertsFor reports whether this mapping's write must read the standing
+// report first.
+//
+// The default for an unclassified mapping is the design's: an event whose
+// cardinality within a resting period is unknown, and which writes a resting
+// state, is treated as a re-assertion. The lists are not claimed to be
+// exhaustive -- the event inventories are per-agent documentation we do not
+// control -- so they ship with a default rather than a guarantee, and the
+// asymmetry that settles which default is the same one that settles the
+// unknown-notification_type case: an unnecessary read costs one fork on a path
+// nobody is waiting on, and a missing one costs a badge storm.
+//
+// working is not resting, so an unclassified working mapping stays an edge. It
+// is transient and cannot badge, and the worst a redundant one does is refresh
+// the 60-second expiry -- which is what the keepalive wants anyway.
+func reassertsFor(m mapping) bool {
+	switch m.kind {
+	case kindEdge:
+		return false
+	case kindReassertion:
+		return true
+	}
+	return m.state == tmux.StateIdle || m.state == tmux.StateBlocked
+}
 
 // textSource is where a mapping's activity text comes from.
 //
@@ -70,7 +124,10 @@ const textNone textSource = 0
 type mapping struct {
 	name  string
 	state string
-	kind  eventKind // edge or reassertion; Task 14
+	// kind is edge or reassertion, and every mapping that writes a state names
+	// one: the zero value is "nobody decided", not "edge". See eventKind for
+	// the criterion and reassertsFor for what an undecided one falls back to.
+	kind eventKind
 	// form is the registered screen form a blocked mapping names. A blocked
 	// mapping may exist ONLY where a grammar can confirm it: the event says the
 	// agent is waiting and the grammar says the screen shows it waiting, and a
@@ -104,16 +161,17 @@ var eventRules = map[string]map[string]eventRule{
 		// The turn start. Load-bearing beyond "the agent is working": the
 		// three turn-end events are edges, and an edge is only safe because a
 		// new turn wrote a non-resting state before its end could fire.
-		"UserPromptSubmit": {mapping: mapping{name: "claude/UserPromptSubmit", state: tmux.StateWorking}},
+		"UserPromptSubmit": {mapping: mapping{
+			name: "claude/UserPromptSubmit", state: tmux.StateWorking, kind: kindEdge}},
 		// The hot hook. It is also the keepalive -- a long turn of many small
 		// tool calls keeps refreshing the 60-second working window -- and it is
 		// what the activity line comes from. It is also, see the file comment,
 		// what makes the connected-case blocked badge slower.
-		"PreToolUse": {mapping: mapping{name: "claude/PreToolUse", state: tmux.StateWorking}},
+		"PreToolUse": {mapping: mapping{name: "claude/PreToolUse", state: tmux.StateWorking, kind: kindEdge}},
 		// Not a state on its own. See claudeNotifications.
 		"Notification": {discriminate: claudeNotificationType, byValue: claudeNotifications},
 		// The turn end.
-		"Stop": {mapping: mapping{name: "claude/Stop", state: tmux.StateIdle}},
+		"Stop": {mapping: mapping{name: "claude/Stop", state: tmux.StateIdle, kind: kindEdge}},
 		// SubagentStop is deliberately absent, and its absence is structural
 		// rather than a filter: the installer does not register that hook, so
 		// Stop is root-only against the Task-tool subagent class. Leaving the
@@ -123,41 +181,40 @@ var eventRules = map[string]map[string]eventRule{
 	},
 	"opencode": {
 		// The turn start, with the prompt text on it.
-		"chat.message": {mapping: mapping{name: "opencode/chat.message", state: tmux.StateWorking}},
+		"chat.message": {mapping: mapping{name: "opencode/chat.message", state: tmux.StateWorking, kind: kindEdge}},
 		// busy is the turn start proper, and it fires repeatedly within one
 		// turn -- 17 times in the three-tool turn Task 12 captured -- so
 		// nothing here may assume it arrives once.
 		"session.status": {discriminate: opencodeStatusType, byValue: opencodeStatuses},
 		"tool.execute.before": {mapping: mapping{
-			name: "opencode/tool.execute.before", state: tmux.StateWorking}},
+			name: "opencode/tool.execute.before", state: tmux.StateWorking, kind: kindEdge}},
 		// The todo rung of the activity ladder. Rung 2, with the tool call
 		// underneath it, which is correct whether or not the list is empty.
-		"todo.updated": {mapping: mapping{name: "opencode/todo.updated", state: tmux.StateWorking}},
+		"todo.updated": {mapping: mapping{name: "opencode/todo.updated", state: tmux.StateWorking, kind: kindEdge}},
 		// The one blocked event any agent has that arrives with no delay.
 		// There is no question string on it -- see Task 15 -- but there does
 		// not need to be one for the state.
-		"permission.asked": {mapping: mapping{
-			name: "opencode/permission.asked", state: tmux.StateBlocked, form: "opencode/permission"}},
+		"permission.asked": {mapping: mapping{name: "opencode/permission.asked",
+			state: tmux.StateBlocked, kind: kindEdge, form: "opencode/permission"}},
 		// The turn end. It carries a sessionID, and a subagent's arrives
 		// BEFORE the root's -- 2.05 s before, measured -- which is what Task
 		// 15's parentID filter is for. That filter lives in the plugin,
 		// because only the plugin saw the session.created that named the
 		// parent.
-		"session.idle": {mapping: mapping{name: "opencode/session.idle", state: tmux.StateIdle}},
+		"session.idle": {mapping: mapping{name: "opencode/session.idle", state: tmux.StateIdle, kind: kindEdge}},
 		// session.created is absent on purpose: it is the plugin's own
 		// bookkeeping, the event that establishes parentage, and not a state
 		// of the pane.
 	},
 	"pi": {
-		// pi has no separate "the CLI started" state, and a session_start that
-		// reported nothing would leave a freshly launched pi looking like
-		// whatever the classifier made of its splash screen. working expires
-		// on its own after the window, so the cost of being wrong is bounded
-		// in the one direction that matters.
-		"session_start": {mapping: mapping{name: "pi/session_start", state: tmux.StateWorking}},
+		// Not a state on its own, and the only event on any agent that is an
+		// edge on one branch and a re-assertion on the other. See
+		// piSessionStarts.
+		"session_start": {discriminate: piSessionStartIdle, byValue: piSessionStarts},
 		// The turn start.
-		"input":                {mapping: mapping{name: "pi/input", state: tmux.StateWorking}},
-		"tool_execution_start": {mapping: mapping{name: "pi/tool_execution_start", state: tmux.StateWorking}},
+		"input": {mapping: mapping{name: "pi/input", state: tmux.StateWorking, kind: kindEdge}},
+		"tool_execution_start": {mapping: mapping{
+			name: "pi/tool_execution_start", state: tmux.StateWorking, kind: kindEdge}},
 		// Every kind of prompt, not only the numbered selector pi/selector was
 		// written against: one captured kind is "custom", an extension's own
 		// overlay with no title at all, and there are certainly more. Claiming
@@ -166,13 +223,13 @@ var eventRules = map[string]map[string]eventRule{
 		// matches no registered form for the agent, so a custom overlay that
 		// pi/selector cannot read costs a badge that lasts N_blocked polls,
 		// not one that lasts forever.
-		"ui_prompt_start": {mapping: mapping{
-			name: "pi/ui_prompt_start", state: tmux.StateBlocked, form: "pi/selector"}},
+		"ui_prompt_start": {mapping: mapping{name: "pi/ui_prompt_start",
+			state: tmux.StateBlocked, kind: kindEdge, form: "pi/selector"}},
 		// The turn end. Its entire payload is {"type":"agent_settled"} -- no
 		// session id, no agent id, no parent -- so nothing downstream of here
 		// can tell a root settle from an async subagent's, and Task 15's pi
 		// filter has to work from ctx at registration time instead.
-		"agent_settled": {mapping: mapping{name: "pi/agent_settled", state: tmux.StateIdle}},
+		"agent_settled": {mapping: mapping{name: "pi/agent_settled", state: tmux.StateIdle, kind: kindEdge}},
 	},
 }
 
@@ -206,10 +263,10 @@ var claudeNotifications = map[string]mapping{
 	// was written against, so evidence rule 2 can adjudicate this badge rather
 	// than merely erase it.
 	"permission_prompt": {name: "claude/Notification(permission_prompt)",
-		state: tmux.StateBlocked, form: "claude/permission"},
+		state: tmux.StateBlocked, kind: kindEdge, form: "claude/permission"},
 	// Claude Code is continuing the task.
 	"quota_auto_resume_fired": {name: "claude/Notification(quota_auto_resume_fired)",
-		state: tmux.StateWorking},
+		state: tmux.StateWorking, kind: kindEdge},
 	// "Claude finished responding about 60 seconds ago and you haven't typed
 	// since". It re-asserts what Stop already said, so it is a REPAIR: without
 	// that, an idle_prompt over a standing idle re-dates the finish and
@@ -253,6 +310,57 @@ var claudeNotifications = map[string]mapping{
 	"agent_completed": {name: "claude/Notification(agent_completed)"},
 }
 
+// piSessionStarts is pi's re-derivation of state on a session_start, and it is
+// the whole reason the edge/re-assertion classification is per (event, state)
+// pair rather than per event.
+//
+// pi has no separate "the CLI started" state, and a session_start that reported
+// nothing would leave a freshly launched pi looking like whatever the classifier
+// made of its splash screen. But session_start is not only a launch: a pi
+// extension reload replaces the extension mid-run without another agent_start,
+// so the extension re-derives what the agent is doing from ctx.isIdle() -- an
+// extension that only ever set state on transitions would come back from a
+// reload believing nothing was happening.
+//
+//   - The idle branch is a RE-ASSERTION. A reload can happen any number of
+//     times while the agent sits idle, and it writes a resting state, which is
+//     the criterion exactly. As an edge, every reload on an idle pane would
+//     write idle;<now> and re-badge every device -- the badge storm arriving
+//     through an event revision 3 of the design had classified nowhere.
+//   - The working branch is an EDGE. working is transient, cannot badge, and
+//     its redundant writes are the keepalive.
+//
+// WHAT THE EXTENSION MUST SEND, because this is a contract Task 17 has to keep
+// and no recorded payload carries it: ctx is not part of pi's event object, so
+// the extension adds `"wterm_is_idle": <ctx.isIdle()>` to the JSON it pipes to
+// this subcommand. The key is namespaced because it is ours and not pi's.
+var piSessionStarts = map[string]mapping{
+	"working": {name: "pi/session_start(working)", state: tmux.StateWorking, kind: kindEdge},
+	"idle":    {name: "pi/session_start(idle)", state: tmux.StateIdle, kind: kindReassertion},
+}
+
+// piSessionStartIdle reads that flag.
+//
+// Its failure direction is the opposite of every other discriminator in this
+// file, and deliberately so: an unreadable payload, a missing key or a
+// wrong-shaped value all answer "working" rather than "" -- an unknown
+// notification_type must write nothing because the states it might mean rest
+// forever, whereas here the two branches are known and only one of them rests.
+// Falling to working costs at most 60 seconds of a wrong transient state on a
+// pane whose agent has just started or reloaded; falling to idle would rest
+// forever, and falling to "" would leave a freshly launched pi to the splash
+// screen.
+func piSessionStartIdle(payload []byte) string {
+	var p struct {
+		Idle bool `json:"wterm_is_idle"`
+	}
+	_ = json.Unmarshal(payload, &p)
+	if p.Idle {
+		return "idle"
+	}
+	return "working"
+}
+
 // opencodeStatuses is session.status's discriminator table, and it is a
 // whitelist for the same reason claudeNotifications is.
 //
@@ -261,7 +369,7 @@ var claudeNotifications = map[string]mapping{
 // needs; reporting both would write idle twice under two timestamps, and the
 // second one re-dates a finish the first already dated.
 var opencodeStatuses = map[string]mapping{
-	"busy": {name: "opencode/session.status(busy)", state: tmux.StateWorking},
+	"busy": {name: "opencode/session.status(busy)", state: tmux.StateWorking, kind: kindEdge},
 }
 
 // lookupMapping is what one (agent, event, payload) means.
@@ -281,6 +389,43 @@ func lookupMapping(agent, event string, payload []byte) (m mapping, ok bool) {
 	// A missing key, a wrong-shaped value and an unparseable payload all read
 	// as "", which is on no whitelist. Fail-closed, as everywhere else here.
 	return rule.byValue[rule.discriminate(payload)], true
+}
+
+// turnStartEvent names, per agent, the event whose write is that agent's turn
+// start -- and, where the event is discriminated, the discriminator value that
+// means the turn started.
+//
+// It exists so the turn-start invariant can be asserted rather than believed.
+// The three turn-end events are edges, which means they write a resting state
+// without looking first, and that is only safe because a new turn has already
+// written a non-resting one: with no working in front of it, a turn end would
+// be the second idle of one resting period and the criterion would have called
+// it a re-assertion. An agent whose turn start stopped writing working would
+// still pass every other test in this package, and would lose one badge per
+// turn in production.
+var turnStartEvent = map[string]struct{ event, value string }{
+	"claude":   {event: "UserPromptSubmit"},
+	"opencode": {event: "session.status", value: "busy"},
+	"pi":       {event: "input"},
+}
+
+// turnStart is what that agent's turn start writes, resolved through the same
+// tables everything else goes through, so a mapping that changed underneath it
+// is visible here.
+func turnStart(agent string) (mapping, bool) {
+	ref, ok := turnStartEvent[agent]
+	if !ok {
+		return mapping{}, false
+	}
+	rule, ok := eventRules[agent][ref.event]
+	if !ok {
+		return mapping{}, false
+	}
+	if rule.discriminate == nil {
+		return rule.mapping, ref.value == ""
+	}
+	m, ok := rule.byValue[ref.value]
+	return m, ok
 }
 
 // allMappings is every mapping in this file, for the tests that have to hold

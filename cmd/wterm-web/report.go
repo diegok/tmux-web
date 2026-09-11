@@ -101,6 +101,13 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 		return 0
 	}
 
+	// Whether this write has to read the standing report first. The manual
+	// form is always an edge: a person or a script typing --state means it,
+	// there is no table entry to carry a kind, and inferring one from the state
+	// would make `report --state idle` silently do nothing on a pane that is
+	// already idle.
+	reassert := false
+
 	if integration {
 		m, known := lookupMapping(*agent, *event, readPayload(stdin))
 		if !known {
@@ -120,6 +127,7 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 			return 0
 		}
 		*state = m.state
+		reassert = reassertsFor(m)
 		// *text is empty by construction here -- --text belongs to the manual
 		// form and the two forms cannot be combined -- so the integration form
 		// reports state only. That is a complete report, not a degraded one: a
@@ -149,13 +157,61 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), reportTimeout)
 	defer cancel()
+	// One client for both calls. The timeout covers the pair: it is there so a
+	// wedged tmux server makes the hook return rather than hold an agent's turn
+	// open, and two calls that could each wait the full 5 s would be twice the
+	// bound the number was chosen for.
+	tm := dial(socket)
+
+	// The re-assertion read. It happens on this path only -- PreToolUse, the
+	// hot hook and the whole subject of open question 1, pays nothing, and
+	// opencode pays nothing at all.
+	if reassert && standingState(ctx, tm, pane) == *state {
+		return 0
+	}
+
 	// No "--": an option value is the second positional argument and tmux never
 	// re-scans it for flags -- verified for @wterm_label in SetLabel, and the
 	// same command.
-	if _, err := dial(socket).Run(ctx, "set", "-p", "-t", pane, tmux.AgentOption, value); err != nil {
+	if _, err := tm.Run(ctx, "set", "-p", "-t", pane, tmux.AgentOption, value); err != nil {
 		fmt.Fprintf(stderr, "wterm-web report: %v\n", err)
 	}
 	return 0
+}
+
+// standingState is the state of the report already on this pane, or "" if there
+// is not one this daemon can read.
+//
+// Everything unreadable answers "", which equals no state and therefore
+// disagrees with anything a caller might write, so the repair still happens.
+// That covers more cases than it looks:
+//
+//   - The option is unset, which is the ordinary case for the first report a
+//     pane ever gets. tmux does not answer that with an empty string: `show
+//     -p -v @wterm_agent` on an unset user option exits 1 with "invalid
+//     option" (measured on 3.7b), and Client.Run returns "" on error.
+//   - The value is from another schema version, or truncated, or something
+//     else entirely put there by hand. ParseReport refuses it whole.
+//
+// -p is pane-scoped and, unlike the daemon's #{@wterm_agent} format read, does
+// NOT walk up to the window, session and global options (measured: with only a
+// session-level value set, this read still says "invalid option"). Nothing this
+// project installs writes at those scopes, and the direction of the difference
+// is safe -- a value the writer cannot see reads as a disagreement, so it writes
+// a pane-level report, which is what the daemon's own lookup then finds first.
+func standingState(ctx context.Context, tm tmuxRunner, pane string) string {
+	out, err := tm.Run(ctx, "show-options", "-p", "-t", pane, "-v", tmux.AgentOption)
+	if err != nil {
+		return ""
+	}
+	rep, ok := tmux.ParseReport(out, time.Now())
+	if !ok {
+		return ""
+	}
+	// The STATE, not the value: the timestamp is what a re-assertion would
+	// change and the whole point is not to change it, and a resting report's
+	// activity text is not what badges a device.
+	return rep.State
 }
 
 // tmuxTarget resolves the server and the pane from the environment the agent

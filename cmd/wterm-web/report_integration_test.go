@@ -167,6 +167,68 @@ func TestAnUnknownStateWritesNothing(t *testing.T) {
 	}
 }
 
+// A re-assertion's read, against a real server: the right pane, the right
+// scope, and a real unset option.
+//
+// The stub tests decide WHETHER a read happens; only this one can decide what
+// it reads, and the three things it has to get right are all invisible to a
+// stub:
+//
+//   - `-t <pane>`. Dropped, the read lands on the CURRENT pane, which with no
+//     client attached is the session's active one -- so the fixture reports on
+//     the INACTIVE pane and leaves a disagreeing `working` standing on the
+//     active one. A read that lost its target would see that, disagree, and
+//     write.
+//   - `-p`. Dropped, the read asks for a SESSION option and tmux answers
+//     "invalid option" -- which is a disagreement, so it would write too.
+//   - The unset option itself. tmux does not answer an unset user option with
+//     an empty string; it exits 1 (measured on 3.7b, and the reason the error
+//     path counts as a disagreement rather than as agreement with nothing).
+//
+// And the assertion is that the STORED VALUE DID NOT CHANGE, timestamp
+// included. "Still idle" is not the claim -- a re-assertion that wrote
+// 1;idle;<now> would satisfy that and would re-date the finish, which is the
+// entire failure this task exists to prevent.
+func TestAReassertionReadsThePaneItIsReportingOn(t *testing.T) {
+	srv, reporting, other := twoAgentPanes(t)
+
+	// The active pane carries a standing working, so a read that lost its
+	// target or its scope finds a disagreement rather than nothing.
+	srv.Run(t, "set", "-p", "-t", other, tmux.AgentOption, "1;working;1789075200000")
+
+	idlePrompt := `{"hook_event_name":"Notification","notification_type":"idle_prompt"}`
+
+	// (a) Nothing standing on the reporting pane: the option is unset, the read
+	// fails, and the re-assertion writes. Without this half, a mutant that
+	// treated every unreadable answer as agreement would look correct.
+	var out, errb bytes.Buffer
+	if code := runReport([]string{"--agent", "claude", "--event", "Notification"},
+		strings.NewReader(idlePrompt), &out, &errb, paneEnv(srv, reporting), dialReal); code != 0 {
+		t.Fatalf("report exited %d: %s", code, errb.String())
+	}
+	first := srv.Run(t, "show", "-p", "-t", reporting, "-v", tmux.AgentOption)
+	if rep, ok := tmux.ParseReport(first, time.Now()); !ok || rep.State != tmux.StateIdle {
+		t.Fatalf("@wterm_agent = %q -> %+v, %v; a re-assertion over an UNSET option must write", first, rep, ok)
+	}
+
+	// (b) The same event again, now that the pane agrees. Nothing may change.
+	out.Reset()
+	errb.Reset()
+	if code := runReport([]string{"--agent", "claude", "--event", "Notification"},
+		strings.NewReader(idlePrompt), &out, &errb, paneEnv(srv, reporting), dialReal); code != 0 {
+		t.Fatalf("report exited %d: %s", code, errb.String())
+	}
+	if second := srv.Run(t, "show", "-p", "-t", reporting, "-v", tmux.AgentOption); second != first {
+		t.Fatalf("@wterm_agent went from %q to %q. A re-assertion that agrees must write NOTHING: the "+
+			"daemon derives finishedAt from the report's own timestamp, so a newer one is a new finish "+
+			"and re-badges every device that had already seen this one", first, second)
+	}
+	// And the pane it must never have touched.
+	if v := srv.Run(t, "show", "-p", "-t", other, "-v", tmux.AgentOption); v != "1;working;1789075200000" {
+		t.Fatalf("the other pane's @wterm_agent = %q; the re-assertion wrote to the wrong pane", v)
+	}
+}
+
 // -- fixture ----------------------------------------------------------------
 
 // twoAgentPanes starts a throwaway server with two panes that the daemon will

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -178,18 +179,25 @@ func TestTheBlockedMappingsAreExactlyThese(t *testing.T) {
 // Which mappings are repairs, written out in full for the same reason the
 // blocked ones are.
 //
-// Nothing reads `kind` yet -- Task 14 adds the show-options read that makes a
-// re-assertion behave differently from an edge -- so this asserts a decision
-// rather than a behaviour, and it is the decision that matters most in the
-// table: idle_prompt fires about 60 SECONDS AFTER EVERY TURN, and finishedAt is
-// derived from the report's own timestamp, so writing it as an edge re-dates a
-// finish the Stop before it already dated and re-badges every enrolled device,
-// once per turn, forever. An edge here is not a missing optimisation, it is a
-// notification storm with a clock on it.
+// It is the decision that matters most in the table: idle_prompt fires about 60
+// SECONDS AFTER EVERY TURN, and finishedAt is derived from the report's own
+// timestamp, so writing it as an edge re-dates a finish the Stop before it
+// already dated and re-badges every enrolled device, once per turn, forever. An
+// edge here is not a missing optimisation, it is a notification storm with a
+// clock on it.
+//
+// TestEdgeAndReassertion drives the behaviour. This one is the roll call: a
+// mapping that quietly changes kind changes how often somebody's phone lights
+// up, so it has to be a deliberate edit here, next to the reason.
 func TestTheRepairsAreExactlyThese(t *testing.T) {
 	want := map[string]bool{
 		"claude/Notification(idle_prompt)":                true,
 		"claude/Notification(quota_auto_resume_disabled)": true,
+		// A pi extension reload re-derives state mid-run. The reload can
+		// recur arbitrarily often inside one resting period, which is the
+		// criterion, and revision 3 of the design classified this event
+		// nowhere at all.
+		"pi/session_start(idle)": true,
 	}
 	for _, m := range allMappings() {
 		if got := m.kind == kindReassertion; got != want[m.name] {
@@ -354,7 +362,7 @@ func TestAMalformedPayload(t *testing.T) {
 // keeps working, including the states the table would never produce from an
 // event.
 func TestTheManualFormIgnoresTheTable(t *testing.T) {
-	rec := &recordingRunner{}
+	rec := &recordingTmux{}
 	stdin := &countingReader{Reader: strings.NewReader(`{"notification_type":"permission_prompt"}`)}
 	var out, errb bytes.Buffer
 	code := runReport([]string{"--state", "idle", "--text", "waiting"}, stdin, &out, &errb,
@@ -376,15 +384,303 @@ func TestTheManualFormIgnoresTheTable(t *testing.T) {
 	}
 }
 
+// The split itself, asserted on the TMUX CALLS MADE rather than only on the
+// value that ends up stored: "no write" and "a write of the same state under a
+// newer timestamp" store values that look alike and badge differently.
+//
+// finishedAt is derived statelessly from a resting report's own timestamp, and
+// a browser's `seen` marker stores the value it was SHOWN rather than the time
+// it looked, so a second idle one minute after the first is a second finish as
+// far as every enrolled device is concerned.
+func TestEdgeAndReassertion(t *testing.T) {
+	// A standing report from a minute ago. Written out rather than built with
+	// FormatReport: this is what tmux is holding, and a fixture built by the
+	// writer under test could only ever agree with it.
+	const standingIdle = "1;idle;1789075200000"
+	const standingWorking = "1;working;1789075200000"
+
+	t.Run("an edge writes without reading", func(t *testing.T) {
+		// Stop, on a pane already reporting idle -- the stale report of the
+		// PREVIOUS turn. It must write anyway: what makes a turn end an edge
+		// is the turn-start invariant, and a Stop that stayed silent here
+		// would lose this turn's badge.
+		r := &recordingTmux{standing: standingIdle}
+		runReportWith(t, r, []string{"--agent", "claude", "--event", "Stop"})
+		if r.shows != 0 {
+			t.Errorf("an edge read the standing option %d times, want 0", r.shows)
+		}
+		if r.sets != 1 {
+			t.Errorf("an edge made %d writes, want 1", r.sets)
+		}
+	})
+
+	t.Run("a re-assertion reads first and stays silent when it agrees", func(t *testing.T) {
+		r := &recordingTmux{standing: standingIdle}
+		runReportWith(t, r, []string{"--agent", "claude", "--event", "Notification"},
+			withStdin(`{"notification_type":"idle_prompt"}`))
+		if r.shows != 1 || r.sets != 0 {
+			t.Errorf("shows=%d sets=%d, want 1 and 0: a re-assertion that agrees "+
+				"must write NOTHING -- a write of the same state with a newer "+
+				"timestamp re-badges every device that had already looked", r.shows, r.sets)
+		}
+	})
+
+	t.Run("a re-assertion writes when it disagrees, and that repair is the point", func(t *testing.T) {
+		// A Stop that never landed -- the attested reason herdr gave up on
+		// Claude hooks. The standing report is working; idle_prompt sees the
+		// disagreement and repairs the pane from the agent itself.
+		r := &recordingTmux{standing: standingWorking}
+		runReportWith(t, r, []string{"--agent", "claude", "--event", "Notification"},
+			withStdin(`{"notification_type":"idle_prompt"}`))
+		if r.sets != 1 {
+			t.Errorf("sets=%d, want 1: the repair is what keeps this event mapped at all", r.sets)
+		}
+		if got := wroteState(t, r); got != tmux.StateIdle {
+			t.Errorf("the repair wrote %q, want idle", got)
+		}
+	})
+
+	t.Run("an unreadable standing value counts as a disagreement", func(t *testing.T) {
+		// Every way of having no usable answer: a value from a schema this
+		// daemon does not know, a truncated one, and the unset option -- which
+		// is what a real tmux read returns for a pane nobody has reported on,
+		// since `show-options -v` on an unset user option exits 1 with
+		// "invalid option" (measured on 3.7b) and Run answers "" to that.
+		//
+		// All of them must WRITE. Reading them as agreement would suppress the
+		// first report a freshly started agent ever makes.
+		for _, standing := range []string{"", "garbage", "2;idle;1789075200000", "1;idle", "1;nonsense;1789075200000"} {
+			r := &recordingTmux{standing: standing}
+			runReportWith(t, r, []string{"--agent", "claude", "--event", "Notification"},
+				withStdin(`{"notification_type":"idle_prompt"}`))
+			if r.shows != 1 || r.sets != 1 {
+				t.Errorf("standing %q: shows=%d sets=%d, want 1 and 1", standing, r.shows, r.sets)
+			}
+		}
+	})
+
+	t.Run("a re-assertion compares the state and not the whole value", func(t *testing.T) {
+		// Same state, different activity text and a different timestamp. It
+		// still agrees: the criterion is the STATE, and a resting report's
+		// text is not what badges a device.
+		r := &recordingTmux{standing: "1;idle;1789075200001;wrote the poem"}
+		runReportWith(t, r, []string{"--agent", "claude", "--event", "Notification"},
+			withStdin(`{"notification_type":"quota_auto_resume_disabled"}`))
+		if r.sets != 0 {
+			t.Errorf("sets=%d, want 0", r.sets)
+		}
+	})
+
+	// Three rows carry more weight than the rest.
+
+	t.Run("pi session_start's idle branch reads before writing", func(t *testing.T) {
+		// A pi extension reload re-derives state from ctx.isIdle(), and a
+		// reload can happen any number of times while the agent sits idle. As
+		// an edge, every reload on an idle pane would write idle;<now> and
+		// re-badge every device.
+		r := &recordingTmux{standing: standingIdle}
+		runReportWith(t, r, []string{"--agent", "pi", "--event", "session_start"},
+			withStdin(`{"type":"session_start","reason":"startup","wterm_is_idle":true}`))
+		if r.shows != 1 || r.sets != 0 {
+			t.Errorf("shows=%d sets=%d, want 1 and 0", r.shows, r.sets)
+		}
+		// And it repairs, like every other re-assertion: a reload while the
+		// pane carries a stale working is how a pi that crashed mid-turn gets
+		// its pane back.
+		r = &recordingTmux{standing: standingWorking}
+		runReportWith(t, r, []string{"--agent", "pi", "--event", "session_start"},
+			withStdin(`{"type":"session_start","reason":"startup","wterm_is_idle":true}`))
+		if r.sets != 1 {
+			t.Errorf("over a standing working: sets=%d, want 1", r.sets)
+		}
+		if got := wroteState(t, r); got != tmux.StateIdle {
+			t.Errorf("wrote %q, want idle", got)
+		}
+	})
+
+	t.Run("pi session_start's working branch does not", func(t *testing.T) {
+		// The same event, the other branch. working is transient and cannot
+		// badge -- the worst a redundant one does is refresh the expiry, which
+		// is what the keepalive wants -- so it pays no read.
+		for _, stdin := range []string{
+			`{"type":"session_start","reason":"startup","wterm_is_idle":false}`,
+			// The flag missing altogether: an integration that has not been
+			// updated, or one whose ctx read failed. It must fall to working,
+			// the state that expires on its own, and not to idle, which rests
+			// forever.
+			`{"type":"session_start","reason":"startup"}`,
+			`not json at all`,
+			`{"type":"session_start","wterm_is_idle":"yes"}`,
+		} {
+			r := &recordingTmux{standing: standingIdle}
+			runReportWith(t, r, []string{"--agent", "pi", "--event", "session_start"}, withStdin(stdin))
+			if r.shows != 0 || r.sets != 1 {
+				t.Errorf("stdin %q: shows=%d sets=%d, want 0 and 1", stdin, r.shows, r.sets)
+			}
+			if got := wroteState(t, r); got != tmux.StateWorking {
+				t.Errorf("stdin %q wrote %q, want working", stdin, got)
+			}
+		}
+	})
+
+	t.Run("a turn-end event writes unconditionally", func(t *testing.T) {
+		// All three, each against a STALE standing idle left by the previous
+		// turn. As re-assertions they would all be silent here and every turn
+		// after the first would lose its badge.
+		for _, tc := range []struct{ agent, event, stdin string }{
+			{"claude", "Stop", `{"hook_event_name":"Stop"}`},
+			{"pi", "agent_settled", `{"type":"agent_settled"}`},
+			{"opencode", "session.idle", `{"type":"session.idle","properties":{"sessionID":"ses_1"}}`},
+		} {
+			r := &recordingTmux{standing: standingIdle}
+			runReportWith(t, r, []string{"--agent", tc.agent, "--event", tc.event}, withStdin(tc.stdin))
+			if r.shows != 0 || r.sets != 1 {
+				t.Errorf("%s/%s: shows=%d sets=%d, want 0 and 1", tc.agent, tc.event, r.shows, r.sets)
+			}
+		}
+	})
+
+	t.Run("the hot hooks pay nothing", func(t *testing.T) {
+		// Fork volume under a burst is open question 1 and it is about exactly
+		// this number. PreToolUse fires on every tool call; opencode's busy
+		// fired 17 times in one three-tool turn. Neither may read.
+		for _, tc := range []struct{ agent, event, stdin string }{
+			{"claude", "PreToolUse", `{"tool_name":"Bash"}`},
+			{"claude", "UserPromptSubmit", `{"prompt":"hi"}`},
+			{"opencode", "session.status", `{"properties":{"status":{"type":"busy"}}}`},
+			{"opencode", "tool.execute.before", `{"input":{"tool":"bash"}}`},
+			{"pi", "input", `{"type":"input","text":"hi"}`},
+			{"pi", "tool_execution_start", `{"type":"tool_execution_start"}`},
+		} {
+			r := &recordingTmux{standing: "1;working;1789075200000"}
+			runReportWith(t, r, []string{"--agent", tc.agent, "--event", tc.event}, withStdin(tc.stdin))
+			if r.shows != 0 {
+				t.Errorf("%s/%s read the standing option %d times; it is on the hot path and pays nothing",
+					tc.agent, tc.event, r.shows)
+			}
+			if r.sets != 1 {
+				t.Errorf("%s/%s made %d writes, want 1: a working report is also the keepalive",
+					tc.agent, tc.event, r.sets)
+			}
+		}
+	})
+
+	t.Run("the manual form is always an edge", func(t *testing.T) {
+		// A person typing the command means it. There is no table entry to
+		// carry a kind, and inferring one from the state would make a scripted
+		// `report --state idle` silently do nothing.
+		r := &recordingTmux{standing: standingIdle}
+		runReportWith(t, r, []string{"--state", "idle"})
+		if r.shows != 0 || r.sets != 1 {
+			t.Errorf("shows=%d sets=%d, want 0 and 1", r.shows, r.sets)
+		}
+	})
+}
+
+// The invariant that makes the turn-end rows above safe, and it needs its own
+// test because it is a property OF THE TABLE rather than of any one call: a
+// turn that could reach its end with no working written before it would have
+// that end suppressed and lose the badge.
+//
+// This is the reader-side rule that rests on writer-side behaviour, so it is
+// asserted where the writer's table lives. It cannot be asserted at all in the
+// daemon, which sees two identical `1;idle;<ts>` values and cannot tell a
+// genuine finish from a re-assertion.
+func TestEveryAgentHasATurnStartWorkingEdge(t *testing.T) {
+	for _, agent := range []string{"claude", "opencode", "pi"} {
+		m, ok := turnStart(agent)
+		if !ok || m.state != tmux.StateWorking || m.kind != kindEdge {
+			t.Errorf("%s has no turn-start working edge (%+v, ok=%v): its turn-end event "+
+				"is only an edge because one exists", agent, m, ok)
+		}
+	}
+}
+
+// Every mapping that writes a state says which kind it is, in the table, next
+// to the reason.
+//
+// The zero value is deliberately NOT edge, and this is why: revision 3 of the
+// design carried pi's session_start without classifying it at all, and a table
+// whose unclassified default is "edge" turns that omission into a badge storm
+// nobody wrote down. The default the design ships instead -- unknown cardinality
+// plus a resting state means re-assertion -- lives in reassertsFor, and this
+// test is what keeps the table from relying on it: a new entry has to be
+// classified here rather than inherit a decision.
+func TestEveryMappingIsClassified(t *testing.T) {
+	seen := 0
+	for _, m := range allMappings() {
+		if m.state == "" {
+			// An ignored event writes nothing, so there is no write to
+			// classify. Carrying a kind here would be as meaningless as
+			// carrying a form.
+			if m.kind != kindUnclassified {
+				t.Errorf("%s writes nothing but carries kind %v; a kind describes a write", m.name, m.kind)
+			}
+			continue
+		}
+		seen++
+		if m.kind == kindUnclassified {
+			t.Errorf("%s writes %q and nobody said whether that is an edge or a re-assertion. "+
+				"The criterion: a write is a re-assertion if the state is a resting one AND the event "+
+				"can fire more than once inside one resting period; if its cardinality is unknown and "+
+				"the state is resting, it is a re-assertion", m.name, m.state)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no mapping writes a state at all; this test then proves nothing")
+	}
+}
+
+// The default, which no table row can exercise because the test above forbids
+// an unclassified row from existing.
+//
+// It is the same asymmetry that settles the unknown-notification_type default:
+// an unnecessary read costs one fork on a path nobody is waiting on, and a
+// missing one costs a badge storm.
+func TestTheUnclassifiedDefault(t *testing.T) {
+	for _, tc := range []struct {
+		state string
+		want  bool
+	}{
+		{tmux.StateIdle, true},
+		{tmux.StateBlocked, true},
+		// working is transient and cannot badge, and suppressing a redundant
+		// one would cost the keepalive its expiry refresh.
+		{tmux.StateWorking, false},
+	} {
+		if got := reassertsFor(mapping{state: tc.state}); got != tc.want {
+			t.Errorf("an unclassified mapping writing %q reasserts = %v, want %v", tc.state, got, tc.want)
+		}
+	}
+	// And an explicit kind overrides the default in both directions.
+	if reassertsFor(mapping{state: tmux.StateIdle, kind: kindEdge}) {
+		t.Error("an explicit edge writing idle reasserts; the turn-end events are exactly that case")
+	}
+	if !reassertsFor(mapping{state: tmux.StateWorking, kind: kindReassertion}) {
+		t.Error("an explicit re-assertion writing working does not reassert")
+	}
+}
+
 // -- helpers ----------------------------------------------------------------
 
 // reportOne runs the integration form once against a recording tmux, and
-// returns the state written and how many tmux commands it took. A write count
-// of zero is the whole point of most of the rows above: "exit 0" alone does not
+// returns the state written and how many WRITES it took. A write count of zero
+// is the whole point of most of the rows above: "exit 0" alone does not
 // distinguish a refusal from a wrong state written in silence.
+//
+// Reads are deliberately not counted here. Since Task 14 a re-assertion makes
+// one before it decides, and folding it into this number would make "wrote
+// nothing" and "read, then wrote" indistinguishable in exactly the tests whose
+// subject is whether anything was written. TestEdgeAndReassertion is where the
+// reads are the subject, and it counts the two separately.
+//
+// The standing option is left unset, which is the disagreeing answer, so every
+// mapping in the table above writes what it would write as an edge. That is the
+// right fixture for a table test: it isolates what the table says from what the
+// pane happened to be carrying.
 func reportOne(t *testing.T, args []string, stdin string) (state string, writes int) {
 	t.Helper()
-	rec := &recordingRunner{}
+	rec := &recordingTmux{}
 	var out, errb bytes.Buffer
 	code := runReport(args, strings.NewReader(stdin), &out, &errb,
 		mapEnv(map[string]string{"TMUX": "/tmp/sock,7,0", "TMUX_PANE": "%1"}),
@@ -395,15 +691,58 @@ func reportOne(t *testing.T, args []string, stdin string) (state string, writes 
 	if out.Len() != 0 {
 		t.Errorf("runReport%v wrote to stdout: %q", args, out.String())
 	}
-	if len(rec.calls) == 0 {
+	last := rec.lastSet()
+	if last == nil {
 		return "", 0
 	}
-	last := rec.calls[len(rec.calls)-1]
 	rep, ok := tmux.ParseReport(last[len(last)-1], time.Now())
 	if !ok {
 		t.Fatalf("runReport%v wrote %q, which is not a readable report", args, last[len(last)-1])
 	}
-	return rep.State, len(rec.calls)
+	return rep.State, rec.sets
+}
+
+// runReportWith runs one report against a recording tmux and asserts only that
+// it exited 0. What each caller asserts is the CALL LOG, which is the only
+// thing that separates "wrote nothing" from "wrote the same state again".
+func runReportWith(t *testing.T, r *recordingTmux, args []string, opts ...reportOption) {
+	t.Helper()
+	call := reportCall{}
+	for _, o := range opts {
+		o(&call)
+	}
+	var errb bytes.Buffer
+	code := runReport(args, strings.NewReader(call.stdin), io.Discard, &errb,
+		mapEnv(map[string]string{"TMUX": "/tmp/sock,7,0", "TMUX_PANE": "%1"}),
+		func(string) tmuxRunner { return r })
+	if code != 0 {
+		t.Fatalf("runReport%v exited %d, want 0 (stderr: %s)", args, code, errb.String())
+	}
+}
+
+type reportCall struct{ stdin string }
+
+// reportOption is one adjustment to a runReportWith call. Only the payload
+// varies today; it is an option rather than a parameter so that the calls whose
+// subject is the table -- the manual form, an undiscriminated event -- do not
+// carry an empty string that means nothing.
+type reportOption func(*reportCall)
+
+func withStdin(s string) reportOption { return func(c *reportCall) { c.stdin = s } }
+
+// wroteState is the state of the last report written, for the rows where
+// "something was written" is not the whole claim.
+func wroteState(t *testing.T, r *recordingTmux) string {
+	t.Helper()
+	last := r.lastSet()
+	if last == nil {
+		t.Fatal("nothing was written")
+	}
+	rep, ok := tmux.ParseReport(last[len(last)-1], time.Now())
+	if !ok {
+		t.Fatalf("wrote %q, which is not a readable report", last[len(last)-1])
+	}
+	return rep.State
 }
 
 // countingReader records whether stdin was touched at all.

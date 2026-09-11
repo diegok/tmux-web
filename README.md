@@ -105,6 +105,14 @@ connections rather than only failing the next request.
 - Click a pane in the sidebar to jump to it, or press `Ctrl+Alt+K` for a fuzzy
   palette (the "Jump to…" button does the same, which matters on layouts where
   that chord is AltGr+K).
+- A window tmux named after a shell (`zsh`, `bash`, `fish`, and five more)
+  shows what it is running instead — the command of the pane a click on that
+  row selects. `automatic-rename off` is a deliberate setting, since it is what
+  stops tmux overwriting a name you chose, and its side effect is that a window
+  you never named by hand keeps its shell's name for good: the row that should
+  say `claude` says `zsh`. Display only, so rename still targets the name tmux
+  holds — and the one case it cannot tell apart is a window somebody
+  deliberately named `zsh`.
 - Right-click a row — long-press on a phone — to rename, split, zoom, label or
   kill it, and to open a new window. The `+` in the sidebar header makes a new
   session, and it is in the header rather than on a row because with no tmux
@@ -120,9 +128,14 @@ connections rather than only failing the next request.
 An agent pane carries its agent's mark and a dot saying working, blocked or
 idle; a window or a session carries the most urgent state under it, so the
 question is answerable without expanding anything. A shell gets no dot — a shell
-is not idle, it is a shell. A tab you are not looking at puts the count in its
-title and a dot on its favicon, for the agents that are blocked or that have
-finished since this device last looked.
+is not idle, it is a shell. `vim` and `nvim` get a mark and no dot at all: an
+agent's mark travels with a state, and an editor has none — nothing inside vim
+is waiting on you — so editors are deliberately not in the list of agents the
+daemon classifies, and the mark says only which program this is. It is a
+generic editor glyph rather than a Vim logo, because only a project's own mark
+is ever drawn here, never one from memory. A tab you are not looking at puts
+the count in its title and a dot on its favicon, for the agents that are
+blocked or that have finished since this device last looked.
 
 All of that is read off the screen, and reading the screen has two limits. It
 cannot say *what* an agent is doing: the pane title looks like it should and
@@ -209,6 +222,13 @@ able to do however well it is authenticated.
 - **A nested `claude`, started from another agent's shell, can report a finish
   early.** It inherits the pane, loads the same project settings and is the root
   of its own session, so its turn end lands on the outer agent's row.
+- **A turn whose last act is a subagent can lose its finish badge.** Claude's
+  root `Stop` fires while a subagent it launched is still running, which used to
+  report the pane finished in the middle of the work — 13 seconds of it on one
+  measured run. It now reports nothing in that case, so a turn that ends with
+  the subagent still going and where no further event arrives never reports its
+  finish: the pane holds its working report until that expires a minute later,
+  and then lives where a pane with no integration lives, on the screen.
 - **With a browser open, Claude's blocked badge is slower with the integration
   than without it** — about six seconds against about 1.5, because a fresh
   report suppresses the screen capture that would have found the dialog. The

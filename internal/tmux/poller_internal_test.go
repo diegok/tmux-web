@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The generation's two failure branches, which no test with a real tmux server
@@ -479,5 +480,263 @@ func TestNewPollerWithRefusesHalfWiredClassification(t *testing.T) {
 			}()
 			NewPollerWith(tc.o)
 		}()
+	}
+}
+
+// --- agent reports ----------------------------------------------------------
+//
+// The precedence table, at the poller. Every one of these asserts AgentState,
+// StateSource and FinishedAt together: a precedence bug is invisible to the
+// state alone, because the two authorities agree about the state in exactly the
+// case where consulting the wrong one costs the most.
+
+// reportPoller builds a poller whose snapshot, standing @wterm_agent values and
+// captures are all supplied by the test, with agent reporting turned on.
+//
+// captured records the panes capture-pane was actually forked for, which is the
+// only way to see the win: a skipped capture and a capture whose verdict was
+// overruled produce identical rows.
+func reportPoller(rows *[]Row, reports, screens map[string]string, captured *[]string, connected *bool) *Poller {
+	return NewPollerWith(Options{
+		SnapshotWithReports: func(context.Context) ([]Row, map[string]string, error) {
+			// Copied, as the real one is: the poller must not be handed the
+			// test's live map.
+			out := make(map[string]string, len(reports))
+			for id, v := range reports {
+				out[id] = v
+			}
+			return append([]Row{}, *rows...), out, nil
+		},
+		Capture: func(_ context.Context, paneID string) (string, error) {
+			*captured = append(*captured, paneID)
+			s, ok := screens[paneID]
+			if !ok {
+				return "", errors.New("no such pane: " + paneID)
+			}
+			return s, nil
+		},
+		Connected: func() bool { return *connected },
+	})
+}
+
+// A fresh report wins, and the capture is skipped -- which is the win. Two
+// authorities running in parallel can only agree, in which case the second one
+// was cost, or disagree, in which case we have already decided which wins.
+func TestFreshReportSkipsTheCapture(t *testing.T) {
+	now := time.Now()
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	screens := map[string]string{"%1": "a screen nobody should be asking for"}
+	reports := map[string]string{"%1": FormatReport(StateWorking, now.UnixMilli(), "run go")}
+	var captured []string
+	connected := true
+	p := reportPoller(&rows, reports, screens, &captured, &connected)
+	ctx := context.Background()
+
+	p.refresh(ctx)
+	got := stateOf(t, p, "%1")
+	if got.AgentState != StateWorking || got.StateSource != SourceEvent || got.Activity != "run go" {
+		t.Errorf("a fresh working report = %+v, want working from the event source with its activity", got)
+	}
+	if got.FinishedAt != 0 {
+		t.Errorf("a working report stamped a finish edge at %d", got.FinishedAt)
+	}
+	if len(captured) != 0 {
+		t.Errorf("captured %v with a fresh report standing: the skipped capture IS the win, and "+
+			"asserting only the state cannot see this -- both authorities say working", captured)
+	}
+
+	// A fresh resting report costs no capture either, and derives its finish
+	// stamp from its own timestamp rather than from a clock we read.
+	fin := now.Add(time.Second).UnixMilli()
+	reports["%1"] = FormatReport(StateIdle, fin, "")
+	p.refresh(ctx)
+	got = stateOf(t, p, "%1")
+	if got.AgentState != StateIdle || got.StateSource != SourceEvent || got.FinishedAt != fin {
+		t.Errorf("a fresh idle report = %+v, want idle from the event source with finishedAt %d", got, fin)
+	}
+	if len(captured) != 0 {
+		t.Errorf("captured %v for a resting report", captured)
+	}
+}
+
+// With no client connected there is no screen to check, and the report is the
+// only authority there is -- which is the case the app exists for. This
+// supersedes v2's rule that AgentState is empty whenever no browser holds a
+// terminal socket: that rule was right about the classifier's memory, which is
+// a claim that nothing has changed since we last looked, and wrong about a fact
+// the agent published that tmux is still holding.
+func TestAReportStandsWithNoClientConnected(t *testing.T) {
+	now := time.Now()
+	rows := []Row{
+		{PaneID: "%1", Command: "claude"},
+		{PaneID: "%2", Command: "claude"}, // no integration, so no report
+	}
+	screens := map[string]string{"%1": "a screen", "%2": "a screen"}
+	reports := map[string]string{"%1": FormatReport(StateBlocked, now.UnixMilli(), "Approve?")}
+	var captured []string
+	connected := false
+	p := reportPoller(&rows, reports, screens, &captured, &connected)
+	p.refresh(context.Background())
+
+	if got := stateOf(t, p, "%1"); got.AgentState != StateBlocked || got.StateSource != SourceEvent || got.Activity != "Approve?" {
+		t.Errorf("a fresh report with nobody connected = %+v, want blocked from the event source", got)
+	}
+	// The half that has not changed: with no report and no client there is
+	// nothing to say, and a frozen last value would be stale state presented as
+	// current.
+	if got := stateOf(t, p, "%2"); got.AgentState != "" || got.StateSource != "" {
+		t.Errorf("a pane with no report and no client = %+v, want an empty state", got)
+	}
+	if len(captured) != 0 {
+		t.Errorf("captured %v with no client connected", captured)
+	}
+}
+
+// A stale report hands the pane back to the classifier, and the authority
+// switch stamps nothing (Task 10 tests the stamping half).
+func TestAStaleReportFallsBackToTheClassifier(t *testing.T) {
+	// Past the window by a minute, and written against the constant.
+	stale := time.Now().Add(-workingTTL - time.Minute).UnixMilli()
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	screens := map[string]string{"%1": "a screen the classifier does have to read"}
+	reports := map[string]string{"%1": FormatReport(StateWorking, stale, "run go")}
+	var captured []string
+	connected := true
+	p := reportPoller(&rows, reports, screens, &captured, &connected)
+	p.refresh(context.Background())
+
+	got := stateOf(t, p, "%1")
+	if got.StateSource != SourceScreen {
+		t.Errorf("a stale report left the row sourced %q, want %q", got.StateSource, SourceScreen)
+	}
+	if got.AgentState != StateWorking || got.FinishedAt != 0 {
+		t.Errorf("a stale report = %+v, want the classifier's first sight with no finish edge", got)
+	}
+	// The dead report's activity must not ride along on a row the classifier
+	// decided: it is a claim about work that stopped being current a minute ago.
+	if got.Activity != "" {
+		t.Errorf("a stale report left %q on the row", got.Activity)
+	}
+	if len(captured) != 1 || captured[0] != "%1" {
+		t.Errorf("captured %v, want exactly the one pane the classifier had to read", captured)
+	}
+}
+
+// The premise Task 7's arithmetic rests on, asserted at the poller: a pane
+// whose capture was skipped is not passed to Retain, so its classifier entry is
+// dropped and the next capture is a first sight.
+func TestACaptureSkippedPaneIsNotRetained(t *testing.T) {
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	screens := map[string]string{"%1": "mid-run, frame 1"}
+	reports := map[string]string{}
+	var captured []string
+	connected := true
+	p := reportPoller(&rows, reports, screens, &captured, &connected)
+	ctx := context.Background()
+
+	// A run with a real change in it -- so the entry carries everChanged, the
+	// flag that licenses a finish stamp -- left one poll short of settling.
+	// Built from settleAfter, which no mutant in this task touches.
+	p.refresh(ctx)
+	screens["%1"] = "mid-run, frame 2"
+	p.refresh(ctx)
+	for i := 0; i < settleAfter-1; i++ {
+		p.refresh(ctx)
+	}
+	if got := stateOf(t, p, "%1"); got.AgentState != StateWorking {
+		t.Fatalf("setup: %+v, want a run one poll short of settling", got)
+	}
+
+	// One poll under a report, so the capture is skipped.
+	reports["%1"] = FormatReport(StateWorking, time.Now().UnixMilli(), "run go")
+	before := len(captured)
+	p.refresh(ctx)
+	if len(captured) != before {
+		t.Fatalf("setup: the capture was taken under a fresh report")
+	}
+
+	// The report goes away, and the screen is byte-identical to the last one
+	// the classifier saw. A RETAINED entry settles on this very poll and stamps
+	// a finish edge -- a done badge on an agent nobody watched stop. A dropped
+	// one is a first sight, which Observe answers with working and no
+	// comparison at all.
+	delete(reports, "%1")
+	p.refresh(ctx)
+	got := stateOf(t, p, "%1")
+	if got.AgentState != StateWorking || got.FinishedAt != 0 {
+		t.Errorf("the first capture after a skipped one = %+v, want working with no finish edge: "+
+			"a capture-skipped pane must not be passed to Retain", got)
+	}
+	if got.StateSource != SourceScreen {
+		t.Errorf("StateSource = %q, want %q", got.StateSource, SourceScreen)
+	}
+}
+
+// Half-wired reporting is silent in the same way half-wired classification is:
+// with neither snapshot function there is nothing to poll, and with both there
+// is no way to say which fork happens.
+func TestNewPollerWithRefusesHalfWiredReporting(t *testing.T) {
+	snap := func(context.Context) ([]Row, error) { return nil, nil }
+	withReports := func(context.Context) ([]Row, map[string]string, error) { return nil, nil, nil }
+	for _, tc := range []struct {
+		name string
+		o    Options
+	}{
+		{"neither", Options{}},
+		{"both", Options{Snapshot: snap, SnapshotWithReports: withReports}},
+	} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("%s: built a poller, want a panic", tc.name)
+				}
+			}()
+			NewPollerWith(tc.o)
+		}()
+	}
+}
+
+// The report memory is pruned on the same terms as the classifier's, and the
+// task's own argument for NOT building a tombstone rests on it: a tombstone
+// "would not survive Retain, which the poller calls one line later with the
+// shell pane absent from keep". Nothing else prunes it -- classify continues
+// past a non-agent pane before Reports.Observe is ever reached, so Observe's
+// own command check never fires from here.
+//
+// Not in this task's mutant table: dropping p.reports.Retain(agents) survived
+// the whole suite without this.
+//
+// The probe is a standing value OLDER than the one the previous agent left,
+// because that is the only way to see the prune from outside: on a retained
+// entry the ordering filter refuses it and serves the PREVIOUS agent's state,
+// and on a pruned one it is a first sight and is accepted on its own terms.
+func TestAPaneThatStoppedBeingAnAgentIsForgottenByTheReportMemory(t *testing.T) {
+	now := time.Now()
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	screens := map[string]string{"%1": "a screen"}
+	reports := map[string]string{"%1": FormatReport(StateBlocked, now.UnixMilli(), "Approve?")}
+	var captured []string
+	connected := true
+	p := reportPoller(&rows, reports, screens, &captured, &connected)
+	ctx := context.Background()
+
+	p.refresh(ctx)
+	if got := stateOf(t, p, "%1"); got.AgentState != StateBlocked {
+		t.Fatalf("setup: %+v, want the blocked report in force", got)
+	}
+
+	// The agent exits back to a shell for one poll. The pane is not an agent,
+	// so it is skipped -- and Retain is what has to do the forgetting.
+	rows[0].Command = "zsh"
+	p.refresh(ctx)
+
+	// A new agent in the same pane, whose standing report predates the one its
+	// predecessor left behind.
+	rows[0].Command = "claude"
+	reports["%1"] = FormatReport(StateWorking, now.Add(-time.Second).UnixMilli(), "run go")
+	p.refresh(ctx)
+	if got := stateOf(t, p, "%1"); got.AgentState != StateWorking || got.Activity != "run go" {
+		t.Errorf("relaunched agent = %+v, want its own report: its predecessor's "+
+			"accepted report must not have survived the shell as an ordering floor", got)
 	}
 }

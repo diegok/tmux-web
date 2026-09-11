@@ -17,7 +17,11 @@ import (
 // are checked rather than assumed.
 type Poller struct {
 	interval time.Duration
-	fn       func(context.Context) ([]Row, error)
+	// fn produces the rows and, when reporting is on, every pane's raw
+	// @wterm_agent value from the same tmux invocation. A poller built from a
+	// bare Snapshot has that half wrapped away: a nil map is no report for
+	// every pane, which is what the v1 path means anyway.
+	fn func(context.Context) ([]Row, map[string]string, error)
 	// startFn reads the tmux server's generation. It is optional: a poller built
 	// from a bare snapshot function has no tmux server to ask, and reports an
 	// empty generation rather than inventing one.
@@ -36,6 +40,10 @@ type Poller struct {
 	capture    func(ctx context.Context, paneID string) (string, error)
 	connected  func() bool
 	classifier *Classifier
+	// reports is the other authority, and it outranks the classifier: a fresh
+	// report decides the pane and its capture is never taken. Owned by the poll
+	// goroutine on exactly the same terms as classifier.
+	reports *Reports
 
 	mu          sync.RWMutex
 	latest      []Row
@@ -51,8 +59,13 @@ type Poller struct {
 // poll now has a second job.
 type Options struct {
 	Interval time.Duration
-	// Snapshot produces the rows. Required.
+	// Snapshot produces the rows. Exactly one of Snapshot and
+	// SnapshotWithReports is required.
 	Snapshot func(context.Context) ([]Row, error)
+	// SnapshotWithReports produces the rows AND, from the same tmux
+	// invocation, every pane's raw @wterm_agent value keyed by pane id. Set
+	// this INSTEAD of Snapshot to turn agent reporting on.
+	SnapshotWithReports func(context.Context) ([]Row, map[string]string, error)
 	// ServerStart reads the tmux server's generation, once per poll. Optional:
 	// without it the poller reports no generation rather than inventing one.
 	ServerStart func(context.Context) (string, error)
@@ -78,13 +91,31 @@ func NewPollerWith(o Options) *Poller {
 	if (o.Capture == nil) != (o.Connected == nil) {
 		panic("tmux: Options.Capture and Options.Connected must be set together")
 	}
-	p := &Poller{interval: o.Interval, fn: o.Snapshot, startFn: o.ServerStart}
+	if (o.Snapshot == nil) == (o.SnapshotWithReports == nil) {
+		// Half-wired reporting is silent: with neither there is nothing to
+		// poll, and with both there is no way to say which fork happens.
+		panic("tmux: exactly one of Options.Snapshot and Options.SnapshotWithReports must be set")
+	}
+	fn := o.SnapshotWithReports
+	if fn == nil {
+		fn = func(ctx context.Context) ([]Row, map[string]string, error) {
+			rows, err := o.Snapshot(ctx)
+			// No map at all rather than an empty one, and nothing downstream
+			// needs a branch for it: reports[id] on a nil map is "", which is
+			// exactly what no report means.
+			return rows, nil, err
+		}
+	}
+	p := &Poller{interval: o.Interval, fn: fn, startFn: o.ServerStart}
 	if o.Capture != nil {
 		p.capture, p.connected = o.Capture, o.Connected
 		// Built here rather than taken from the caller: it is the poll
 		// goroutine's private memory, and two pollers sharing one would report
 		// each other's panes as having settled.
 		p.classifier = NewClassifier()
+		// Beside the classifier and for the same reason. A poller built
+		// without reporting still gets one; it simply never sees a value.
+		p.reports = NewReports()
 	}
 	return p
 }
@@ -132,7 +163,7 @@ func (p *Poller) Start(ctx context.Context) {
 // succeeds, so a caller can tell a momentary hiccup from a server that has been
 // unreachable for a minute.
 func (p *Poller) refresh(ctx context.Context) {
-	rows, err := p.fn(ctx)
+	rows, reports, err := p.fn(ctx)
 
 	// The generation is read per poll rather than once at construction: the tmux
 	// server can restart underneath a running daemon, and that is precisely the
@@ -173,7 +204,7 @@ func (p *Poller) refresh(ctx context.Context) {
 	// Before publishing, so no reader ever sees a row between its snapshot
 	// fields being set and its state being decided.
 	if err == nil {
-		p.classify(ctx, rows)
+		p.classify(ctx, rows, reports)
 	}
 
 	p.mu.Lock()
@@ -198,22 +229,22 @@ func (p *Poller) refresh(ctx context.Context) {
 // poll. The snapshot is milliseconds old by the time capture-pane runs, so a
 // pane that has closed in between is an ordinary race and not a fault -- and
 // blanking a whole sidebar because one pane went away would be a poor trade.
-func (p *Poller) classify(ctx context.Context, rows []Row) {
+func (p *Poller) classify(ctx context.Context, rows []Row, reports map[string]string) {
 	if p.classifier == nil {
 		return
 	}
-	if !p.connected() {
-		// Nobody is watching, so nothing is captured and every state stays
-		// empty -- not frozen at its last value, which would be stale state
-		// presented as current.
-		//
-		// The classifier is emptied with it. A run resumed on reconnect would
-		// settle two polls later and stamp a finish edge, lighting a done badge
-		// on every device for work that finished while nobody was connected;
-		// starting from nothing costs ~3s of "working" instead, which is the
-		// same deal a daemon restart makes.
+	// Reports are read every poll whether or not anybody is watching: they cost
+	// no fork of their own, and with no client connected a report is the only
+	// authority there is. Only the captures are gated on a live client.
+	//
+	// The classifier is emptied when nobody is watching. A run resumed on
+	// reconnect would settle two polls later and stamp a finish edge, lighting
+	// a done badge on every device for work that finished while nobody was
+	// connected; starting from nothing costs ~3s of "working" instead, which is
+	// the same deal a daemon restart makes.
+	connected := p.connected()
+	if !connected {
 		p.classifier.Retain(nil)
-		return
 	}
 
 	// Only the panes that are known agents on THIS poll. A pane that went
@@ -221,7 +252,7 @@ func (p *Poller) classify(ctx context.Context, rows []Row) {
 	// across the shell means the relaunched agent's different screen sets
 	// everChanged, and the next settle stamps a finish edge for an agent that
 	// has only just started.
-	var agents []string
+	var agents, captured []string
 	now := time.Now()
 	for i := range rows {
 		agent := KnownAgent(rows[i].Command)
@@ -230,10 +261,36 @@ func (p *Poller) classify(ctx context.Context, rows []Row) {
 		}
 		agents = append(agents, rows[i].PaneID)
 
+		// The report is consulted BEFORE the capture, not after it. Two
+		// authorities running in parallel can only agree, in which case the
+		// second one was pure cost, or disagree, in which case the design has
+		// already settled which wins -- so the second fork buys nothing either
+		// way, and not taking it is the whole win of the feature.
+		if rep, ok := p.reports.Observe(rows[i].PaneID, reports[rows[i].PaneID], rows[i].Command, now); ok {
+			rows[i].AgentState = rep.State
+			rows[i].Activity = rep.Activity
+			rows[i].StateSource = SourceEvent
+			if rep.State == StateIdle {
+				// Derived, not stamped: no memory of a previous report, no
+				// edge. Read the option, get the answer -- which is why it
+				// survives a daemon restart. See Task 10.
+				rows[i].FinishedAt = rep.Timestamp
+			}
+			// The capture is skipped entirely, and this pane is deliberately
+			// NOT added to `captured`: see Retain below.
+			continue
+		}
+		if !connected {
+			// Nobody is watching and there is no report, so this pane's state
+			// stays empty -- not frozen at its last value, which would be stale
+			// state presented as current.
+			continue
+		}
 		screen, err := p.capture(ctx, rows[i].PaneID)
 		if err != nil {
 			continue
 		}
+		captured = append(captured, rows[i].PaneID)
 		// Decided before the capture is classified, not after, because the
 		// classifier needs it: a held dialog is byte-identical between polls
 		// and would otherwise settle into a working->idle edge for a run that
@@ -248,6 +305,7 @@ func (p *Poller) classify(ctx context.Context, rows []Row) {
 		st := p.classifier.Observe(rows[i].PaneID, screen, now, blocked)
 		rows[i].AgentState = st.State
 		rows[i].FinishedAt = st.FinishedAt
+		rows[i].StateSource = SourceScreen
 
 		if blocked {
 			rows[i].AgentState = StateBlocked
@@ -256,7 +314,18 @@ func (p *Poller) classify(ctx context.Context, rows []Row) {
 			rows[i].Question = ExtractQuestion(agent, screen)
 		}
 	}
-	p.classifier.Retain(agents)
+	p.reports.Retain(agents)
+	if connected {
+		// `captured`, not `agents`. A pane the poller did not capture is not
+		// passed to Retain, so its entry is dropped and the first capture
+		// whenever one is taken again is a FIRST SIGHT, which Observe answers
+		// with working and no comparison at all. Two reasons, and Task 7's
+		// arithmetic rests on the second: a retained hash answers a different
+		// question from the one Observe asks ("changed since the previous
+		// poll", at a fixed interval), and a retained baseline that differs
+		// sets everChanged -- the flag that licenses a time.Now() finish stamp.
+		p.classifier.Retain(captured)
+	}
 }
 
 // Latest returns the most recent successful snapshot without forking tmux.

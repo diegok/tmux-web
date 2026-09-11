@@ -224,3 +224,119 @@ func TestFormatReport(t *testing.T) {
 		}
 	}
 }
+
+// The report format string is built the same way labelField is, from the same
+// two constants. It is not a fourteenth snapshot field: Format's last slot is
+// the label's, and a second unsanitized field anywhere but last produces a row
+// that parses successfully with another pane's values in it.
+func TestReportFormat(t *testing.T) {
+	if strings.Contains(Format, AgentOption) {
+		t.Fatal("@wterm_agent must not be in the snapshot format string: the last " +
+			"slot is @wterm_label's, and any other slot shifts the record")
+	}
+	// The option is the last and only variable field of its own format, so it
+	// gets the same three layers the label has.
+	if reportFormatFields[len(reportFormatFields)-1] != reportField {
+		t.Fatal("the report must be the last field of its own format")
+	}
+	// Built from the constants rather than retyped: a bracket set retyped from
+	// a rendered "\n" covers neither target byte and turns every lowercase "n"
+	// into a space.
+	if !strings.Contains(reportField, "\n") || !strings.Contains(reportField, Sep) {
+		t.Fatal("reportField's bracket set must hold the real newline and the real separator")
+	}
+	if strings.Contains(reportField, `\n`) {
+		t.Fatal("reportField contains a two-character backslash-n: that leaves real " +
+			"newlines alive AND puts a literal 'n' in the set, so every 'n' in a " +
+			"benign value becomes a space")
+	}
+}
+
+func TestParseReports(t *testing.T) {
+	// One batch output: the snapshot block, then the report block. Each parser
+	// owns one tag and ignores the other's lines.
+	out := strings.Join([]string{
+		rec("work", "$0", "work", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", ""),
+		rec("work", "$0", "work", "%2", "1", "", "@1", "1", "win", "0", "zsh", "t", ""),
+		reportTag + Sep + "%1" + Sep + "1;working;1789075200000;run go",
+		reportTag + Sep + "%2" + Sep + "",
+	}, "\n")
+
+	rows, dropped, err := ParseRows(out)
+	if err != nil || dropped != 0 || len(rows) != 2 {
+		t.Fatalf("ParseRows over batch output = %d rows, dropped %d, err %v; the "+
+			"report block must be skipped, not counted as malformed", len(rows), dropped, err)
+	}
+	reports := ParseReports(out)
+	if got := reports["%1"]; got != "1;working;1789075200000;run go" {
+		t.Errorf("reports[%%1] = %q", got)
+	}
+	// Every pane gets a line, including panes with no integration. An empty
+	// value is the same thing as no report -- the design's revision 1 said "a
+	// pane with no line in the second call has no report", which described a
+	// case that does not occur.
+	if got, ok := reports["%2"]; !ok || got != "" {
+		t.Errorf("reports[%%2] = %q, ok=%v; want an empty value present", got, ok)
+	}
+	// The exact key set, and it has to be the key SET.
+	//
+	// `if _, ok := reports["S"]; ok` is the assertion this wants to be and it
+	// cannot fail: drop the tag check from ParseReports and a snapshot line
+	// splits SplitN(line, Sep, 3) into ("S", "work", <the rest>), so it is keyed
+	// "work" -- parts[1] -- and never "S". The mutant it exists for survives it.
+	if len(reports) != 2 {
+		t.Errorf("reports = %v, want exactly two entries, for %%1 and %%2: a third "+
+			"entry keyed by a snapshot line's SECOND field is what a missing tag "+
+			"check looks like", reports)
+	}
+}
+
+// ParseRows' own tag check, which the batch fixture above cannot see: with the
+// reportTag `continue` sitting above it, a report line is skipped either way.
+// What the check is really for is a line that is neither block, and the only
+// way to produce one is to write it.
+//
+// The fixture has a hidden requirement the plan does not state, and getting it
+// wrong makes this test green against the mutant it names. ParseRows drops any
+// record whose pane-index or window-index field will not go through Atoi, so a
+// full-width record tagged "X" with placeholder text in those two slots is
+// dropped under the mutant TOO. The indices have to be real integers, so that
+// the tag is the ONLY thing standing between this line and a Row. It also
+// cannot use rec, which prepends snapshotTag.
+func TestParseRowsRefusesALineWithAnUnknownTag(t *testing.T) {
+	// fieldCount fields, tag "X", and valid integers where ParseRows calls
+	// Atoi -- field 5 (pane index) and field 8 (window index).
+	line := strings.Join([]string{
+		"X", "work", "$0", "work", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "",
+	}, Sep)
+	if n := len(strings.Split(line, Sep)); n != fieldCount {
+		t.Fatalf("the fixture has %d fields, want %d: a record too short to be "+
+			"accepted proves nothing about the tag check", n, fieldCount)
+	}
+	rows, dropped, err := ParseRows(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("ParseRows accepted a line tagged %q: %+v -- then the discriminator "+
+			"is the field count, not the tag, which is the thing this design refuses "+
+			"to rely on", "X", rows)
+	}
+	if dropped != 1 {
+		t.Errorf("dropped = %d, want 1", dropped)
+	}
+}
+
+// A report value that arrived with a separator in it -- which needs layer 1 to
+// have failed open -- costs that one report and nothing else.
+func TestParseReportsRejoinsASurplusSeparator(t *testing.T) {
+	out := reportTag + Sep + "%1" + Sep + "1;working;1789075200000;a" + Sep + "b"
+	if got := ParseReports(out)["%1"]; got != "1;working;1789075200000;a"+Sep+"b" {
+		t.Errorf("got %q, want the value rejoined rather than truncated", got)
+	}
+	// ...and the daemon's own sanitizer is what makes it harmless.
+	r, ok := ParseReport(ParseReports(out)["%1"], time.UnixMilli(1789075200000))
+	if !ok || r.Activity != "a b" {
+		t.Errorf("parsed %+v ok=%v, want the separator repaired to a space", r, ok)
+	}
+}

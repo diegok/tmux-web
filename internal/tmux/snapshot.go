@@ -13,10 +13,25 @@ import (
 // unsafe because window names may contain one.
 const Sep = "\x1f"
 
+// snapshotTag and reportTag label the two blocks of the one batched read.
+//
+// A literal constant in each format string, so nothing a writer controls can
+// forge one: a report containing a newline would have to survive tmux's
+// substitution first, and that substitution turns it into a space. Telling the
+// blocks apart by counting fields or by trusting their order would both be
+// guesses about a value somebody else writes.
+const (
+	snapshotTag = "S"
+	reportTag   = "A"
+)
+
 // fieldCount is how many fields a record must have to be read. It is a
 // minimum, not an equality: the label is the last field and may contain the
 // separator, so a record can legitimately arrive with more. See ParseRows.
-const fieldCount = 13
+//
+// Fourteen rather than thirteen since the batched read: the block tag is field
+// 0, which every positional index below is offset by.
+const fieldCount = 14
 
 // MaxTitle bounds a pane title. tmux normalises control bytes out of titles but
 // does not cap length; an 8KB title was observed stored and reported in full,
@@ -141,6 +156,7 @@ const labelField = "#{s/[\n" + Sep + "]/ /:" + LabelOption + "}"
 // line. Any other position turns both into a shifted or unparseable record,
 // which is a pane missing from the sidebar.
 var formatFields = []string{
+	snapshotTag,
 	"#{?#{session_group},#{session_group},#{session_name}}",
 	"#{session_id}",
 	"#{session_name}",
@@ -184,31 +200,39 @@ func ParseRows(out string) (rows []Row, dropped int, err error) {
 	}
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Split(line, Sep)
-		if len(fields) < fieldCount {
+		// The other block of the batched read. Skipped rather than counted:
+		// ParseReports owns those lines, and counting them as malformed would
+		// log "skipped malformed rows" once per pane per poll forever.
+		if len(fields) > 0 && fields[0] == reportTag {
+			continue
+		}
+		// The tag is the discriminator, not the field count. A line that is
+		// neither block is malformed however many fields it happens to have.
+		if len(fields) < fieldCount || fields[0] != snapshotTag {
 			dropped++
 			continue
 		}
 		// Distinct names: shadowing the named err return here would be
 		// harmless today only because it is always nil.
-		pidx, perr := strconv.Atoi(fields[4])
-		widx, werr := strconv.Atoi(fields[7])
+		pidx, perr := strconv.Atoi(fields[5])
+		widx, werr := strconv.Atoi(fields[8])
 		if perr != nil || werr != nil {
 			dropped++
 			continue
 		}
 		rows = append(rows, Row{
-			GroupKey:    fields[0],
-			SessionID:   fields[1],
-			SessionName: fields[2],
-			PaneID:      fields[3],
+			GroupKey:    fields[1],
+			SessionID:   fields[2],
+			SessionName: fields[3],
+			PaneID:      fields[4],
 			PaneIndex:   pidx,
-			AppOwned:    fields[5] == "1",
-			WindowID:    fields[6],
+			AppOwned:    fields[6] == "1",
+			WindowID:    fields[7],
 			WindowIndex: widx,
-			WindowName:  fields[8],
-			PaneActive:  fields[9] == "1",
-			Command:     fields[10],
-			Title:       truncateAtRuneBoundary(fields[11], MaxTitle),
+			WindowName:  fields[9],
+			PaneActive:  fields[10] == "1",
+			Command:     fields[11],
+			Title:       truncateAtRuneBoundary(fields[12], MaxTitle),
 			// Rejoined with the separator it was split on, so a label that
 			// arrived with a raw 0x1f in it is reconstructed rather than
 			// silently reassembled into something else.

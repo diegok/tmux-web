@@ -9,7 +9,13 @@ import (
 // rec builds one snapshot record from its fields, joined by the real separator.
 // Tests use Sep rather than a private copy of the byte so that a change to the
 // separator cannot leave the suite passing against a stale literal.
-func rec(fields ...string) string { return strings.Join(fields, Sep) }
+//
+// The block tag is prepended here rather than written into every fixture: it is
+// a constant of the format, not data a test varies, and a suite that spelled it
+// out 40 times would be 40 places to update.
+func rec(fields ...string) string {
+	return strings.Join(append([]string{snapshotTag}, fields...), Sep)
+}
 
 // A valid record, as a named baseline the malformed cases can be varied from.
 // Field order matches Format: group, session id, session name, pane id, pane

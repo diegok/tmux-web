@@ -204,3 +204,52 @@ func FormatReport(state string, ms int64, activity string) string {
 	}
 	return v
 }
+
+// reportField is #{@wterm_agent} with the two bytes that break this wire format
+// substituted out by tmux before the value reaches Go.
+//
+// It is labelField's pattern, built from the same two constants -- COPIED FROM
+// internal/tmux/snapshot.go, NOT RETYPED FROM ANY RENDERING OF IT. Three ways
+// to get this wrong, all measured:
+//
+//   - [[:cntrl:]] does not survive tmux's own parse: the modifier's variable is
+//     introduced by ":", so the ":" inside the class ends the pattern early and
+//     the whole expression expands to "" for EVERY value, including good ones.
+//   - A range such as [\x0a-\x1f] compiles but depends on the locale's
+//     collation order, and the tmux server's locale is whatever started it.
+//   - A bracket set retyped from a rendered "\n" is two characters, so it
+//     leaves real newlines alive AND puts a literal 'n' in the set: every
+//     lowercase "n" in a benign value becomes a space.
+//
+// The Go source works because "\n" in a Go string literal IS the byte.
+const reportField = "#{s/[\n" + Sep + "]/ /:" + AgentOption + "}"
+
+// reportFormatFields is the second -F of the batched read. The option is the
+// last and only variable field, so it gets all three of the label's defences;
+// #{pane_id} is %N and cannot carry anything.
+var reportFormatFields = []string{reportTag, "#{pane_id}", reportField}
+
+// ReportFormat is the -F argument for the report block.
+var ReportFormat = strings.Join(reportFormatFields, Sep)
+
+// ParseReports pulls the raw @wterm_agent value of every pane out of the
+// batched read, keyed by pane id.
+//
+// Every pane gets a line, including one with no integration, whose value is the
+// empty string -- which is the same thing as no report. There is no dropped
+// count and there should not be one: the blast radius here is a report, never a
+// pane, so a line that will not parse costs one pane its state and nothing
+// costs the sidebar a row.
+func ParseReports(out string) map[string]string {
+	reports := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		// SplitN with 3 for the same reason ParseRows rejoins its surplus: a
+		// separator that survived the substitution belongs to the value.
+		parts := strings.SplitN(line, Sep, 3)
+		if len(parts) != 3 || parts[0] != reportTag {
+			continue
+		}
+		reports[parts[1]] = parts[2]
+	}
+	return reports
+}

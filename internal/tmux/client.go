@@ -22,24 +22,96 @@ func (c *Client) command(ctx context.Context, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, "tmux", append(append([]string{}, c.base...), args...)...)
 }
 
-// Run executes a tmux command and returns trimmed stdout.
+// runKeepingOutput is Run for a command whose stdout is worth having even when
+// it fails.
+//
+// It exists for exactly one caller. SnapshotAndReports runs two commands in one
+// invocation, and a failure in the second leaves the first's output complete on
+// stdout -- so a nonzero exit there is a missing REPORT, not a missing
+// snapshot, and discarding stdout would trade a degraded feature for a blank
+// sidebar.
 //
 // stdout and stderr are captured separately, exactly as in the test harness and
-// for the same reason: Snapshot splits this return value on 0x1f and indexes
+// for the same reason: the callers split this return value on 0x1f and index
 // fields positionally, so a single diagnostic line merged into it would produce
 // a malformed row and fail far from its cause. stderr goes into the error,
 // where it is useful, rather than into data that gets parsed.
-func (c *Client) Run(ctx context.Context, args ...string) (string, error) {
+func (c *Client) runKeepingOutput(ctx context.Context, args ...string) (string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd := c.command(ctx, args...)
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	if err := cmd.Run(); err != nil {
+	err := cmd.Run()
+	out := strings.TrimRight(stdout.String(), "\n")
+	if err != nil {
 		if msg := strings.TrimRight(stderr.String(), "\n"); msg != "" {
-			return "", fmt.Errorf("tmux %s: %w: %s", strings.Join(args, " "), err, msg)
+			return out, fmt.Errorf("tmux %s: %w: %s", strings.Join(args, " "), err, msg)
 		}
-		return "", fmt.Errorf("tmux %s: %w", strings.Join(args, " "), err)
+		return out, fmt.Errorf("tmux %s: %w", strings.Join(args, " "), err)
 	}
-	return strings.TrimRight(stdout.String(), "\n"), nil
+	return out, nil
+}
+
+// Run executes a tmux command and returns trimmed stdout.
+//
+// The contract is unchanged from before runKeepingOutput existed and every
+// caller here depends on it: on failure it returns "" and an error carrying
+// stderr, which is what noServer() matches on.
+func (c *Client) Run(ctx context.Context, args ...string) (string, error) {
+	out, err := c.runKeepingOutput(ctx, args...)
+	if err != nil {
+		return "", err
+	}
+	return out, nil
+}
+
+// batchArgs is the one tmux invocation the poller makes per refresh: the
+// snapshot, then the reports, in command order.
+//
+// A lone ";" argv element is tmux's own command separator -- the same shape
+// AttachArgs already uses. There is no shell here, so it needs no escaping.
+//
+// It is a var rather than a func for exactly one reason: SnapshotAndReports
+// takes no arguments and calls this itself, so this is the only seam through
+// which a test can make the SECOND command fail while the first succeeds. That
+// is what TestABrokenReportReadStillYieldsTheSnapshot swaps, and without the
+// seam the rule "parse stdout on its own terms, do not gate on the exit status"
+// has no test that can see it. Nothing in production reassigns it.
+var batchArgs = func() []string {
+	return []string{
+		"list-panes", "-a", "-F", Format,
+		";", "list-panes", "-a", "-F", ReportFormat,
+	}
+}
+
+// SnapshotAndReports returns one row per pane and every pane's raw
+// @wterm_agent value, from a single tmux invocation.
+//
+// The marginal cost of the reports is zero forks: it is one more command inside
+// a fork the poller already makes unconditionally, and against it the feature
+// removes one capture-pane fork per reporting agent pane per poll. There is no
+// poll at which it costs a fork it did not save.
+func (c *Client) SnapshotAndReports(ctx context.Context) ([]Row, map[string]string, error) {
+	out, err := c.runKeepingOutput(ctx, batchArgs()...)
+	if err != nil && noServer(err.Error()) {
+		return nil, nil, nil
+	}
+	rows, dropped, perr := ParseRows(out)
+	if perr != nil {
+		return nil, nil, perr
+	}
+	// The exit status is NOT the gate. A nonzero exit with a complete snapshot
+	// block is a missing report; only a nonzero exit with nothing usable on
+	// stdout is a failed poll.
+	if err != nil && len(rows) == 0 {
+		return nil, nil, err
+	}
+	if err != nil {
+		slog.Warn("tmux batch: the report read failed; the snapshot is intact", "error", err)
+	}
+	if dropped > 0 {
+		slog.Warn("tmux snapshot: skipped malformed rows", "dropped", dropped)
+	}
+	return Dedupe(rows), ParseReports(out), nil
 }
 
 // Snapshot returns one row per pane, deduplicated across session groups.

@@ -22,7 +22,7 @@
 // returns. The queue's push() returns undefined for the same reason: there is
 // nothing for an awaited hook to wait on even by accident.
 
-import { makeQueue, spawnReport } from './queue.ts'
+import { claimReporter, makeQueue, spawnReport } from './queue.ts'
 
 /**
  * The bus events this plugin forwards, and the reason there is a list at all.
@@ -185,7 +185,7 @@ export function handlers(report) {
 }
 
 /**
- * What opencode loads. One tree and one queue per plugin instance.
+ * What opencode loads. One tree, one queue and one claim per plugin instance.
  *
  * THE TMUX_PANE GUARD IS FIRST, and it is not a precaution copied from
  * somewhere. This plugin runs IN-PROCESS, as a child of the pane's shell, so
@@ -194,10 +194,24 @@ export function handlers(report) {
  * where either there is no pane to report on or -- worse -- there is a stale
  * TMUX_PANE from whatever shell started the server, and this session's state
  * would be written onto somebody else's row. No pane, no plugin: an empty hook
- * object, and not one fork's worth of machinery built.
+ * object, and not one fork's worth of machinery built. It is ALSO in front of
+ * the claim below, so a plugin with no pane to report on does not take the slot
+ * away from a copy that has one.
+ *
+ * THE CLAIM IS MADE HERE AND CHECKED AT THE QUEUE, and those are deliberately
+ * two moments. Since `--global`, one opencode process can hold two copies of
+ * this file -- $XDG_CONFIG_HOME/opencode/plugin/ loads in every project and
+ * .opencode/plugin/ loads in this one, and opencode dedupes neither -- so both
+ * copies' hooks are called on every event. A copy that loses the claim cannot
+ * withdraw the hook object it has already returned, so it stays registered and
+ * says nothing. See queue.ts for why the winner is the newer schema rather than
+ * the first to load.
  */
 export default async function () {
   if (!process.env.TMUX_PANE) return {}
+  const mine = claimReporter()
   const q = makeQueue(spawnReport('opencode'))
-  return handlers((item) => q.push(item))
+  return handlers((item) => {
+    if (mine()) q.push(item)
+  })
 }

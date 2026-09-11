@@ -9,10 +9,10 @@
 
 import { readFileSync } from 'node:fs'
 
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import piExtension, { handlers } from './pi.ts'
-import { spawnReport } from './queue.ts'
+import { makeQueue, spawnReport } from './queue.ts'
 
 // The real queue module, with spies over it: the default export is the only
 // place the agent NAME appears, and `spawnReport('opencode')` in this file is
@@ -47,6 +47,28 @@ function fixture(name: string): unknown {
     readFileSync(new URL(`../../cmd/wterm-web/testdata/hooks/pi/${name}.json`, import.meta.url), 'utf8'),
   )
 }
+
+// loadCopy loads the extension the way pi does -- one call of the default
+// export -- and gives back both halves of what that call produces: the handlers
+// it registered, and the items its own queue was pushed. Two calls are two
+// copies in one process, which is what a global install plus a project install
+// is.
+function loadCopy() {
+  const pushed: Item[] = []
+  vi.mocked(makeQueue).mockReturnValueOnce({ push: (item: Item) => void pushed.push(item) })
+  const on: Record<string, (event: unknown, ctx?: { mode?: string; isIdle?: () => boolean }) => void> = {}
+  piExtension({
+    on(name: string, fn: (event: unknown, ctx?: { mode?: string; isIdle?: () => boolean }) => void) {
+      on[name] = fn
+    },
+  })
+  return { on, pushed }
+}
+
+// The claim lives on globalThis, which vitest does not reset between tests.
+beforeEach(() => {
+  delete (globalThis as Record<string, unknown>)['__wterm_web_reporter__']
+})
 
 describe('handlers', () => {
   it('reports nothing at all from a session that is not the TUI', () => {
@@ -187,6 +209,31 @@ describe('the default export', () => {
     expect(registered.sort()).toEqual(
       ['agent_settled', 'input', 'session_start', 'tool_execution_start', 'ui_prompt_start'].sort(),
     )
+  })
+
+  // The duplicate-load case, and on pi it is the PROJECT copy that loads
+  // first. From the version that added `--global`, one process can hold two
+  // copies of this extension -- $PI_CODING_AGENT_DIR/extensions/ auto-loads in
+  // every project, .pi/extensions/ loads in this one -- and pi dedupes neither
+  // by filename nor by content. Both register all five handlers; without the
+  // claim in queue.ts both would also fork a `wterm-web report` per event, and
+  // two single-slot queues would race for one pane.
+  //
+  // It is driven through the real default export rather than through
+  // claimReporter directly, because what queue.test.ts cannot see is whether
+  // this file CALLS it, and on which side of the queue: claim at load, check at
+  // report. A copy that has lost the slot has already handed pi its handlers --
+  // there is no unregistering -- so it must go on being called and go on saying
+  // nothing.
+  it('leaves exactly one of two loaded copies reporting', () => {
+    const first = loadCopy()
+    const second = loadCopy()
+
+    first.on.session_start(undefined, tui())
+    second.on.session_start(undefined, tui())
+
+    expect(first.pushed).toEqual([])
+    expect(second.pushed).toEqual([{ event: 'session_start', payload: { wterm_is_idle: true } }])
   })
 
   it('reports as pi, through a queue of its own', () => {

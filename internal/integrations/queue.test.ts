@@ -8,9 +8,9 @@
 // //go:embed's. A copy under web/ is exactly what this arrangement exists to
 // prevent.
 
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { makeQueue, spawnReport } from './queue'
+import { WTERM_SCHEMA, claimReporter, makeQueue, spawnReport } from './queue'
 
 // A spawn that records what it was handed and hands back a promise the test
 // resolves by hand. Every ordering claim in here is about WHEN that promise
@@ -235,5 +235,82 @@ describe('spawnReport', () => {
     handlers.error?.()
     await settle()
     expect(settled).toHaveBeenCalledTimes(1)
+  })
+})
+
+// -- the one-reporter claim ---------------------------------------------------
+//
+// The duplicate-load problem, measured on opencode 1.18.30 and pi 0.85.1:
+// neither runtime dedupes by filename, so the same integration installed both
+// globally and in the project is LOADED TWICE in one process. The effect on the
+// pane option is benign -- both copies write the same value -- but it doubles
+// every `wterm-web report` spawn and puts two single-slot queues in a race for
+// the pane, which is the one ordering guarantee queue.ts exists to give.
+//
+// The two runtimes load the two scopes in OPPOSITE ORDERS -- opencode does
+// global first, pi does project first -- so "the first one to claim wins" would
+// pick a different copy in each, and after a partial upgrade that means the
+// OLDER copy wins in one of them. Every case below is one of those orders.
+describe('claimReporter', () => {
+  const slot = '__wterm_web_reporter__'
+  beforeEach(() => {
+    delete (globalThis as Record<string, unknown>)[slot]
+  })
+
+  it('lets a single copy report', () => {
+    expect(claimReporter(WTERM_SCHEMA)()).toBe(true)
+  })
+
+  it('leaves exactly one owner when two copies of the same schema load', () => {
+    const first = claimReporter(WTERM_SCHEMA)
+    const second = claimReporter(WTERM_SCHEMA)
+    expect([first(), second()]).toEqual([false, true])
+  })
+
+  // opencode's order: the global copy loads first. A stale global and a fresh
+  // project install must leave the PROJECT copy reporting.
+  it('hands the slot to a newer schema loading second', () => {
+    const older = claimReporter(1)
+    const newer = claimReporter(2)
+    expect([older(), newer()]).toEqual([false, true])
+  })
+
+  // pi's order: the project copy loads first. The same partial upgrade seen
+  // from the other side, and the case a first-wins guard gets wrong.
+  it('keeps the slot when an older schema loads second', () => {
+    const newer = claimReporter(2)
+    const older = claimReporter(1)
+    expect([newer(), older()]).toEqual([true, false])
+  })
+
+  // Three copies cannot happen today, but "the newest wins" has to mean the
+  // newest and not the last, whatever order they arrive in.
+  it('keeps the newest of three whatever the order', () => {
+    const a = claimReporter(2)
+    const b = claimReporter(3)
+    const c = claimReporter(1)
+    expect([a(), b(), c()]).toEqual([false, true, false])
+  })
+
+  // The slot is a key on globalThis in somebody else's process. Anything at all
+  // can be sitting there, and a guard that throws on it takes the integration
+  // down with it -- on opencode that is inside the plugin factory, which is
+  // exactly where a throw costs the pane its reporting.
+  it('survives a foreign value in the slot', () => {
+    ;(globalThis as Record<string, unknown>)[slot] = 'not ours'
+    expect(claimReporter(WTERM_SCHEMA)()).toBe(true)
+  })
+
+  // And the case that makes the predicate re-read globalThis instead of closing
+  // over the object it claimed. A copy that arrives after something foreign has
+  // landed on the key has to REPLACE the slot -- there is nothing in it to
+  // trust -- and the copy that owned the old one must lose. A predicate that
+  // only remembered `slot.owner === me` would have both of them reporting,
+  // which is the exact failure the whole claim exists to prevent.
+  it('drops an owner whose slot has been replaced', () => {
+    const first = claimReporter(2)
+    ;(globalThis as Record<string, unknown>)[slot] = 'somebody else got here'
+    const second = claimReporter(1)
+    expect([first(), second()]).toEqual([false, true])
   })
 })

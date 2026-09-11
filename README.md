@@ -163,17 +163,36 @@ under it. It exits 0 on every path, and Claude's hooks are registered `async` so
 they cannot hold up a turn: a reporting feature that can stall an agent is worse
 than no reporting at all.
 
-`--global` is claude only, because Claude Code's hooks are documented to work in
-a user-level `settings.json` and the other two are project-local by mechanism.
-They refuse, and the refusal says why rather than guessing:
+`--global` installs into the agent's own configuration instead of a project, and
+all three support it. Each one is a **directory drop** and no file you own is
+edited:
 
-```
-$ ./wterm-web install-integration --agent opencode --global
-wterm-web install-integration: --global is not offered for opencode: opencode
-may have a global plugin directory at ~/.config/opencode/plugin/, but that is
-unverified (open question 5) and installing there on the strength of a sentence
-is how an integration ends up somewhere nothing reads
-```
+- claude: `~/.claude/wterm-report.sh`, with the four hooks merged into
+  `~/.claude/settings.json`.
+- opencode: `$XDG_CONFIG_HOME/opencode/plugin/wterm.js` (`~/.config` when that is
+  unset). Nothing is added to `opencode.jsonc` — an absolute path in its `plugin`
+  array does work, but a dropped file uninstalls with one `rm` and leaves your
+  config alone. opencode's own bootstrap (`package.json`, `node_modules/`, a
+  `.gitignore`) lands beside the plugin in opencode's config directory, **not in
+  any repository**.
+- pi: `$PI_CODING_AGENT_DIR/extensions/wterm.ts` (`~/.pi/agent` when that is
+  unset), which pi auto-loads with no settings entry and no trust prompt.
+  `~/.pi/agent/settings.json` is not edited and `pi install` is not run:
+  measured on pi 0.85.1, `pi install` and `pi remove` keep every value and the
+  key order but **reformat the whole file** — indentation normalised, arrays
+  exploded one element per line, the trailing newline dropped. That is a
+  wholesale rewrite of a file you own.
+
+**A global pi extension is loaded by every pi on the machine, and one pi cannot
+load stops pi *starting* in every project.** So `--global --agent pi` loads the
+file with a real `pi` before writing it, in a throwaway config directory, and
+refuses if pi rejects it — or if it cannot run pi at all, in which case it tells
+you to install into a project instead, where a bad extension breaks one project
+and pi prints the `pi -ne` hint itself.
+
+Installing both globally and in a project is allowed and says so. Neither
+runtime dedupes by filename, so both copies load in one process; they agree at
+run time on one of them doing the reporting, and the newer of the two wins.
 
 Installing is a command and not a button in the web UI, and it is not going to
 become one. The UI is reachable over the network from a phone, and writing

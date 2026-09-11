@@ -15,10 +15,10 @@
 
 import { readFileSync } from 'node:fs'
 
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import opencodePlugin, { handlers, sessionTree } from './opencode.js'
-import { spawnReport } from './queue.ts'
+import { makeQueue, spawnReport } from './queue.ts'
 
 // The real queue module with spies over it: the default export is the only
 // place the agent NAME appears, and `spawnReport('pi')` in this file is a
@@ -308,6 +308,23 @@ describe('handlers', () => {
   })
 })
 
+// loadCopy loads the plugin the way opencode does -- one call of the default
+// export -- and gives back both halves of what that call produces: the hook
+// object it returned, and the items its own queue was pushed. Two calls are two
+// copies in one process, which is what a global install plus a project install
+// is.
+async function loadCopy() {
+  const pushed: Item[] = []
+  vi.mocked(makeQueue).mockReturnValueOnce({ push: (item: Item) => void pushed.push(item) })
+  const hooks = (await opencodePlugin()) as Record<string, (a?: unknown, b?: unknown) => void>
+  return { hooks, pushed }
+}
+
+// The claim lives on globalThis, which vitest does not reset between tests.
+beforeEach(() => {
+  delete (globalThis as Record<string, unknown>)['__wterm_web_reporter__']
+})
+
 describe('the default export', () => {
   it('registers exactly the three hooks opencode is asked about', async () => {
     // Written out rather than taken from handlers(): against
@@ -317,6 +334,34 @@ describe('the default export', () => {
     vi.stubEnv('TMUX_PANE', '%0')
     const hooks = await opencodePlugin()
     expect(Object.keys(hooks).sort()).toEqual(['chat.message', 'event', 'tool.execute.before'].sort())
+    vi.unstubAllEnvs()
+  })
+
+  // The duplicate-load case, and on opencode it is the GLOBAL copy that loads
+  // first -- the opposite order from pi, which is why the claim in queue.ts
+  // compares schema numbers instead of taking the first claimant. From the
+  // version that added `--global`, one process can hold two copies of this
+  // plugin: $XDG_CONFIG_HOME/opencode/plugin/ loads in every project and
+  // .opencode/plugin/ loads in this one, and opencode dedupes neither by
+  // filename nor by content. Both copies' hooks are called on every event;
+  // without the claim both would fork a `wterm-web report`, and two single-slot
+  // queues would race for one pane.
+  //
+  // Driven through the real default export rather than through claimReporter,
+  // because what queue.test.ts cannot see is whether this file CALLS it, and on
+  // which side of the queue: claim at load, check at report. A copy that has
+  // lost the slot has already handed opencode its hooks -- there is no
+  // unregistering -- so it must go on being called and go on saying nothing.
+  it('leaves exactly one of two loaded copies reporting', async () => {
+    vi.stubEnv('TMUX_PANE', '%0')
+    const first = await loadCopy()
+    const second = await loadCopy()
+
+    first.hooks['chat.message']({ sessionID: 'ses_root' })
+    second.hooks['chat.message']({ sessionID: 'ses_root' })
+
+    expect(first.pushed).toEqual([])
+    expect(second.pushed).toEqual([{ event: 'chat.message' }])
     vi.unstubAllEnvs()
   })
 

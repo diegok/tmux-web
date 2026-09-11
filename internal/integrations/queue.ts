@@ -152,3 +152,81 @@ export function spawnReport(agent, spawnProcess = spawnChildProcess) {
     })
   }
 }
+
+// -- the one-reporter claim ---------------------------------------------------
+//
+// WHAT THIS IS FOR. From the version that added `--global`, this integration
+// can be installed in TWO PLACES AT ONCE: in the agent's own configuration
+// directory, where it loads in every project, and in one project's own. Neither
+// runtime dedupes by filename -- measured on opencode 1.18.30 and pi 0.85.1 --
+// so both copies load, in one process, and both register handlers.
+//
+// The damage is not the pane option: both copies write the same value, so the
+// row looks right. It is that every event becomes TWO `wterm-web report` forks,
+// and that two single-slot queues then race for one pane -- which is the one
+// ordering guarantee makeQueue above exists to give, and the thing this whole
+// module is built around.
+//
+// WHY IT COMPARES SCHEMAS RATHER THAN TAKING THE FIRST CLAIM. The two runtimes
+// load the two scopes in OPPOSITE ORDERS -- opencode does global first, pi does
+// project first -- so a first-wins guard picks a different copy in each. After a
+// partial upgrade (a new global install over an old project one, or the other
+// way round) that means the OLDER copy wins in one of the two runtimes, silently
+// and for as long as the mismatch lasts. Comparing WTERM_SCHEMA makes the answer
+// the same in both: the newer copy reports.
+//
+// The claim is made when the copy LOADS and the answer is read when it REPORTS,
+// and those have to be two separate moments. A copy that loses the slot has
+// already returned its handlers to the runtime by then -- there is no
+// unregistering in either API -- so the loser must go on being called and go on
+// saying nothing.
+
+/**
+ * WTERM_SCHEMA is the schema number of THIS copy, and it is the same number as
+ * the one in the `managed by tmux-web (wterm-schema: N)` header of every file
+ * the installer writes. cmd/wterm-web/install.go holds its own `wtermSchema`
+ * against this constant on every run of the Go suite, because two numbers that
+ * must agree and are written down twice are two numbers that drift.
+ */
+export const WTERM_SCHEMA = 1
+
+/** The key on globalThis the two copies meet at. Namespaced, because it is a
+ *  key in somebody else's process. */
+const CLAIM_SLOT = '__wterm_web_reporter__'
+
+/**
+ * claimReporter claims the right to report for this process, and returns the
+ * predicate that says whether this copy still holds it.
+ *
+ * `>=` rather than `>`: two copies of the SAME schema is the ordinary case -- a
+ * global install and a project install made by the same wterm-web -- and one of
+ * them has to win. The later loader takes it, which is arbitrary and is meant
+ * to be: the two files are byte-identical, so there is nothing to choose
+ * between them beyond leaving exactly one.
+ *
+ * @param {number} [schema] this copy's schema; the parameter exists for the
+ *   test, and nothing that ships passes it.
+ * @returns {() => boolean} whether this copy is the one that should report
+ */
+export function claimReporter(schema = WTERM_SCHEMA) {
+  // Identity, not a name or a number: it is the only thing two copies of this
+  // same code cannot accidentally share.
+  const me = {}
+  let slot = globalThis[CLAIM_SLOT]
+  // Anything at all can be sitting on that key, and a guard that throws on it
+  // throws inside a plugin factory -- which on opencode is exactly where a
+  // throw costs the pane its reporting. Anything we do not recognise is
+  // replaced rather than reasoned about.
+  if (slot === null || typeof slot !== 'object' || typeof slot.schema !== 'number') {
+    slot = { schema: -1, owner: null }
+    globalThis[CLAIM_SLOT] = slot
+  }
+  if (schema >= slot.schema) {
+    slot.schema = schema
+    slot.owner = me
+  }
+  // The slot is re-read at report time, not captured: a later copy that found
+  // something foreign on the key will have replaced the whole object, and a
+  // predicate closed over the old one would have both copies reporting.
+  return () => globalThis[CLAIM_SLOT] === slot && slot.owner === me
+}

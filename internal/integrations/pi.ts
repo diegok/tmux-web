@@ -13,7 +13,7 @@
 // because they read `ctx`, which is not part of any event payload and
 // therefore cannot reach Go at all unless this file puts it there.
 
-import { makeQueue, spawnReport } from './queue.ts'
+import { claimReporter, makeQueue, spawnReport } from './queue.ts'
 
 /** Exactly what `wterm-web report` needs: an event name and the hook's own
  *  JSON. No timestamp -- `report` stamps one from its own process start. */
@@ -122,10 +122,24 @@ export function handlers(report: (item: ReportItem) => void): Record<string, Han
   }
 }
 
-// What pi loads. It owns one thing the factory does not: the real queue, which
+// What pi loads. It owns two things the factory does not: the real queue, which
 // holds one report in flight per pane and collapses a burst of tool calls to
-// the newest state rather than to a backlog of forks.
+// the newest state rather than to a backlog of forks, and the claim that
+// decides whether this copy is the one that should be reporting at all.
+//
+// THE CLAIM IS MADE HERE AND CHECKED AT THE QUEUE, and those are deliberately
+// two moments. Since `--global`, one pi process can hold two copies of this
+// file -- $PI_CODING_AGENT_DIR/extensions/ auto-loads in every project and
+// .pi/extensions/ loads in this one, and pi dedupes neither -- so both copies
+// register all five handlers and both are called on every event. A copy that
+// loses the claim cannot unregister anything (pi's `on` has no inverse), so it
+// stays registered and says nothing. See queue.ts for why the winner is the
+// newer schema rather than the first to load.
 export default function (pi: Pi) {
+  const mine = claimReporter()
   const q = makeQueue(spawnReport('pi'))
-  for (const [name, fn] of Object.entries(handlers((item) => q.push(item)))) pi.on(name, fn)
+  const report = (item: ReportItem) => {
+    if (mine()) q.push(item)
+  }
+  for (const [name, fn] of Object.entries(handlers(report))) pi.on(name, fn)
 }

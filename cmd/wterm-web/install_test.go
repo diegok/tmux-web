@@ -257,6 +257,11 @@ func TestInstallIsNeverReachableFromHTTP(t *testing.T) {
 		".pi/extensions",
 		".opencode/plugin",
 		".claude/settings.json",
+		// --global reaches OUTSIDE any project, into the agents' own
+		// configuration directories. A route that could do that would be worse
+		// than one that could only write into the repository it is serving.
+		"xdg_config_home",
+		"pi_coding_agent_dir",
 	}
 
 	dir := filepath.Join("..", "..", "internal", "front")
@@ -290,43 +295,281 @@ func TestInstallIsNeverReachableFromHTTP(t *testing.T) {
 	}
 }
 
-// TestNoGlobalForOpencode. Open question 5: opencode MAY have a global plugin
-// directory at ~/.config/opencode/plugin/. Nobody has verified it, the design
-// says in as many words that it must not be implemented on the strength of its
-// own sentence, and a --global that silently installed per project instead
-// would be worse than one that refuses.
-func TestNoGlobalForOpencode(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+// TestGlobalInstallsIntoTheAgentsOwnDirectory. The two refusals this task
+// replaced said `--global` was unverified for opencode and pi. It is verified
+// now, on opencode 1.18.30 and pi 0.85.1, and the two mechanisms are different
+// in a way that matters to this installer:
+//
+//   - opencode loads $XDG_CONFIG_HOME/opencode/plugin/ at global scope.
+//     `opencode debug config` reports our file there with `"scope": "global"`.
+//     `plugins/` (plural) loads as well; the singular is what gets written
+//     because it is what the project install already uses, and one name is one
+//     thing to remember.
+//   - pi auto-loads $PI_CODING_AGENT_DIR/extensions/ with NO settings entry and
+//     no project-trust prompt -- which makes it LESS gated than a project-local
+//     extension, not more: that one needs `--approve`.
+//
+// Neither needs a user-owned file edited, which is the bar this command holds
+// itself to.
+func TestGlobalInstallsIntoTheAgentsOwnDirectory(t *testing.T) {
+	for _, tc := range []struct{ agent, want string }{
+		{"opencode", filepath.Join("xdg", "opencode", "plugin", "wterm.js")},
+		{"pi", filepath.Join("pi-agent", "extensions", "wterm.ts")},
+	} {
+		t.Run(tc.agent, func(t *testing.T) {
+			home := globalHome(t)
 
-	// No directory operand, deliberately: with one, --global could be refused
-	// for taking an argument it does not take, and this test would pass over a
-	// build that installs globally for opencode quite happily.
-	r := installCLI(t, "", "--agent", "opencode", "--global", "--yes")
+			r := installCLI(t, "", "--agent", tc.agent, "--global", "--yes")
 
-	r.wantCode(t, 2)
-	if !strings.Contains(r.stderr, "unverified") {
-		t.Errorf("--global --agent opencode was refused without saying why:\n%s", r)
+			r.wantCode(t, 0)
+			path := filepath.Join(home, tc.want)
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("--global --agent %s did not write %s: %v\n%s", tc.agent, path, err, r)
+			}
+			// The exact path is printed on stdout, because it is the answer and
+			// because it is what the user is being asked to approve.
+			if !strings.Contains(r.stdout, path) {
+				t.Errorf("the installed path was not printed on stdout:\n%s", r)
+			}
+			if got := installRead(t, path); !strings.Contains(got, "wterm-schema: 1") {
+				t.Errorf("what was written to %s is not ours:\n%.200q", path, got)
+			}
+		})
 	}
-	assertNothingUnder(t, home)
 }
 
-// TestNoGlobalForPi, for the same reason and a different mechanism: pi's
-// project-local extensions are discovered in .pi/extensions/, and a global pi
-// extension is registered in the user's own settings.json by `pi install`. That
-// is a file we would then be editing on pi's behalf, and nobody has verified
-// its shape either.
-func TestNoGlobalForPi(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+// TestGlobalHonoursTheAgentsOwnEnvironmentVariables, which is the half a
+// hard-coded ~/.config gets wrong.
+//
+// MEASURED: opencode honours XDG_CONFIG_HOME (with a clean HOME, its global
+// plugin was loaded from $XDG_CONFIG_HOME/opencode/plugin/), and pi honours
+// PI_CODING_AGENT_DIR (the wiring tests in this package have relied on it since
+// Task 17). With neither set, the defaults are ~/.config and ~/.pi/agent -- the
+// latter measured by running pi under a clean HOME and watching it create
+// ~/.pi/agent/auth.json.
+func TestGlobalHonoursTheAgentsOwnEnvironmentVariables(t *testing.T) {
+	t.Run("the defaults, with nothing set", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("XDG_CONFIG_HOME", "")
+		t.Setenv("PI_CODING_AGENT_DIR", "")
+		// globalHome cannot be used here -- these two variables have to be
+		// unset, which is the case under test -- so the probe is stubbed by
+		// hand. Without this the test needs a pi on the machine to pass, which
+		// is a suite that goes red on somebody else's laptop.
+		stubPiProbe(t, piLoads, "")
+
+		installCLI(t, "", "--agent", "opencode", "--global", "--yes").wantCode(t, 0)
+		installCLI(t, "", "--agent", "pi", "--global", "--yes").wantCode(t, 0)
+
+		for _, want := range []string{
+			filepath.Join(home, ".config", "opencode", "plugin", "wterm.js"),
+			filepath.Join(home, ".pi", "agent", "extensions", "wterm.ts"),
+		} {
+			if _, err := os.Stat(want); err != nil {
+				t.Errorf("with no environment set, nothing was written to %s: %v", want, err)
+			}
+		}
+	})
+
+	// A RELATIVE XDG_CONFIG_HOME is refused rather than resolved, and that is
+	// measured rather than fastidious. opencode 1.18.30 resolves a relative one
+	// AGAINST ITS OWN WORKING DIRECTORY and calls what it finds there
+	// `"scope": "local"` -- and while it is set, ~/.config/opencode/plugin/ is
+	// not read at all. So there is no directory this command could write to that
+	// would be global: which directory opencode reads depends on where the user
+	// runs it from. Guessing one is how an integration ends up somewhere nothing
+	// reads.
+	t.Run("a relative XDG_CONFIG_HOME is refused, not resolved", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("XDG_CONFIG_HOME", "relative/config")
+		stubPiProbe(t, piLoads, "")
+
+		r := installCLI(t, "", "--agent", "opencode", "--global", "--yes")
+
+		r.wantCode(t, 1)
+		if !strings.Contains(r.stderr, "XDG_CONFIG_HOME") {
+			t.Errorf("the refusal does not name the variable it refused over:\n%s", r)
+		}
+		assertNothingUnder(t, home)
+	})
+}
+
+// TestAGlobalInstallDoesNotWarnAboutARepositoryItIsNotIn.
+//
+// The project-scope warning -- opencode creates package.json, node_modules/ and
+// a .gitignore in the directory it loads a plugin from -- is MEASURABLY FALSE
+// for a global install. Measured on opencode 1.18.30: with only a global plugin
+// present, a fresh project directory stayed completely empty and the whole
+// bootstrap landed in $XDG_CONFIG_HOME/opencode/ instead. A warning that names
+// a repository the install does not touch is a warning that teaches the user to
+// stop reading them.
+func TestAGlobalInstallDoesNotWarnAboutARepositoryItIsNotIn(t *testing.T) {
+	globalHome(t)
+	global := installCLI(t, "n\n", "--agent", "opencode", "--global")
+	global.wantCode(t, 1)
+
+	// The forbidden strings are taken from the PROJECT warning itself rather
+	// than being words about repositories. The first version of this assertion
+	// banned "repository", which the global note's own sentence ("nothing is
+	// added to any repository") contains -- a fixture making an assertion true
+	// by accident, in the same shape as the "older"-in-the-TempDir-path bug
+	// this file already carries a comment about.
+	for _, forbidden := range []string{
+		".opencode/node_modules/",
+		"a .gitignore tmux-web did not write and does not control",
+	} {
+		if strings.Contains(global.stderr, forbidden) {
+			t.Errorf("a global install prints the project-scope footprint warning (%q), which is measurably false there:\n%s", forbidden, global)
+		}
+	}
+	// What it says instead: where opencode's own bootstrap really lands. It is
+	// still a footprint and the user is still told about it -- it is just not in
+	// their repository.
+	if !strings.Contains(global.stderr, "node_modules") {
+		t.Errorf("a global install says nothing about opencode's bootstrap at all:\n%s", global)
+	}
+
+	// And the project-scope warning is still there, so the assertion above is
+	// the scope being read rather than the warning having been deleted.
+	project := installCLI(t, "n\n", "--agent", "opencode", t.TempDir())
+	project.wantCode(t, 1)
+	if !strings.Contains(project.stderr, ".opencode/node_modules/") {
+		t.Errorf("the project-scope footprint warning is gone:\n%s", project)
+	}
+}
+
+// TestTheGlobalNoteSaysWhyTheAgentsOwnSettingsAreNotEdited.
+//
+// Both agents have a settings file that could register an extension, and this
+// command edits neither. For pi that conclusion is unchanged from the refusal
+// this test replaced, but its PREMISE is not: "that file's shape is unverified"
+// was true then and is false now. MEASURED on pi 0.85.1: `pi install` and
+// `pi remove` preserve every value and the key order, and REFORMAT THE WHOLE
+// FILE -- indentation normalised, arrays exploded one element per line, the
+// trailing newline dropped. That is exactly the wholesale reformatting of a
+// user-owned file that rule 2 of this installer exists to avoid, so the answer
+// is the same and the reason is now a measurement.
+func TestTheGlobalNoteSaysWhyTheAgentsOwnSettingsAreNotEdited(t *testing.T) {
+	globalHome(t)
+
+	pi := installCLI(t, "n\n", "--agent", "pi", "--global")
+	pi.wantCode(t, 1)
+	// The word that carries the measurement. "unverified" was the old premise
+	// and must not have survived the rewrite.
+	if !strings.Contains(pi.stderr, "reformat") {
+		t.Errorf("the pi note does not say what was measured about `pi install`:\n%s", pi)
+	}
+	if strings.Contains(pi.stderr, "unverified") {
+		t.Errorf("the pi note still claims pi's settings.json is unverified; it was measured:\n%s", pi)
+	}
+
+	oc := installCLI(t, "n\n", "--agent", "opencode", "--global")
+	oc.wantCode(t, 1)
+	if !strings.Contains(oc.stderr, "opencode.jsonc") {
+		t.Errorf("the opencode note does not say that opencode.jsonc is left alone:\n%s", oc)
+	}
+	if strings.Contains(oc.stderr, "unverified") {
+		t.Errorf("the opencode note still claims the global plugin directory is unverified; it was measured:\n%s", oc)
+	}
+}
+
+// TestAGlobalInstallLeavesTheAgentsOwnSettingsByteIdentical. The note above is
+// a promise; this is the promise held against the bytes.
+func TestAGlobalInstallLeavesTheAgentsOwnSettingsByteIdentical(t *testing.T) {
+	home := globalHome(t)
+
+	// Deliberately ugly, and deliberately the shape `pi install` normalises:
+	// four-space indent, an array on one line, no trailing newline.
+	piSettings := filepath.Join(home, "pi-agent", "settings.json")
+	const piBody = "{\n    \"extensions\": [\"a\", \"b\"],\n    \"theme\": \"dark\"\n}"
+	installWrite(t, piSettings, piBody)
+
+	ocConfig := filepath.Join(home, "xdg", "opencode", "opencode.jsonc")
+	const ocBody = "{\n  // a comment, which is why it is .jsonc and why encoding/json cannot round-trip it\n  \"plugin\": [\"theirs\"]\n}\n"
+	installWrite(t, ocConfig, ocBody)
+
+	installCLI(t, "", "--agent", "pi", "--global", "--yes").wantCode(t, 0)
+	installCLI(t, "", "--agent", "opencode", "--global", "--yes").wantCode(t, 0)
+	installCLI(t, "", "--agent", "pi", "--global", "--yes", "--remove").wantCode(t, 0)
+	installCLI(t, "", "--agent", "opencode", "--global", "--yes", "--remove").wantCode(t, 0)
+
+	if got := installRead(t, piSettings); got != piBody {
+		t.Errorf("pi's settings.json was rewritten:\n have %q\n want %q", got, piBody)
+	}
+	if got := installRead(t, ocConfig); got != ocBody {
+		t.Errorf("opencode's opencode.jsonc was rewritten:\n have %q\n want %q", got, ocBody)
+	}
+}
+
+// TestGlobalRemoveDeletesOneFile. Uninstall is `rm` in both cases, which is the
+// whole reason the directory drop was chosen over a settings entry.
+func TestGlobalRemoveDeletesOneFile(t *testing.T) {
+	for _, tc := range []struct{ agent, path string }{
+		{"opencode", filepath.Join("xdg", "opencode", "plugin", "wterm.js")},
+		{"pi", filepath.Join("pi-agent", "extensions", "wterm.ts")},
+	} {
+		t.Run(tc.agent, func(t *testing.T) {
+			home := globalHome(t)
+			installCLI(t, "", "--agent", tc.agent, "--global", "--yes").wantCode(t, 0)
+			dir := filepath.Dir(filepath.Join(home, tc.path))
+
+			installCLI(t, "", "--agent", tc.agent, "--global", "--yes", "--remove").wantCode(t, 0)
+
+			if _, err := os.Stat(filepath.Join(home, tc.path)); err == nil {
+				t.Errorf("--remove --global left %s behind", tc.path)
+			}
+			// The directory it lived in is the agent's own and may hold the
+			// agent's own things; only our file goes.
+			assertNothingUnder(t, dir)
+		})
+	}
+}
+
+// TestGlobalRefusesAFileItDoesNotOwn. The ownership rule is not weaker at
+// global scope, and this is where it matters most: the directory belongs to the
+// agent, so anything already called wterm.ts in it is somebody's.
+func TestGlobalRefusesAFileItDoesNotOwn(t *testing.T) {
+	home := globalHome(t)
+	path := filepath.Join(home, "pi-agent", "extensions", "wterm.ts")
+	const theirs = "// mine, not yours\nexport default function () {}\n"
+	installWrite(t, path, theirs)
 
 	r := installCLI(t, "", "--agent", "pi", "--global", "--yes")
 
-	r.wantCode(t, 2)
-	if !strings.Contains(r.stderr, "unverified") {
-		t.Errorf("--global --agent pi was refused without saying why:\n%s", r)
+	r.wantCode(t, 1)
+	if got := installRead(t, path); got != theirs {
+		t.Errorf("a global install overwrote a file it does not own:\n%q", got)
 	}
-	assertNothingUnder(t, home)
+}
+
+// TestAProjectInstallSaysWhenTheSameAgentIsAlreadyGlobal, which is the other
+// half of the duplicate-load story and the half the user can actually act on.
+//
+// Neither runtime dedupes by filename: with both scopes installed, the file
+// loads TWICE in one process. queue.ts's claim makes that harmless at run time
+// -- one copy reports, the newer schema wins -- but "harmless" is not "you
+// meant to do this", and the second install is the moment to say so.
+func TestAProjectInstallSaysWhenTheSameAgentIsAlreadyGlobal(t *testing.T) {
+	home := globalHome(t)
+	installCLI(t, "", "--agent", "pi", "--global", "--yes").wantCode(t, 0)
+
+	r := installCLI(t, "n\n", "--agent", "pi", t.TempDir())
+
+	r.wantCode(t, 1)
+	if !strings.Contains(r.stderr, filepath.Join(home, "pi-agent", "extensions", "wterm.ts")) {
+		t.Errorf("installing into a project with a global install present did not name it:\n%s", r)
+	}
+}
+
+// TestGlobalTakesNoDirectory, unchanged in substance from before: --global
+// installs into your own configuration, so a directory operand is a user who
+// means something else.
+func TestGlobalTakesNoDirectory(t *testing.T) {
+	globalHome(t)
+	r := installCLI(t, "", "--agent", "opencode", "--global", "--yes", t.TempDir())
+	r.wantCode(t, 2)
 }
 
 // TestGlobalIsOfferedForClaude, which is the one agent whose hooks are
@@ -602,6 +845,37 @@ func TestUnknownAgentIsRefused(t *testing.T) {
 }
 
 // -- fixture ----------------------------------------------------------------
+
+// stubPiProbe replaces the real `pi` run for the duration of one test.
+func stubPiProbe(t *testing.T, verdict piVerdict, detail string) {
+	t.Helper()
+	original := piProbe
+	piProbe = func([]byte) (piVerdict, string) { return verdict, detail }
+	t.Cleanup(func() { piProbe = original })
+}
+
+// globalHome points HOME and both agents' own environment variables at one
+// throwaway directory and returns it.
+//
+// EVERY --global test calls this, and it is the safety property this whole file
+// is built on rather than a convenience. A `--global` install writes into the
+// directory the agents really read: ~/.config/opencode/plugin/,
+// ~/.pi/agent/extensions/ and ~/.claude/. A test that forgot one of these three
+// variables would not fail -- it would install tmux-web's integration into the
+// developer's own agents, from `go test`, and on pi that means a file whose
+// failure to load stops pi starting in every project on the machine.
+func globalHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+	t.Setenv("PI_CODING_AGENT_DIR", filepath.Join(home, "pi-agent"))
+	// The pi probe is a real `pi` process, and it is not what these tests are
+	// about: they assert on paths and messages. The tests that ARE about it
+	// drive piProbe directly.
+	stubPiProbe(t, piLoads, "")
+	return home
+}
 
 func installWrite(t *testing.T, path, body string) {
 	t.Helper()

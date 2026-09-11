@@ -343,3 +343,104 @@ func indexOfEvent(events []string, name string) int {
 	}
 	return -1
 }
+
+// The post-install oracle, and the only thing in
+// this repository that can say a `--global --agent opencode` install actually
+// reaches opencode rather than merely reaching a plausible directory. It SKIPS
+// LOUDLY without opencode.
+//
+// `opencode debug config` resolves the whole plugin set and prints
+// `plugin_origins`, one entry per plugin with its `spec`, the `source`
+// directory it came from and its `scope`. A directory drop shows up there, so
+// it answers both halves: the install is `"scope": "global"` with our path in
+// it, and `--remove` takes it back out of that array entirely.
+//
+// This also measures the claim that made the project-scope footprint warning
+// wrong for a global install: with only a global plugin present, the project
+// directory this runs in must still be EMPTY afterwards.
+func TestAGlobalOpencodeInstallIsLoadedAndRemovable(t *testing.T) {
+	oc := requireOpencode(t)
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	xdg := filepath.Join(dir, "xdg-config")
+	project := filepath.Join(dir, "project")
+	for _, d := range []string{home, project} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+
+	installCLI(t, "", "--agent", "opencode", "--global", "--yes").wantCode(t, 0)
+	plugin := filepath.Join(xdg, "opencode", "plugin", "wterm.js")
+
+	origins := opencodePluginOrigins(t, oc, dir, project)
+	found := false
+	for _, o := range origins {
+		if strings.Contains(o.Spec, plugin) {
+			found = true
+			if o.Scope != "global" {
+				t.Errorf("opencode loaded our plugin at scope %q, want \"global\": a --global install that lands somewhere opencode calls local is an install whose reach depends on where the user runs opencode from", o.Scope)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("opencode does not load %s at all. plugin_origins = %+v", plugin, origins)
+	}
+
+	// The project stayed empty. This is the measurement behind not printing the
+	// repository-footprint warning for a global install: opencode's
+	// package.json, node_modules/ and .gitignore land in its OWN config
+	// directory, beside the plugin.
+	entries, err := os.ReadDir(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("a global opencode plugin put %d entries in the project directory: %v. The global install's note tells the user it does not touch their repository", len(entries), entries)
+	}
+	if _, err := os.Stat(filepath.Join(xdg, "opencode", "node_modules")); err != nil {
+		t.Errorf("opencode's bootstrap is not in its own config directory either (%v); the note names a footprint that is not there", err)
+	}
+
+	// And back out. `--remove` is one unlink, and the oracle says so.
+	installCLI(t, "", "--agent", "opencode", "--global", "--yes", "--remove").wantCode(t, 0)
+	for _, o := range opencodePluginOrigins(t, oc, dir, project) {
+		if strings.Contains(o.Spec, plugin) {
+			t.Errorf("opencode still loads %s after --remove: %+v", plugin, o)
+		}
+	}
+}
+
+// pluginOrigin is one entry of `opencode debug config`'s resolved plugin set.
+type pluginOrigin struct {
+	Spec   string `json:"spec"`
+	Source string `json:"source"`
+	Scope  string `json:"scope"`
+}
+
+// opencodePluginOrigins runs `opencode debug config` in a throwaway project
+// under throwaway XDG directories and returns what it resolved.
+func opencodePluginOrigins(t *testing.T, oc, dir, project string) []pluginOrigin {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), opencodeColdStart)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, oc, "debug", "config")
+	cmd.Dir = project
+	// Built, not inherited, and the XDG_CONFIG_HOME here is the one the install
+	// above was pointed at -- which is the whole assertion.
+	cmd.Env = append(opencodeEnv(t, dir, filepath.Join(dir, opencodeEventsFile)),
+		"XDG_CONFIG_HOME="+os.Getenv("XDG_CONFIG_HOME"), "HOME="+os.Getenv("HOME"))
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("opencode debug config: %v", err)
+	}
+	var config struct {
+		PluginOrigins []pluginOrigin `json:"plugin_origins"`
+	}
+	if err := json.Unmarshal(out, &config); err != nil {
+		t.Fatalf("opencode debug config did not print the JSON this oracle reads (%v):\n%.400s", err, out)
+	}
+	return config.PluginOrigins
+}

@@ -155,7 +155,54 @@ The design's open questions are open, and several of them are open because measu
 | 5 | **2 — the 60-second `working` window.** Nobody has measured inter-event gaps during real work. The case that matters is a single long tool call emitting no sub-events, with no client connected | One named constant, changeable by editing one line, with the measurement written beside it |
 | 8 | **3 — `N_blocked`.** `N_idle` is measured and closed; `N_blocked` is a derived floor with an unmeasured value, and measuring it needs the real dialog screens question 10 is also waiting on | `settleAfter + 1`, expressed against `settleAfter`. **Do not carry `4` across from `N_idle`** |
 | 13 | **10 — four screen captures the whitelist is waiting on.** An 88-turn, 3-agent run met none of them and did not provoke them, so nobody will capture one by accident | Those four types stay *ignored*. Each promotes the day somebody manufactures the screen **and writes a grammar** — a code change, not a data change |
-| 18, 20 | **5, 6, 8 — opencode's global plugin directory, how often the todo rung is empty, nested project installs** | `--global` is **not** offered for opencode. The todo rung is written as rung 2 with the tool-call rung underneath it, which is correct either way |
+| 18, 20 | **5, 6, 8 — opencode's global plugin directory, how often the todo rung is empty, nested project installs** | ~~`--global` is **not** offered for opencode.~~ **CLOSED after Task 20, by measurement on opencode 1.18.30 and pi 0.85.1** — see below. The todo rung is written as rung 2 with the tool-call rung underneath it, which is correct either way |
+
+### Open question 5, closed: `--global` for opencode and pi
+
+Measured, in throwaway `XDG_CONFIG_HOME` / `PI_CODING_AGENT_DIR` / `HOME`
+directories, never against the developer's own:
+
+- **opencode loads `$XDG_CONFIG_HOME/opencode/plugin/` at global scope.**
+  `opencode debug config` prints a resolved `plugin_origins` array with `spec`,
+  `source` and `scope`; a file dropped there appears in it as
+  `"scope": "global"`. `plugins/` (plural) loads as well — the singular is what
+  is written, to match the project install. `XDG_CONFIG_HOME` **is** honoured; a
+  *relative* one is resolved by opencode against its own working directory and
+  reported as `"scope": "local"`, with `~/.config` then not read at all, so the
+  installer refuses a relative value rather than picking a directory whose
+  meaning depends on where the user runs opencode from.
+- **A global opencode install touches no project.** With only a global plugin
+  present, a fresh project directory stayed empty and the whole
+  `package.json` / `node_modules/` / `.gitignore` bootstrap landed in opencode's
+  own config directory. The repository-footprint warning is therefore
+  **measurably false for the global path** and is not printed there.
+- **pi auto-loads `$PI_CODING_AGENT_DIR/extensions/`** with no settings entry and
+  no project-trust prompt — *less* gated than project-local, which needs
+  `--approve`. The default is `~/.pi/agent`.
+- **The two refusals that stand, with rewritten reasons.** `pi install` /
+  `pi remove` preserve values and key order but reformat the whole
+  `settings.json` (indentation normalised, arrays exploded one per line,
+  trailing newline dropped) — a wholesale rewrite of a user-owned file, which is
+  the thing rule 2 of the installer exists to prevent. An absolute path in
+  `opencode.jsonc`'s `plugin` array does work, but a directory drop achieves the
+  same with a one-file uninstall. Neither file is edited.
+- **Duplicate loads.** Neither runtime dedupes by filename, so global + project
+  loads the same file twice in one process: two `wterm-web report` spawns per
+  event and two single-slot queues racing. A `globalThis` claim in `queue.ts`
+  deduplicates it. It compares `WTERM_SCHEMA` and lets the **newer** copy win
+  rather than the first to load, because opencode loads global first and pi
+  loads project first — a first-wins guard would pick the older copy in one of
+  the two after a partial upgrade.
+- **The pi pre-flight.** A global extension pi cannot load makes pi fail to
+  start, exit 1, in *every* project. So `--global --agent pi` loads the artifact
+  once with a real `pi` in a throwaway `PI_CODING_AGENT_DIR` before writing
+  anything, pinning a provider name that cannot exist: `Unknown provider "…"` is
+  printed after every extension has loaded and before anything reaches a
+  network, which makes it a positive control and keeps the probe offline and
+  sub-second. `pi --help` and `pi --list-models` load extensions too but
+  *tolerate* a failing one (exit 0, empty stderr), so neither can stand in for
+  it. A probe that cannot reach an answer refuses the install and names the
+  project-scope install as the way through.
 | 15, 17 | **7 — what pi's `tool_execution_start.args` actually contains, per tool** | Task 12 captures it. The basename default — and whether pi hands a shell command over as one string or as a structured object — is written against what the fixture shows, not against the guess in the design |
 | 21 | **13 — how late a late repaint can be.** Two observations, 5.0 s and 9.0 s, both on one claude prompt shape. A bound, not a distribution | `lateRepaintDwell = 15 * time.Second`, biased long, flagged in the comment as a guess of the same standing as the 60-second window |
 

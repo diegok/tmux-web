@@ -69,32 +69,67 @@ const claudeScriptName = "wterm-report.sh"
 // queueImport is the line both integrations carry, and the one thing about them
 // the installer has to understand. It is matched exactly; a near miss is an
 // error at install time rather than a dangling import in somebody's project.
-const queueImport = "import { makeQueue, spawnReport } from './queue.ts'\n"
+const queueImport = "import { claimReporter, makeQueue, spawnReport } from './queue.ts'\n"
 
 // agents is what may be installed, and where each file goes.
 //
-// pi and opencode are project-local BY MECHANISM -- pi discovers
-// .pi/extensions/ in the project (and only in a project it has been told to
-// trust), opencode loads .opencode/plugin/ -- so an install is per project and
-// --global is not offered. Claude Code's hooks are documented to work in a
-// user-level settings.json as well, so it is the one agent that gets --global.
+// ALL THREE NOW OFFER --global, and the three mechanisms are different in ways
+// this command has to know about. Measured on opencode 1.18.30 and pi 0.85.1:
+//
+//   - claude's hooks are documented to work in a user-level settings.json, and
+//     that file is merged into rather than owned. It has always been here.
+//   - opencode loads $XDG_CONFIG_HOME/opencode/plugin/ at global scope --
+//     `opencode debug config` reports a file dropped there with
+//     `"scope": "global"`. `plugins/` (plural) loads as well; the singular is
+//     written because it is what the project install already uses, and one name
+//     is one thing for a reader to keep straight.
+//   - pi auto-loads $PI_CODING_AGENT_DIR/extensions/ with no settings entry and
+//     no trust prompt, which makes it LESS gated than a project-local
+//     extension, not more: that one needs `--approve`.
+//
+// Neither of the two new ones needs a user-owned file edited, and that is why
+// they are here: the bar is rule 2 above, and a directory drop clears it in a
+// way that a `plugin` array or a `pi install` does not. See globalSpec.note.
 var agents = map[string]agentSpec{
 	"pi": {
 		file:   filepath.Join(".pi", "extensions", "wterm.ts"),
 		source: "pi.ts",
-		noGlobal: "pi's project-local extensions are discovered in .pi/extensions/, " +
-			"and a global one is registered in pi's own settings.json by `pi install`. " +
-			"That file's shape is unverified, so this command does not edit it",
+		global: &globalSpec{
+			root: piAgentDir,
+			file: filepath.Join("extensions", "wterm.ts"),
+			note: "a global pi extension is auto-loaded in every project, with no entry in any settings file " +
+				"and no trust prompt -- which is less gated than a project-local one, which needs `--approve`.\n" +
+				"  tmux-web does not edit pi's own settings.json and does not run `pi install`: MEASURED on pi " +
+				"0.85.1, `pi install` and `pi remove` keep every value and the key order but reformat the whole " +
+				"file -- indentation normalised, arrays exploded one element per line, the trailing newline " +
+				"dropped. That is a wholesale rewrite of a file you own, which is the one thing this command " +
+				"will not do. Uninstalling is deleting the one file above",
+			validate: validatePiArtifact,
+		},
 	},
 	"opencode": {
 		file:   filepath.Join(".opencode", "plugin", "wterm.js"),
 		source: "opencode.js",
-		noGlobal: "opencode may have a global plugin directory at ~/.config/opencode/plugin/, " +
-			"but that is unverified (open question 5) and installing there on the strength " +
-			"of a sentence is how an integration ends up somewhere nothing reads",
+		global: &globalSpec{
+			root: opencodeConfigDir,
+			file: filepath.Join("opencode", "plugin", "wterm.js"),
+			note: "a global opencode plugin is loaded in every project, with no entry in any config file.\n" +
+				"  tmux-web does not add a path to `plugin` in your opencode.jsonc: an absolute path there does " +
+				"work, measured, but a directory drop is uninstalled by deleting the one file above and leaves " +
+				"a file you own untouched.\n" +
+				"  opencode's own bootstrap -- package.json, package-lock.json, node_modules/ and a .gitignore " +
+				"-- lands beside the plugin, in opencode's configuration directory. MEASURED: with only a global " +
+				"plugin installed, a fresh project directory stayed empty, so nothing is added to any repository",
+		},
+		// PROJECT SCOPE ONLY, and that is the point of the field's name. The
+		// same sentence is measurably FALSE for a global install: the bootstrap
+		// lands in opencode's own configuration directory instead, and a fresh
+		// project stayed empty. A warning about a repository the install does
+		// not touch teaches the user to stop reading warnings.
+		//
 		// Measured on opencode 1.18.30, in a throwaway project: the first run
 		// with a plugin present created all of these.
-		warning: "opencode creates .opencode/package.json, .opencode/package-lock.json, " +
+		projectWarning: "opencode creates .opencode/package.json, .opencode/package-lock.json, " +
 			".opencode/node_modules/ and a .opencode/.gitignore in this project the first " +
 			"time it loads a plugin. Installing into a repository therefore adds files that " +
 			"repository did not have, including a .gitignore tmux-web did not write and does " +
@@ -107,19 +142,90 @@ var agents = map[string]agentSpec{
 		// settings.json is not in `file`: it is the user's, and it is merged
 		// rather than owned.
 		settings: filepath.Join(".claude", "settings.json"),
-		global:   true,
+		global: &globalSpec{
+			root:     os.UserHomeDir,
+			file:     filepath.Join(".claude", claudeScriptName),
+			settings: filepath.Join(".claude", "settings.json"),
+			note:     "claude reads hooks from your user-level settings.json as well as a project's, and this merges into it",
+		},
 	},
 }
 
 // agentSpec is one agent's installation.
 type agentSpec struct {
-	file     string      // the file we own, relative to the project root
-	source   string      // its name in internal/integrations' embed.FS
-	mode     fs.FileMode // 0 means 0644
-	settings string      // a file the user owns that we merge into, if any
-	global   bool        // whether --global is offered
-	noGlobal string      // why it is not, when it is not
-	warning  string      // shown before the confirmation
+	file           string      // the file we own, relative to the project root
+	source         string      // its name in internal/integrations' embed.FS
+	mode           fs.FileMode // 0 means 0644
+	settings       string      // a file the user owns that we merge into, if any
+	global         *globalSpec // where --global puts it; nil would refuse it
+	projectWarning string      // shown before the confirmation, PROJECT SCOPE ONLY
+}
+
+// globalSpec is where `--global` puts one agent's integration.
+//
+// It is a separate struct rather than four more fields on agentSpec because
+// every one of them is a DIFFERENT ANSWER at the two scopes, and the two that
+// are silently different are the dangerous ones: the directory (a project's
+// .opencode/ against opencode's own configuration directory) and the warning (a
+// repository's footprint against no repository at all).
+type globalSpec struct {
+	root     func() (string, error) // the agent's own configuration directory
+	file     string                 // our file, under that root
+	settings string                 // a file the user owns that we merge into, if any
+	note     string                 // what this scope is, and what it does not touch
+	// validate runs BEFORE anything is written, and a non-nil error is a
+	// refusal. Only pi has one; see pivalidate.go for why it is pi.
+	validate func(dir string, artifact []byte) error
+}
+
+// -- the agents' own configuration directories -------------------------------
+
+// opencodeConfigDir is where opencode keeps its global plugin directory.
+//
+// XDG_CONFIG_HOME IS HONOURED, measured with a clean HOME: the global plugin
+// was loaded from $XDG_CONFIG_HOME/opencode/plugin/. Hard-coding ~/.config gets
+// that wrong for everybody who sets it.
+//
+// A RELATIVE value is refused rather than resolved, and that is measured too:
+// opencode 1.18.30 resolves a relative XDG_CONFIG_HOME against ITS OWN working
+// directory and calls what it finds there `"scope": "local"` -- and while it is
+// set, ~/.config/opencode/plugin/ is not read at all. So there is no directory
+// this command could write to that would be global: which one opencode reads
+// depends on where the user starts it. Guessing is how an integration ends up
+// somewhere nothing reads.
+func opencodeConfigDir() (string, error) {
+	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
+		if !filepath.IsAbs(dir) {
+			return "", fmt.Errorf("XDG_CONFIG_HOME is set to %q, which is not an absolute path.\n"+
+				"  opencode resolves a relative one against its own working directory and treats what it finds\n"+
+				"  there as a LOCAL plugin, so there is no directory this command could call global. Set\n"+
+				"  XDG_CONFIG_HOME to an absolute path, or install into one project instead", display(dir, 64))
+		}
+		return dir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot work out where your home directory is: %w", err)
+	}
+	return filepath.Join(home, ".config"), nil
+}
+
+// piAgentDir is pi's own configuration directory. PI_CODING_AGENT_DIR is what
+// pi reads; the default is ~/.pi/agent, measured by running pi under a clean
+// HOME and watching it create ~/.pi/agent/auth.json.
+func piAgentDir() (string, error) {
+	if dir := os.Getenv("PI_CODING_AGENT_DIR"); dir != "" {
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			return "", fmt.Errorf("cannot resolve PI_CODING_AGENT_DIR (%s): %w", display(dir, 64), err)
+		}
+		return abs, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot work out where your home directory is: %w", err)
+	}
+	return filepath.Join(home, ".pi", "agent"), nil
 }
 
 // -- the command ------------------------------------------------------------
@@ -147,9 +253,6 @@ func runInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if !known {
 		return usageError(stderr, fset, "--agent must be one of claude, opencode or pi; got %q", display(*agent, 32))
 	}
-	if *global && !spec.global {
-		return usageError(stderr, fset, "--global is not offered for %s: %s", *agent, spec.noGlobal)
-	}
 	if len(operands) > 1 {
 		return usageError(stderr, fset, "install-integration takes at most one directory, got %d", len(operands))
 	}
@@ -157,12 +260,12 @@ func runInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return usageError(stderr, fset, "--global installs into your own configuration; it takes no directory, got %q", operands[0])
 	}
 
-	root, err := installRoot(*global, operands)
+	where, err := resolveScope(spec, *global, operands)
 	if err != nil {
 		return fail(stderr, err)
 	}
 
-	plan, err := planInstall(*agent, spec, root, *remove)
+	plan, err := planInstall(*agent, spec, where, *remove)
 	if err != nil {
 		return fail(stderr, err)
 	}
@@ -180,32 +283,65 @@ func runInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// installRoot is the directory the paths are relative to: the user's home for
-// --global, the named directory or the working directory otherwise. It is made
-// absolute because every path this command prints is one the user may have to
-// find later from somewhere else.
-func installRoot(global bool, operands []string) (string, error) {
+// scope is one resolved installation: which files this run is about, and what
+// the user has to be told about the place they are going.
+//
+// Everything downstream reads these fields rather than re-deciding from a
+// `global` boolean, because the two scopes differ in more than a directory --
+// they differ in whether there is a settings file, whether there is a
+// pre-flight, whether an ancestor project is worth looking for, and what
+// warning is true.
+type scope struct {
+	global   bool
+	file     string // the file we own, absolute
+	settings string // a file the user owns that we merge into, absolute; "" if none
+	dir      string // the directory `file` lives in, for messages
+	note     string // what this scope is
+	warning  string // what it costs
+	validate func(dir string, artifact []byte) error
+}
+
+// resolveScope works out that. Every path is made absolute, because every path
+// this command prints is one the user may have to find later from somewhere
+// else.
+func resolveScope(spec agentSpec, global bool, operands []string) (scope, error) {
 	if global {
-		home, err := os.UserHomeDir()
+		g := spec.global
+		root, err := g.root()
 		if err != nil {
-			return "", fmt.Errorf("cannot work out where your home directory is: %w", err)
+			return scope{}, err
 		}
-		return home, nil
+		out := scope{
+			global:   true,
+			file:     filepath.Join(root, g.file),
+			note:     g.note,
+			validate: g.validate,
+		}
+		if g.settings != "" {
+			out.settings = filepath.Join(root, g.settings)
+		}
+		out.dir = filepath.Dir(out.file)
+		return out, nil
 	}
+
 	dir := "."
 	if len(operands) == 1 {
 		dir = operands[0]
 	}
-	abs, err := filepath.Abs(dir)
+	root, err := filepath.Abs(dir)
 	if err != nil {
-		return "", fmt.Errorf("cannot resolve %q: %w", dir, err)
+		return scope{}, fmt.Errorf("cannot resolve %q: %w", dir, err)
 	}
-	if info, err := os.Stat(abs); err != nil {
-		return "", fmt.Errorf("%s: %w", abs, err)
+	if info, err := os.Stat(root); err != nil {
+		return scope{}, fmt.Errorf("%s: %w", root, err)
 	} else if !info.IsDir() {
-		return "", fmt.Errorf("%s is not a directory", abs)
+		return scope{}, fmt.Errorf("%s is not a directory", root)
 	}
-	return abs, nil
+	out := scope{file: filepath.Join(root, spec.file), warning: spec.projectWarning, dir: root}
+	if spec.settings != "" {
+		out.settings = filepath.Join(root, spec.settings)
+	}
+	return out, nil
 }
 
 // -- the plan ---------------------------------------------------------------
@@ -220,6 +356,10 @@ type installPlan struct {
 	remove   bool
 	files    []plannedFile
 	settings *plannedSettings
+	// notes and warnings are both printed before the confirmation and are
+	// different things. A note says what this scope IS -- where the file goes,
+	// what is deliberately not being edited. A warning says what it COSTS.
+	notes    []string
 	warnings []string
 }
 
@@ -238,10 +378,10 @@ type plannedSettings struct {
 	note    string
 }
 
-func planInstall(agent string, spec agentSpec, root string, remove bool) (*installPlan, error) {
+func planInstall(agent string, spec agentSpec, where scope, remove bool) (*installPlan, error) {
 	plan := &installPlan{agent: agent, remove: remove}
 
-	path := filepath.Join(root, spec.file)
+	path := where.file
 	state, schema, err := ownerOf(path)
 	if err != nil {
 		return nil, err
@@ -263,6 +403,15 @@ func planInstall(agent string, spec agentSpec, root string, remove bool) (*insta
 		if err != nil {
 			return nil, err
 		}
+		// THE PRE-FLIGHT GOES HERE, in the planning phase, with everything else
+		// that can refuse: a refused run has written nothing. It runs on
+		// install only -- `--remove` deletes a file, and a `pi` that cannot be
+		// run is no reason to leave a broken extension in place.
+		if where.validate != nil {
+			if err := where.validate(where.dir, content); err != nil {
+				return nil, err
+			}
+		}
 		mode := spec.mode
 		if mode == 0 {
 			mode = 0o644
@@ -275,27 +424,67 @@ func planInstall(agent string, spec agentSpec, root string, remove bool) (*insta
 			note = fmt.Sprintf("replacing ours, written by an older tmux-web (wterm-schema: %d)", schema)
 		}
 		plan.files = append(plan.files, plannedFile{path: path, content: content, mode: mode, note: note})
-		if spec.warning != "" {
-			plan.warnings = append(plan.warnings, spec.warning)
+		if where.note != "" {
+			plan.notes = append(plan.notes, where.note)
 		}
-		if nested := nestedInstall(root); nested != "" {
-			// Open question 8, and the instruction is to warn where it can be
-			// detected and not to attempt a resolution: two integrations
-			// writing one pane option is a race nobody has looked at.
-			plan.warnings = append(plan.warnings,
-				"an ancestor of this directory already carries a tmux-web integration:\n    "+nested+
-					"\n  if an agent run here loads both, two integrations write the same pane option. Nobody has measured that race")
+		if where.warning != "" {
+			plan.warnings = append(plan.warnings, where.warning)
+		}
+		if where.global {
+			// The other half of the duplicate-load story, from the global side.
+			// Neither runtime dedupes by filename, so both copies load in one
+			// process; queue.ts's claim makes that harmless -- one copy
+			// reports, the newer schema wins -- but harmless is not intended.
+			plan.notes = append(plan.notes,
+				"this loads in EVERY project. A project that also carries a tmux-web integration for "+agent+
+					" loads both copies in one process; they agree at run time on one of them doing the reporting, "+
+					"and the newer of the two wins")
+		} else {
+			if nested := nestedInstall(where.dir); nested != "" {
+				// Open question 8, and the instruction is to warn where it can
+				// be detected and not to attempt a resolution: two integrations
+				// writing one pane option is a race nobody has looked at.
+				plan.warnings = append(plan.warnings,
+					"an ancestor of this directory already carries a tmux-web integration:\n    "+nested+
+						"\n  if an agent run here loads both, two integrations write the same pane option. Nobody has measured that race")
+			}
+			// And the same thing seen from the project side, which is the side
+			// the user can act on: they have just been given two copies.
+			if g := globalInstall(spec); g != "" {
+				plan.notes = append(plan.notes,
+					"this agent already has a tmux-web integration installed globally:\n    "+g+
+						"\n  both copies load in one process. They agree at run time on one of them doing the "+
+						"reporting, and the newer of the two wins -- but `--global --remove` is how you get back to one")
+			}
 		}
 	}
 
-	if spec.settings != "" {
-		merged, err := planSettings(filepath.Join(root, spec.settings), path, remove)
+	if where.settings != "" {
+		merged, err := planSettings(where.settings, path, remove)
 		if err != nil {
 			return nil, err
 		}
 		plan.settings = merged
 	}
 	return plan, nil
+}
+
+// globalInstall is the global path for one agent, if one of ours is sitting
+// there. It answers nothing when the directory cannot even be worked out: an
+// unset home is not a reason to fail a project install.
+func globalInstall(spec agentSpec) string {
+	if spec.global == nil {
+		return ""
+	}
+	root, err := spec.global.root()
+	if err != nil {
+		return ""
+	}
+	path := filepath.Join(root, spec.global.file)
+	if state, _, err := ownerOf(path); err == nil && (state == ownCurrent || state == ownOutdated) {
+		return path
+	}
+	return ""
 }
 
 // planSettings works out the merge into claude's settings.json.
@@ -343,6 +532,9 @@ func (p *installPlan) describe(stdout, stderr io.Writer) {
 			fmt.Fprintf(stdout, "%s\n", s.path)
 		}
 		fmt.Fprintf(stderr, "  %s  (%s)\n", s.path, s.note)
+	}
+	for _, n := range p.notes {
+		fmt.Fprintf(stderr, "note: %s\n", n)
 	}
 	for _, w := range p.warnings {
 		fmt.Fprintf(stderr, "note: %s\n", w)

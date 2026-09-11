@@ -31,6 +31,17 @@
     "types": ["node"],
     "skipLibCheck": true,
 
+    /* opencode.js is a `.js` file on purpose -- opencode loads a plugin
+       directory, and the installer ships this one into it unchanged -- but
+       opencode.test.ts imports it, and without this line that import is
+       TS7016: "could not find a declaration file". The JSDoc in opencode.js is
+       then read for real, which is what gives the test the handler types it
+       asserts against. `checkJs` stays OFF: queue.ts's body is plain
+       JavaScript with a `@ts-nocheck` for exactly that reason (Task 16), and
+       turning it on would put the shipped-as-JS files under the .ts project's
+       rules. */
+    "allowJs": true,
+
     "paths": {
       "vitest": ["./node_modules/vitest"]
     },

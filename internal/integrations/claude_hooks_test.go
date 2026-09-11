@@ -3,6 +3,7 @@ package integrations
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -350,22 +351,48 @@ func writeFile(t *testing.T, path, body string, mode os.FileMode) string {
 // rows that matter most -- garbage on stdin, no arguments, outside tmux -- are
 // claims about the wrapper AND `report` together, and a stub would let a
 // wrapper that mangles argv pass them all.
+//
+// The output goes in a directory TestMain owns from end to end, and that
+// division is the whole fix for the leak this package used to have: the build
+// has to outlive the test that triggers it -- several tests share it, and a
+// rebuild per test would cost ~1s each -- so neither t.TempDir() nor t.Cleanup
+// can own the directory, because both are scoped to ONE test. The only scope
+// that matches the binary's lifetime is the package's, and TestMain is where a
+// package keeps one. See TestTheSuiteLeavesNoTemporaryDirectoryBehind.
 var (
 	buildOnce sync.Once
+	buildRoot string // owned by TestMain, removed after m.Run
 	builtBin  string
 	buildErr  error
 	buildLog  string
 )
 
+// TestMain exists for one reason: to remove buildRoot. os.Exit runs no defers,
+// so the removal is written out before it, exactly as it is in cmd/tmux-web.
+// The directory is made here rather than in buildTmuxWeb so that its creation
+// and its removal are three lines apart and can be read together; an empty
+// directory for a run that never builds costs nothing.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "tmux-web-build")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	buildRoot = dir
+	code := m.Run()
+	if err := os.RemoveAll(dir); err != nil {
+		fmt.Fprintf(os.Stderr, "removing the build directory %s: %v\n", dir, err)
+		if code == 0 {
+			code = 1
+		}
+	}
+	os.Exit(code)
+}
+
 func buildTmuxWeb(t *testing.T) string {
 	t.Helper()
 	buildOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "tmux-web-build")
-		if err != nil {
-			buildErr = err
-			return
-		}
-		builtBin = filepath.Join(dir, "tmux-web")
+		builtBin = filepath.Join(buildRoot, "tmux-web")
 		cmd := exec.Command("go", "build", "-o", builtBin, "../../cmd/tmux-web")
 		out, err := cmd.CombinedOutput()
 		buildErr, buildLog = err, string(out)
@@ -453,4 +480,67 @@ func TestTheOneExitCodeThisWrapperCannotMake0(t *testing.T) {
 		t.Errorf("wrote %q to stdout even on the exec-failure path", stdout.String())
 	}
 	t.Logf("exec failure: exit %d, stdout empty, stderr %q", code, strings.TrimSpace(stderr.String()))
+}
+
+// -- the build directory ----------------------------------------------------
+
+// TestTheSuiteLeavesNoTemporaryDirectoryBehind is the guard on TestMain's
+// cleanup, and it exists because the thing it guards has already failed once in
+// a way nobody would have looked for.
+//
+// buildTmuxWeb used to make its own os.MkdirTemp and never remove it. The
+// binary is ~19 MB, /tmp here is tmpfs, and twenty-five suite runs put 415 MB
+// of RAM behind directories nothing would ever read again -- until /tmp filled
+// and TestAGlobalOpencodeInstallIsLoadedAndRemovable started failing because
+// opencode could not unpack its node_modules. It reported that as opencode
+// polluting a directory it should not touch. A full disk wearing the mask of a
+// correctness bug cost an afternoon on a pristine checkout.
+//
+// Asserting "there are no leftover directories" in the CURRENT process is the
+// vacuous version of this test: it passes in a clean environment no matter what
+// the code does. So the assertion is made about a SECOND process instead. The
+// child runs with $TMPDIR pointed at a directory this test owns, which is where
+// os.MkdirTemp("", ...) puts things, and runs the one test that builds the
+// binary. When it exits, that directory must be empty -- whatever the child
+// made under it, it also removed.
+//
+// What this fails on, and neither a source-level check nor a count-the-files
+// assertion would: TestMain losing its os.RemoveAll, TestMain's cleanup being
+// skipped by an early os.Exit, and buildTmuxWeb going back to a temporary
+// directory of its own that nothing owns.
+func TestTheSuiteLeavesNoTemporaryDirectoryBehind(t *testing.T) {
+	if os.Getenv("TMUX_WEB_LEAK_CHILD") != "" {
+		t.Skip("this is the child process; it must not spawn another")
+	}
+	tmp := t.TempDir()
+
+	// os.Args[0] is this already-compiled test binary, race detector and all,
+	// so the child costs a `go build` of cmd/tmux-web (~1s warm) and nothing
+	// more. -test.run is exact: it selects the one test that builds, and it
+	// does not select this one.
+	cmd := exec.Command(os.Args[0], "-test.run=^TestClaudeWrapperIsQuietOnEveryFailure$", "-test.v")
+	cmd.Env = append(os.Environ(), "TMUX_WEB_LEAK_CHILD=1", "TMPDIR="+tmp)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("the child test run failed: %v\n%s", err, out)
+	}
+	// Without this the test is vacuous the day somebody renames that test:
+	// -test.run would match nothing, the child would build nothing, and an
+	// empty directory would prove an empty claim.
+	if !bytes.Contains(out, []byte("--- PASS: TestClaudeWrapperIsQuietOnEveryFailure")) {
+		t.Fatalf("the child did not run the test that builds the binary, so this proves nothing:\n%s", out)
+	}
+
+	left, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatalf("reading the child's $TMPDIR: %v", err)
+	}
+	if len(left) != 0 {
+		var names []string
+		for _, e := range left {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("the child left %d entr(ies) in its temporary directory: %v.\nEvery temporary directory this package makes must be removed before the process exits; the build output is ~19 MB and /tmp is tmpfs, so one that is not removed is leaked MEMORY",
+			len(left), names)
+	}
 }

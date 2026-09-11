@@ -289,6 +289,10 @@ func opencodeEnv(t *testing.T, dir, log string) []string {
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", home, err)
 	}
+	tmp := filepath.Join(dir, "tmp")
+	if err := os.MkdirAll(tmp, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", tmp, err)
+	}
 	return []string{
 		"PATH=" + stub + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"HOME=" + home,
@@ -297,6 +301,19 @@ func opencodeEnv(t *testing.T, dir, log string) []string {
 		"XDG_DATA_HOME=" + filepath.Join(dir, "xdg-data"),
 		"XDG_CACHE_HOME=" + filepath.Join(dir, "xdg-cache"),
 		"XDG_STATE_HOME=" + filepath.Join(dir, "xdg-state"),
+		// TMPDIR, because this env is BUILT: a child given no TMPDIR writes to
+		// /tmp, and opencode's runtime extracts a 5,576,816-byte shared object
+		// there on EVERY start and never removes it. Measured on this machine:
+		// one file per opencode process, 46 of them (245 MB) sitting in a /tmp
+		// that is tmpfs -- so that is RAM, held by files nothing will read again.
+		// Named here, the extraction lands under dir and belongs to t.TempDir()
+		// like everything else this test makes. It is the same failure the build
+		// directory in internal/integrations had, and it fills the same /tmp: the
+		// visible symptom is this very test's sibling failing to unpack
+		// node_modules, which reads as opencode misbehaving rather than as a full
+		// disk. The directory has to exist first -- a child is not obliged to
+		// create its own TMPDIR.
+		"TMPDIR=" + tmp,
 		"TMUX_WEB_STUB_LOG=" + log,
 	}
 }

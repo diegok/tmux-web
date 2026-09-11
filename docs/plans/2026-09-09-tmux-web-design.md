@@ -389,7 +389,7 @@ fuzzy-matching `session/window/pane`, and also exposes "enter copy mode".
 
 ```
 ├────────────────────────┤
-│ ◒ diegok@devbox     ⌃  │
+│ ◒ dev@devbox        ⌃  │
 │   laptop · connected   │
 └────────────────────────┘
 ```
@@ -558,12 +558,19 @@ implementation.
 
 ### Git context
 
-Query `pane_current_path` for the selected pane only, with
-`display-message -p -t <pane>`; it is deliberately not in the shared snapshot
-(see "Sidebar state"), and a single-pane result needs no field splitting, so
-neither hazard applies. Walk to the repo root and show
+Query `pane_current_path` for the selected pane only; it is deliberately not in
+the shared snapshot (see "Sidebar state"), and a single-pane result needs no
+field splitting, so neither hazard applies. Walk to the repo root and show
 branch, ahead/behind, dirty files, and stashes. Read-only first; manipulation
 only if using the shell for it proves annoying.
+
+This originally prescribed `display-message -p -t <pane>`, and implementation
+found that unusable: given a target it cannot find, `display-message` prints an
+empty expansion and exits 0, so a stale pane id silently becomes `""` rather
+than an error. `internal/tmux` reads the path with a filtered `list-panes`
+instead — see `panePath` in `internal/tmux/manage.go`, which also has to pin
+the pane with `-f` because `list-panes -t %3` lists the whole window. Take the
+command from there, not from here.
 
 ### ACME blast radius
 

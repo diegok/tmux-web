@@ -132,7 +132,7 @@ type server struct {
 	hostname string
 }
 
-// localIdentity is the "diegok@devbox" the sidebar footer shows. It is
+// localIdentity is the "dev@devbox" the sidebar footer shows. It is
 // functional rather than decorative: there is exactly one user -- the uid the
 // daemon runs as -- so the only question it answers is which box this tab is
 // driving, which starts to matter as soon as there is more than one.
@@ -156,9 +156,11 @@ func localIdentity() (osUser, hostname string) {
 // so it can be read in one screen:
 //
 //	GET    /                    device cookie          SPA shell
+//	GET    /assets/             device cookie          hashed SPA bundles
 //	GET    /enroll              none                   reads location.hash
 //	POST   /api/enroll          none, rate limited     redeem -> set cookie
 //	GET    /api/snapshot        device cookie          cached poller output
+//	GET    /api/user            device cookie          footer identity
 //	GET    /api/devices         device cookie          list
 //	POST   /api/devices         device cookie + Origin mint a link
 //	DELETE /api/devices/{id}    device cookie + Origin revoke

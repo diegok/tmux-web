@@ -46,7 +46,15 @@ import { Toaster } from '@/components/ui/sonner'
 import { newSessionPrompt, runManage } from '@/lib/manage'
 import type { ManageAction, MenuIntent } from '@/lib/manage'
 import { useTabBadge } from '@/lib/tabBadge'
-import { attachTarget, findPane, resolveSession, useSeenPanes, useSnapshot } from '@/lib/useSnapshot'
+import {
+  attachTarget,
+  findPane,
+  resolveSession,
+  succeedPane,
+  useSeenPanes,
+  useSnapshot,
+} from '@/lib/useSnapshot'
+import type { PaneLocation } from '@/lib/useSnapshot'
 
 /** Where this tab remembers its base session, so a reload lands where it was. */
 const SESSION_KEY = 'tmux-web:session'
@@ -176,6 +184,59 @@ export default function App() {
   const activePane = pendingPane ?? status?.pane ?? null
   const located = findPane(groups, activePane)
 
+  /**
+   * The last place the terminal was known to be.
+   *
+   * Remembered because `located` is null from the instant the pane dies, which
+   * is exactly the moment its *window* is needed: the successor rule wants to
+   * put the user back in the window they were working in, and by then the
+   * snapshot no longer says which one that was.
+   */
+  const lastLocated = useRef<PaneLocation | null>(null)
+  useEffect(() => {
+    if (located) lastLocated.current = located
+  }, [located])
+
+  /**
+   * The pane died under the selection. Follow tmux to whatever succeeded it.
+   *
+   * This app's record of where the tab is pointing is only ever written by
+   * `select`: `TerminalSession` remembers the last pane it asked for and
+   * nothing corrects it. tmux, meanwhile, has already moved the client to
+   * another pane and taken the keyboard with it -- so with no correction the
+   * user reads and types into one pane while the breadcrumb names another, the
+   * sidebar highlights that other one, and `useSeenPanes` clears the badge on a
+   * pane that no longer exists instead of the one being read.
+   *
+   * Re-pinning is what makes the app agree with the screen again. It is not the
+   * whole answer, though: the user did lose their place and is owed the reason,
+   * so the move is announced rather than performed silently.
+   *
+   * Focus is deliberately not taken. Navigating on purpose moves the keyboard
+   * (see `handleSelectPane`) because the click came from outside the terminal;
+   * this move did not, the caret is wherever the user left it, and yanking it
+   * out of an open palette would be its own bug.
+   *
+   * Two of the guards are load-bearing. `lastLocated` having to still describe
+   * `activePane` is what keeps this to one move per death: after the `select`
+   * the remembered location is the successor, so the next poll falls straight
+   * through. And a null successor -- an empty snapshot from a failed daemon
+   * poll, a session that is wholly gone, a tab reloaded onto a pane that had
+   * already died -- leaves the tab exactly where it is, and the breadcrumb goes
+   * on saying the pane is gone, because then that is the whole of what is known.
+   */
+  useEffect(() => {
+    if (!loaded || !activePane || located || pendingPane) return
+    const was = lastLocated.current
+    if (!was || was.pane.paneId !== activePane) return
+    const to = succeedPane(groups, was)
+    if (!to || !term.current?.select(to.pane.paneId)) return
+    lastLocated.current = to
+    toast(`${was.pane.command} closed`, {
+      description: `${activePane} is gone. Moved to ${to.window.index}: ${to.window.name} › ${to.pane.command}.`,
+    })
+  }, [loaded, activePane, located, pendingPane, groups])
+
   // This device's memory of which finished runs it has already been shown, and
   // the write that clears one: looking at a pane is what marks it seen. It is
   // read here rather than inside the sidebar because the tab badge counts the
@@ -281,7 +342,27 @@ export default function App() {
           onIntent={handleIntent}
           connection={status?.phase ?? null}
         />
-        <SidebarInset className="min-h-svh">
+        {/*
+          `h-svh` and not `min-h-svh`: a floor with no ceiling is what made the
+          terminal grow on full-screen and never shrink back.
+
+          The column below is `flex-1 min-h-0`, which can only shrink if its
+          parent has a height that does not come from its own content. Under
+          `min-h-svh` the parent's height *was* its content: once the terminal
+          had laid out, say, 54 rows, those rows were 986px of content inside an
+          800px viewport, the shell grew to 986px, and `flex-1` then resolved
+          against 986px on every later pass. Widening worked because the shell
+          has always been bounded horizontally; narrowing the viewport left the
+          rows where they were, so tmux was told a height that had never come
+          back down. See `e2e/sizing.spec.ts`.
+
+          `overflow-hidden` keeps that a layout invariant rather than a
+          coincidence: the shell is exactly one viewport and the page never
+          scrolls, so nothing inside can push a height back into it. Menus,
+          dialogs and toasts are unaffected -- every one of them portals to
+          <body>, outside this element.
+        */}
+        <SidebarInset className="h-svh overflow-hidden">
           <header className="flex h-11 shrink-0 items-center gap-2 border-b px-2">
             <SidebarTrigger />
             <Separator orientation="vertical" className="mr-1 !h-4" />
@@ -373,11 +454,16 @@ export default function App() {
 /**
  * `work › 2: api › claude`.
  *
- * A pane the snapshot cannot find is not hidden: the terminal is still pinned
- * to it as far as this tab knows, and "%3 (gone)" is the honest reading of a
- * pane that died under the selection -- the daemon logged a failed select and
- * left the session on whatever tmux moved to. The next poll usually resolves it
- * by the terminal reporting a different pane, or by the user clicking one.
+ * A pane the snapshot cannot find is still named rather than hidden, but this
+ * is now the *last* resort and not the first. A pane that dies under the
+ * selection is normally succeeded within a poll -- see the `succeedPane` effect
+ * in `App` -- and the breadcrumb then describes the pane the terminal actually
+ * moved to, which is the question it exists to answer.
+ *
+ * What is left here is the case where nothing better is known: the whole
+ * session went, or the pane was already gone when this tab loaded, so there is
+ * no window to fall back into. Naming the dead pane is then the honest reading,
+ * because it is all the tab has.
  */
 function Breadcrumb({
   session,

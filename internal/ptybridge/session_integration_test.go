@@ -391,3 +391,65 @@ func waitFor(t *testing.T, d time.Duration, cond func() bool, msg string) {
 	}
 	t.Fatal(msg)
 }
+
+// The owner's actual shape: a wide local terminal and a narrower browser tab on
+// the same grouped window. The tab goes full-screen and comes back, and the
+// window has to follow it *down* as well as up.
+//
+// TestConfiguredSizeAndResizeReachTheTmuxClient only ever grows (90x31 ->
+// 100x37) and only ever looks at #{client_width}, so it passes against a Resize
+// that refuses to shrink and against one whose ioctl never reaches the window
+// at all. Both halves are pinned here instead: the *window* size, which is what
+// the pane is actually drawn at, and a shrink made against a larger client that
+// is still attached.
+//
+// This also settles who owns "grows on full-screen, does not shrink coming
+// back". tmux's `window-size latest` counts a SIGWINCH as using a client, so a
+// resize alone -- with no keystroke -- makes this tab the latest client and the
+// shared window follows it in both directions. If that symptom survives, it is
+// not the daemon.
+func TestResizeShrinksTheSharedWindowEvenWithALargerClientAttached(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "200", "-y", "60")
+
+	// Stands in for the terminal the owner is sitting at: same group, same
+	// window, and wider than the tab in both axes for the whole test.
+	local := open(t, srv, ptybridge.Config{TmuxArgs: srv.Args(), Base: "work", Cols: 160, Rows: 50})
+	defer local.Close()
+
+	tab := open(t, srv, ptybridge.Config{TmuxArgs: srv.Args(), Base: "work", Cols: 100, Rows: 30})
+	name := tab.SessionName()
+
+	// Attaching is itself a claim on the size, so the window is the tab's
+	// before anything is resized. Without this the grow below could pass on a
+	// window that was already large.
+	waitFor(t, 3*time.Second, func() bool {
+		return windowSize(t, srv, name) == "100x30"
+	}, "the window never took the newest client's size")
+
+	if err := tab.Resize(150, 45); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		return windowSize(t, srv, name) == "150x45"
+	}, "going full-screen never widened the shared window")
+
+	// The one that matters. A larger client is still attached, so a window that
+	// only ever grows stays at 150x45 here.
+	if err := tab.Resize(100, 30); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 3*time.Second, func() bool {
+		return windowSize(t, srv, name) == "100x30"
+	}, "coming back from full-screen never shrank the shared window: it stayed at "+
+		windowSize(t, srv, name)+" with a 160x50 client attached")
+}
+
+// windowSize is the size the pane is actually drawn at, which is the window's
+// and not the client's: with another client on the same grouped window the two
+// differ, and only this one decides what the user sees.
+func windowSize(t *testing.T, srv *testutil.Server, session string) string {
+	t.Helper()
+	return srv.Run(t, "display-message", "-p", "-t", "="+session+":",
+		"#{window_width}x#{window_height}")
+}

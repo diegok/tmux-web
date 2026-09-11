@@ -13,16 +13,19 @@ import (
 // unsafe because window names may contain one.
 const Sep = "\x1f"
 
-// snapshotTag and reportTag label the two blocks of the one batched read.
+// snapshotTag, reportTag and pathTag label the three blocks of the one batched
+// read.
 //
 // A literal constant in each format string, so nothing a writer controls can
-// forge one: a report containing a newline would have to survive tmux's
-// substitution first, and that substitution turns it into a space. Telling the
-// blocks apart by counting fields or by trusting their order would both be
-// guesses about a value somebody else writes.
+// forge one: a report or a directory name containing a newline would have to
+// survive tmux's substitution first, and that substitution turns it into a
+// space. Telling the blocks apart by counting fields or by trusting their order
+// would both be guesses about a value somebody else writes -- and two of the
+// three blocks have the same field count.
 const (
 	snapshotTag = "S"
 	reportTag   = "A"
+	pathTag     = "P"
 )
 
 // fieldCount is how many fields a record must have to be read. It is a
@@ -75,6 +78,17 @@ type Row struct {
 	// integration is installed, when its report is stale, and for every pane
 	// that is not an agent. Sanitised and capped on write and again on read.
 	Activity string `json:"activity"`
+	// Path is the pane's working directory, as of the poll that produced this
+	// row, and "" when the read that produced it did not carry one -- a
+	// Snapshot rather than a SnapshotAndReports, or a path block that failed
+	// while the snapshot block succeeded.
+	//
+	// It does NOT ride in the same format string as the fields above it; see
+	// PathFormat for why that would be worse than leaving it off the wire. Two
+	// things read it, and neither may treat it as current: it is up to a poll
+	// interval stale and can name a directory that has since been removed, so
+	// panePath stats it before it reaches `-c`. Nothing renders it yet.
+	Path string `json:"path"`
 	// StateSource is which authority decided AgentState: "event", "screen", or
 	// "" when nothing did.
 	//
@@ -146,15 +160,14 @@ const labelField = "#{s/[\n" + Sep + "]/ /:" + LabelOption + "}"
 // own, inside a regex, so counting separators in the finished string no longer
 // tells you how many fields there are.
 //
-// pane_current_path is deliberately absent. tmux sanitizes session and window
-// names but not the path, so a pane sitting in a directory whose name contains
-// a 0x1f or a newline can forge a whole extra record or swallow the following
-// pane's -- either way the sidebar shows something other than the truth, and a
-// pane that exists can vanish from it. Being the last field would not bound the
-// damage: a newline simply starts a fresh line whose every field is
-// attacker-controlled. tmux's #{q:} modifier does not escape either byte.
-// Nothing in v1 renders the path; the deferred git panel can query it per pane,
-// where a single-pane result needs no field splitting to interpret.
+// pane_current_path is deliberately absent FROM THIS RECORD, and is read by a
+// block of its own instead; see PathFormat. Putting it here would fail worse
+// than leaving it off the wire entirely: this record protects exactly one
+// unsanitised field, by putting it last, and @tmux_web_label owns that slot. A
+// second such field in the middle turns a surplus separator into a shift of
+// every field after it, the greedy last field absorbs the overflow, and the row
+// then parses SUCCESSFULLY carrying another pane's values -- a pane wearing
+// another pane's title, which ParseRows cannot detect and no warning counts.
 //
 // pane_current_command is a theoretical residual: it is not known to be
 // sanitized either, and two attempts to make tmux report a command containing a
@@ -193,6 +206,79 @@ var formatFields = []string{
 // Format is the -F argument producing rows this package can parse.
 var Format = strings.Join(formatFields, Sep)
 
+// PathVariable is the tmux format variable holding a pane's working directory.
+//
+// Named rather than spelled out twice: pathField reads it and
+// TestTheMainFormatStillCarriesNoPathField asserts that Format does not, and
+// those two have to be talking about the same string for either to mean
+// anything.
+const PathVariable = "pane_current_path"
+
+// pathField is #{pane_current_path} with the two bytes that break this wire
+// format substituted out by tmux before the value reaches Go.
+//
+// It is labelField's pattern, built from the same two constants -- COPIED FROM
+// labelField ABOVE, NOT RETYPED FROM ANY RENDERING OF IT. Written out in prose
+// the pattern looks like `#{s/[\n\x1f]/ /:…}`, and a bracket set retyped from
+// that rendering is two characters: it leaves real newlines ALIVE and turns
+// every lowercase "n" in a path into a space. The Go source works because "\n"
+// in a source literal is the byte. See reportField for the other two ways to
+// get this pattern wrong, both measured.
+//
+// This field needs the substitution more than either of the others. tmux
+// normalises pane titles through its own OSC parser and refuses a newline in a
+// session or window name, but it does not touch pane_current_path, and #{q:}
+// escapes neither byte: reproduced on this project, a directory whose name
+// contained a newline forged a whole extra row in the sidebar -- a pane that
+// does not exist -- and one containing a 0x1f swallowed the following pane's
+// record, so a live pane disappeared.
+const pathField = "#{s/[\n" + Sep + "]/ /:" + PathVariable + "}"
+
+// pathFormatFields is the third -F of the batched read: one fork, N format
+// strings, each with at most one unsanitised field and that field last.
+//
+// The path is that field here, so it gets all three of the label's defences --
+// the substitution above, the last slot, and a parser that repairs what arrives
+// (ParsePaths). #{pane_id} is %N and cannot carry anything.
+//
+// The alternative, a second tmux invocation, costs a fork on every poll
+// forever. This costs none: the poller already runs list-panes twice in one
+// invocation, and a third command inside it is free.
+var pathFormatFields = []string{pathTag, "#{pane_id}", pathField}
+
+// PathFormat is the -F argument for the path block.
+var PathFormat = strings.Join(pathFormatFields, Sep)
+
+// ParsePaths pulls every pane's working directory out of the batched read,
+// keyed by pane id.
+//
+// Every pane gets a line. There is no dropped count and there should not be
+// one: the blast radius here is a working directory, never a pane, and a
+// directory that did not arrive costs one split a fork it would have saved.
+//
+// The value is handed back exactly as tmux printed it, not repaired. That is
+// the difference between this and sanitizeLabel, and it is deliberate: the
+// label is a string bound for a sidebar row, while this is a path bound for
+// `split-window -c`, and a rewritten path is a path that no longer names the
+// directory the pane is in. What keeps it honest is the stat at the point of
+// use -- checkDir in manage.go -- which a repaired value would pass while
+// pointing somewhere else. On the wire the bytes are safe by encoding: JSON
+// escapes a control byte rather than emitting it, and nothing renders the field.
+func ParsePaths(out string) map[string]string {
+	paths := make(map[string]string)
+	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		// SplitN with 3 for the same reason ParseRows rejoins its surplus: a
+		// separator that survived the substitution belongs to the value, and
+		// the value is the last field.
+		parts := strings.SplitN(line, Sep, 3)
+		if len(parts) != 3 || parts[0] != pathTag {
+			continue
+		}
+		paths[parts[1]] = parts[2]
+	}
+	return paths
+}
+
 // ParseRows parses raw `tmux list-panes` output into one Row per line.
 //
 // Any line that is not a well-formed record -- too few fields, or a non-numeric
@@ -218,10 +304,12 @@ func ParseRows(out string) (rows []Row, dropped int, err error) {
 	}
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Split(line, Sep)
-		// The other block of the batched read. Skipped rather than counted:
-		// ParseReports owns those lines, and counting them as malformed would
-		// log "skipped malformed rows" once per pane per poll forever.
-		if len(fields) > 0 && fields[0] == reportTag {
+		// The other blocks of the batched read. Skipped rather than counted:
+		// ParseReports and ParsePaths own those lines, and counting them as
+		// malformed would log "skipped malformed rows" once per pane per poll
+		// forever -- which teaches the operator to ignore the one warning that
+		// means a pane really is missing.
+		if len(fields) > 0 && (fields[0] == reportTag || fields[0] == pathTag) {
 			continue
 		}
 		// The tag is the discriminator, not the field count. A line that is

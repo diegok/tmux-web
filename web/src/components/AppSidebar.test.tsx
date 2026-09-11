@@ -44,6 +44,8 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     // every test that does not care about titles is still rendering the case
     // the sidebar has to keep out of the rows.
     title: 'devbox',
+    // The pane's working directory, as of the poll; nothing renders it yet.
+    path: '/srv/work',
     // A shell: the daemon computes no state for it, and "" is not a state.
     agentState: '',
     finishedAt: 0,

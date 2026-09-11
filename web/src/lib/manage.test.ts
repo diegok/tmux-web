@@ -55,6 +55,8 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     paneActive: true,
     command: 'zsh',
     title: 'devbox',
+    // The pane's working directory, as of the poll; nothing renders it yet.
+    path: '/srv/work',
     agentState: '',
     finishedAt: 0,
     // Nothing reported for this pane and nothing decided its state: "" in

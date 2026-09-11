@@ -127,6 +127,20 @@ export interface SnapshotRow {
    */
   title: string
   /**
+   * The pane's working directory, as of the poll that produced this row.
+   *
+   * It rides a tagged block of its own in the daemon's one tmux invocation,
+   * not the record the fields above come from: tmux sanitises titles and
+   * refuses a newline in a session or window name, but hands
+   * `pane_current_path` over exactly as it is, and a second such field in one
+   * record shifts every field after it. See `PathFormat` on the Go side.
+   *
+   * "" when the poll carried no path for the pane. Nothing renders it, and
+   * nothing may treat it as current: it is up to a poll interval old and can
+   * name a directory that has since been removed.
+   */
+  path: string
+  /**
    * What the agent's own integration says it is doing, or "".
    *
    * "" covers every pane no integration reports for -- not an agent, no
@@ -299,6 +313,14 @@ export interface PaneNode {
   title: string
   /** `@tmux_web_label`, or "" -- the only one of the three the user chose. */
   label: string
+  /**
+   * `SnapshotRow.path`: the pane's working directory as of the poll, or "".
+   *
+   * Carried through the tree though nothing renders it, so that the first
+   * thing to want it does not have to go back to the daemon for a value the
+   * poll already brought. Stale by up to one interval; never an authority.
+   */
+  path: string
   /** tmux's active pane within this window. */
   active: boolean
   appOwned: boolean
@@ -446,6 +468,7 @@ export function groupRows(rows: readonly SnapshotRow[]): SessionNode[] {
       command: row.command,
       title: row.title,
       label: row.label,
+      path: row.path,
       active: row.paneActive,
       appOwned: row.appOwned,
       activity: row.activity,
@@ -817,6 +840,13 @@ function rowsEqual(a: readonly SnapshotRow[], b: readonly SnapshotRow[]): boolea
       x.command === y.command &&
       x.title === y.title &&
       x.label === y.label &&
+      // Compared though nothing renders it, and for the reason this function's
+      // header gives: "every field the wire carries, not only the ones
+      // something renders today". A pane that `cd`s somewhere else moves this
+      // and nothing else, so left out here it would change in tmux and never
+      // reach the tree -- and the check would be added back the day something
+      // finally read it, by someone debugging why it was always wrong.
+      x.path === y.path &&
       x.paneActive === y.paneActive &&
       x.appOwned === y.appOwned &&
       x.agentState === y.agentState &&

@@ -14,9 +14,25 @@ type Client struct {
 	// base is prepended to every invocation, e.g. []string{"-L", "sockname"}.
 	// Empty means the user's default server.
 	base []string
+	// paths answers a pane's working directory from a snapshot somebody else
+	// already took; see UsePathCache. nil means every caller asks tmux.
+	paths func(paneID string) (string, bool)
 }
 
 func NewClient(base []string) *Client { return &Client{base: base} }
+
+// UsePathCache points this client at an already-polled answer to "where is this
+// pane", so that a split does not fork tmux to re-read a value the daemon is
+// holding. Poller.PathFor is what the daemon passes.
+//
+// Not a constructor argument because the poller is built FROM this client: the
+// daemon wires the two together once, at startup, before either is serving
+// anything. It is not safe to call again afterwards, and there is no reason to.
+//
+// A cache is a hint and never an authority. What it answers is up to a poll
+// interval old and may name a directory that has since been removed, so
+// panePath stats it and falls back to a live read; see there.
+func (c *Client) UsePathCache(f func(paneID string) (string, bool)) { c.paths = f }
 
 func (c *Client) command(ctx context.Context, args ...string) *exec.Cmd {
 	return exec.CommandContext(ctx, "tmux", append(append([]string{}, c.base...), args...)...)
@@ -65,7 +81,7 @@ func (c *Client) Run(ctx context.Context, args ...string) (string, error) {
 }
 
 // batchArgs is the one tmux invocation the poller makes per refresh: the
-// snapshot, then the reports, in command order.
+// snapshot, then the reports, then the working directories, in command order.
 //
 // A lone ";" argv element is tmux's own command separator -- the same shape
 // AttachArgs already uses. There is no shell here, so it needs no escaping.
@@ -80,16 +96,21 @@ var batchArgs = func() []string {
 	return []string{
 		"list-panes", "-a", "-F", Format,
 		";", "list-panes", "-a", "-F", ReportFormat,
+		";", "list-panes", "-a", "-F", PathFormat,
 	}
 }
 
-// SnapshotAndReports returns one row per pane and every pane's raw
-// @tmux_web_agent value, from a single tmux invocation.
+// SnapshotAndReports returns one row per pane -- each carrying the pane's
+// working directory -- and every pane's raw @tmux_web_agent value, from a
+// single tmux invocation.
 //
 // The marginal cost of the reports is zero forks: it is one more command inside
 // a fork the poller already makes unconditionally, and against it the feature
 // removes one capture-pane fork per reporting agent pane per poll. There is no
-// poll at which it costs a fork it did not save.
+// poll at which it costs a fork it did not save. The path block is the same
+// trade a second time: it removes the list-panes fork panePath used to make on
+// every split and every new window -- a keystroke-initiated action, where the
+// latency is the one the owner can feel.
 func (c *Client) SnapshotAndReports(ctx context.Context) ([]Row, map[string]string, error) {
 	out, err := c.runKeepingOutput(ctx, batchArgs()...)
 	if err != nil && noServer(err.Error()) {
@@ -100,13 +121,22 @@ func (c *Client) SnapshotAndReports(ctx context.Context) ([]Row, map[string]stri
 		return nil, nil, perr
 	}
 	// The exit status is NOT the gate. A nonzero exit with a complete snapshot
-	// block is a missing report; only a nonzero exit with nothing usable on
-	// stdout is a failed poll.
+	// block is a missing report or a missing set of paths; only a nonzero exit
+	// with nothing usable on stdout is a failed poll. With three blocks that
+	// rule matters more, not less: it is one more way for a whole sidebar to go
+	// blank over a feature that degrades perfectly well on its own.
 	if err != nil && len(rows) == 0 {
 		return nil, nil, err
 	}
 	if err != nil {
-		slog.Warn("tmux batch: the report read failed; the snapshot is intact", "error", err)
+		slog.Warn("tmux batch: a later block failed; the snapshot is intact", "error", err)
+	}
+	// Attached before Dedupe so that every copy of a pane carries it, whichever
+	// of them Dedupe keeps. A pane with no line in the path block gets "",
+	// which is what panePath treats as "ask tmux".
+	paths := ParsePaths(out)
+	for i := range rows {
+		rows[i].Path = paths[rows[i].PaneID]
 	}
 	if dropped > 0 {
 		slog.Warn("tmux snapshot: skipped malformed rows", "dropped", dropped)
@@ -115,6 +145,11 @@ func (c *Client) SnapshotAndReports(ctx context.Context) ([]Row, map[string]stri
 }
 
 // Snapshot returns one row per pane, deduplicated across session groups.
+//
+// Row.Path is "" on every row: this is the single-command read, and the path
+// rides a block of its own inside the batched one. Nothing is broken by that --
+// panePath falls back to asking tmux when it has no cached answer -- but a
+// poller built on this function saves no fork.
 func (c *Client) Snapshot(ctx context.Context) ([]Row, error) {
 	out, err := c.Run(ctx, "list-panes", "-a", "-F", Format)
 	if err != nil {

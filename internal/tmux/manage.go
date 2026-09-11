@@ -320,14 +320,37 @@ func (c *Client) KillPane(ctx context.Context, paneID string) error {
 
 // panePath returns the working directory of one pane, checked.
 //
-// The filter is load-bearing: `list-panes -t %3` lists every pane in the window
-// *containing* %3, so without it the answer could be a neighbouring pane's
-// directory. display-message is the obvious alternative and is unusable for the
-// same reason as in SelectPane -- given a target it cannot find it prints an
-// empty expansion and exits 0, so a stale id would silently become "".
+// The poll already read this. Every snapshot carries #{pane_current_path} per
+// pane (see PathFormat), so a client wired to a path cache answers a split from
+// memory instead of forking tmux a second time -- and a split is
+// keystroke-initiated, which is where the second fork was actually felt.
+//
+// THE CACHE SAVES THE FORK, NOT THE CHECK. A cached path is up to a poll
+// interval old and can name a directory the owner has since removed, and
+// `split-window -c /gone` exits 0 and starts the shell in $HOME instead. So the
+// cached answer is stat'd exactly as a freshly read one is, and a cached
+// directory that is gone falls through to the live read rather than failing:
+// the pane has usually moved somewhere that does exist, and asking tmux is
+// still cheaper than telling the owner no.
+//
+// The filter on the live read is load-bearing: `list-panes -t %3` lists every
+// pane in the window *containing* %3, so without it the answer could be a
+// neighbouring pane's directory. display-message is the obvious alternative and
+// is unusable for the same reason as in SelectPane -- given a target it cannot
+// find it prints an empty expansion and exits 0, so a stale id would silently
+// become "".
 func (c *Client) panePath(ctx context.Context, paneID string) (string, error) {
+	// Before the cache, not after it: an unvalidated id is one the cache can be
+	// asked about, and "" is the id tmux resolves to "whatever is current".
 	if err := ValidatePaneID(paneID); err != nil {
 		return "", err
+	}
+	if c.paths != nil {
+		if dir, ok := c.paths(paneID); ok && dir != "" {
+			if err := checkDir(dir); err == nil {
+				return dir, nil
+			}
+		}
 	}
 	// paneID is "%" plus digits by now, so it cannot break the filter syntax.
 	out, err := c.Run(ctx, "list-panes", "-t", paneID,

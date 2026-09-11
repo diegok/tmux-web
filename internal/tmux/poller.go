@@ -437,6 +437,34 @@ func (p *Poller) Latest() []Row {
 	return p.latest
 }
 
+// PathFor is the working directory the most recent poll saw for a pane, and
+// whether it saw one at all.
+//
+// This is what Client.UsePathCache is given, and it is the reason the snapshot
+// carries the path: a split or a new window then opens in the right place
+// without forking tmux to ask where that is.
+//
+// ok is false for a pane the poll did not see -- one created since, or one on a
+// poller whose snapshot function carries no paths -- and for a row whose path
+// is "". Those are the same answer to the caller, which is "ask tmux", and an
+// empty path must never reach `-c`: tmux would take it as "start wherever you
+// like" and exit 0.
+//
+// A linear scan rather than a map. The slice is one row per pane on the whole
+// server -- tens, not thousands -- and it is read once per split, not per poll;
+// a second index would be a second thing for refresh to keep in step with the
+// rows for no measurable gain.
+func (p *Poller) PathFor(paneID string) (string, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, r := range p.latest {
+		if r.PaneID == paneID {
+			return r.Path, r.Path != ""
+		}
+	}
+	return "", false
+}
+
 // ServerStart is the generation of the tmux server the cached snapshot came
 // from, or "" if there is no server or this poller was built without a client.
 // See Client.ServerStart for why anything keyed on a pane id needs it.

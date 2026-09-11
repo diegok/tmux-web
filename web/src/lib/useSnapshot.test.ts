@@ -47,6 +47,9 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     command: 'zsh',
     // What tmux gives a pane nothing has titled: the hostname.
     title: 'devbox',
+    // The pane's working directory, as of the poll. On the wire and in the
+    // tree; nothing renders it yet.
+    path: '/srv/work',
     // A shell: the daemon computes no state for it.
     agentState: '',
     finishedAt: 0,
@@ -114,7 +117,7 @@ describe('contract with the daemon', () => {
     // A literal, never `Object.keys(row()).length`: the count is here to make a
     // field added on one side only fail, and a count derived from the
     // TypeScript side would agree with itself forever.
-    expect(tags).toHaveLength(18)
+    expect(tags).toHaveLength(19)
     expect(Object.keys(row()).sort()).toEqual(tags.sort())
   })
 })
@@ -214,6 +217,15 @@ describe('groupRows', () => {
       title: '✳ Categorización',
       label: 'prod db',
     })
+  })
+
+  // Nothing renders the path yet, which is exactly why it needs a test of its
+  // own: a field the tree silently drops looks fine in every screenshot, and
+  // the first thing to want it (the git context the roadmap prices per pane)
+  // would find the tree carrying `undefined` and go back to asking tmux.
+  it('carries the working directory onto the pane, though nothing renders it', () => {
+    const [session] = groupRows([row({ path: '/srv/api' })])
+    expect(session.windows[0].panes[0].path).toBe('/srv/api')
   })
 
   it('carries the agent fields onto the pane, since the dot is made of them', () => {
@@ -809,6 +821,12 @@ describe('SnapshotPoller', () => {
   it.each([
     ['activity', { activity: 'edit report.go' }],
     ['stateSource', { stateSource: 'event' }],
+    // `path` is the field the loop above would be least likely to miss and the
+    // easiest to leave out of `rowsEqual` by hand, because nothing renders it
+    // yet: a comparison that ignores it keeps the previous tree object, React
+    // reconciles nothing, and the pane that has `cd`'d somewhere else goes on
+    // reporting the directory it left -- to whatever reads it next.
+    ['path', { path: '/srv/other' }],
   ])('rebuilds the tree when only %s changed', async (_name, moved) => {
     const base = row({ paneId: '%1', command: 'claude', agentState: 'working' })
 

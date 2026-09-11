@@ -990,6 +990,12 @@ func newDaemon(cfg Config) (*daemon, error) {
 		baseURL:   baseURL(cfg),
 		statePath: statePath,
 	}
+	// The poll already reads every pane's working directory, so a split or a
+	// new window opens in the right place without forking tmux to ask where
+	// that is -- and those are keystroke-initiated, which is where the second
+	// fork was felt. Wired after the poller exists and before anything is
+	// served; the cached answer is still stat'd at the point of use.
+	tm.UsePathCache(d.poller.PathFor)
 
 	d.handler, err = NewHandler(HandlerConfig{
 		Auth:      authn,

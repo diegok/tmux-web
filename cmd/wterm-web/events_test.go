@@ -55,7 +55,8 @@ func TestClaudeNotificationWhitelist(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, writes := reportOne(t, []string{"--agent", "claude", "--event", "Notification"}, string(payload))
+			rep, writes := reportOne(t, []string{"--agent", "claude", "--event", "Notification"}, string(payload))
+			got := rep.State
 			if tc.state == "" {
 				if writes != 0 {
 					t.Fatalf("notification_type %q wrote %q in %d tmux command(s); an unrecognised or "+
@@ -84,7 +85,8 @@ func TestNotificationMessageIsNotAProxyForType(t *testing.T) {
 		{"auth_success", ""},
 	} {
 		payload := `{"hook_event_name":"Notification","message":"` + msg + `","notification_type":"` + tc.typ + `"}`
-		got, writes := reportOne(t, []string{"--agent", "claude", "--event", "Notification"}, payload)
+		rep, writes := reportOne(t, []string{"--agent", "claude", "--event", "Notification"}, payload)
+		got := rep.State
 		if tc.want == "" && writes != 0 {
 			t.Errorf("%q under the permission message wrote %q; the message must decide nothing", tc.typ, got)
 		}
@@ -209,6 +211,12 @@ func TestTheRepairsAreExactlyThese(t *testing.T) {
 // The three agents' turn events, from the recorded fixtures rather than from
 // the design's prose. Every file under testdata/hooks appears here exactly
 // once, and fixtureSweepIsComplete keeps it that way.
+//
+// Since Task 15 it asserts the ACTIVITY TEXT of every one of them as well, in
+// the same table, because the two answers are one decision: a fixture's row
+// says both what state that payload puts on somebody's pane and what its one
+// line of sidebar then reads. Splitting them into two tables would let a new
+// fixture be accounted for by one and not the other.
 func TestEventMappings(t *testing.T) {
 	for _, tc := range eventFixtures {
 		t.Run(tc.fixture, func(t *testing.T) {
@@ -216,7 +224,8 @@ func TestEventMappings(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, writes := reportOne(t, []string{"--agent", tc.agent, "--event", tc.event}, string(payload))
+			rep, writes := reportOne(t, []string{"--agent", tc.agent, "--event", tc.event}, string(payload))
+			got := rep.State
 			if tc.state == "" {
 				if writes != 0 {
 					t.Fatalf("%s/%s on %s wrote %q; want no write at all", tc.agent, tc.event, tc.fixture, got)
@@ -226,6 +235,10 @@ func TestEventMappings(t *testing.T) {
 			if writes != 1 || got != tc.state {
 				t.Fatalf("%s/%s on %s wrote %q in %d tmux command(s), want %q in exactly 1",
 					tc.agent, tc.event, tc.fixture, got, writes, tc.state)
+			}
+			if rep.Activity != tc.activity {
+				t.Fatalf("%s/%s on %s published activity %q, want %q",
+					tc.agent, tc.event, tc.fixture, rep.Activity, tc.activity)
 			}
 		})
 	}
@@ -266,76 +279,152 @@ func TestFixtureSweepIsComplete(t *testing.T) {
 // eventFixtures is TestEventMappings' table, separate so the completeness test
 // can walk it too.
 //
-// state "" means the event writes nothing: either the table ignores it, or the
-// agent's integration does not report it at all.
+// state "" means the event writes nothing: either the table ignores it, the
+// agent's integration does not report it at all, or Task 15's filter refused
+// the payload. activity is what the second line of the pane row then reads, in
+// full, for every payload three real agents were recorded producing -- so the
+// whole of what this feature says about a person's work is one column of one
+// table, and whether it is worth the line it occupies can be judged by reading
+// down it.
 var eventFixtures = []struct {
-	fixture, agent, event, state string
+	fixture, agent, event, state, activity string
 }{
 	// -- claude ---------------------------------------------------------
-	{"claude/user_prompt_submit.json", "claude", "UserPromptSubmit", tmux.StateWorking},
-	{"claude/pre_tool_use_bash.json", "claude", "PreToolUse", tmux.StateWorking},
-	{"claude/pre_tool_use_write.json", "claude", "PreToolUse", tmux.StateWorking},
-	{"claude/pre_tool_use_agent.json", "claude", "PreToolUse", tmux.StateWorking},
-	// Task 15 adds the agent_id filter over PreToolUse, Notification and
-	// UserPromptSubmit. Until it lands the table alone decides, and a
-	// subagent's PreToolUse says exactly what the root's does. The row is here
-	// so that Task 15 changing it is a visible edit rather than a silent one.
-	{"claude/pre_tool_use_subagent_bash.json", "claude", "PreToolUse", tmux.StateWorking},
-	{"claude/notification_permission_prompt.json", "claude", "Notification", tmux.StateBlocked},
-	{"claude/notification_permission_prompt_plan.json", "claude", "Notification", tmux.StateBlocked},
-	{"claude/notification_idle_prompt.json", "claude", "Notification", tmux.StateIdle},
-	{"claude/stop.json", "claude", "Stop", tmux.StateIdle},
-	{"claude/stop_subagent_running.json", "claude", "Stop", tmux.StateIdle},
+	// The turn start reports the STATE and no text. The prompt is right there
+	// under `prompt` and is not used: it is history by the second tool call,
+	// and 128 runes cuts it mid-sentence. See TestThePromptIsNotTheLabel.
+	{"claude/user_prompt_submit.json", "claude", "UserPromptSubmit", tmux.StateWorking, ""},
+	// The command, whole. tool_input.description is Claude's own one-line
+	// summary and is not read: it is a paraphrase, and the command it
+	// paraphrases is both shorter and exact.
+	{"claude/pre_tool_use_bash.json", "claude", "PreToolUse", tmux.StateWorking, "run wc -l sample.txt"},
+	// file_path "/home/user/.claude/plans/fizzy-wobbling-gadget.md" -> its
+	// basename: the directories would spend most of the line saying what the
+	// window name already says. `content` here is the whole plan document,
+	// unbounded, and is not read -- it would not survive MaxReportBytes.
+	{"claude/pre_tool_use_write.json", "claude", "PreToolUse", tmux.StateWorking, "write fizzy-wobbling-gadget.md"},
+	// The subagent-launching tool is called Agent, not Task. Its arguments are
+	// description, prompt and subagent_type: no path, no command, so the answer
+	// is the tool name alone.
+	{"claude/pre_tool_use_agent.json", "claude", "PreToolUse", tmux.StateWorking, "Agent"},
+	// Task 15's filter. The table cannot tell this payload from the root's --
+	// same event, same tool, same state -- and agent_id is the only thing that
+	// can. Before the filter landed this row read StateWorking.
+	{"claude/pre_tool_use_subagent_bash.json", "claude", "PreToolUse", "", ""},
+	// Rung 1, the question when blocked. Claude's Notification carries a
+	// `message` rather than a question, and the two permission_prompt files
+	// carry two different ones -- which is why nothing keys off it for the
+	// STATE. It is the whole of what this event knows, and it is short.
+	{"claude/notification_permission_prompt.json", "claude", "Notification",
+		tmux.StateBlocked, "Claude needs your permission"},
+	{"claude/notification_permission_prompt_plan.json", "claude", "Notification",
+		tmux.StateBlocked, "Claude Code needs your approval for the plan"},
+	// A resting report says the state and nothing else: rung 4 is "an empty
+	// text field, not an absent report", and the row falls back to the title
+	// and then to the command.
+	{"claude/notification_idle_prompt.json", "claude", "Notification", tmux.StateIdle, ""},
+	{"claude/stop.json", "claude", "Stop", tmux.StateIdle, ""},
+	// background_tasks is not empty here: a Stop can fire with work still
+	// running under the session. It does not change what we report -- the root
+	// session is waiting on the user, which is what idle means here.
+	{"claude/stop_subagent_running.json", "claude", "Stop", tmux.StateIdle, ""},
 	// Structural, not a filter: SubagentStop is a different hook and the
 	// installer does not register it, so claude's Stop is root-only against
 	// the Task-tool subagent class. If it is ever passed anyway -- by hand, or
-	// by a settings.json the user edited -- the table still refuses it.
-	{"claude/subagent_stop.json", "claude", "SubagentStop", ""},
+	// by a settings.json the user edited -- the table still refuses it. Task
+	// 15's agent_id filter refuses it a second time.
+	{"claude/subagent_stop.json", "claude", "SubagentStop", "", ""},
 
 	// -- opencode -------------------------------------------------------
-	{"opencode/chat_message.json", "opencode", "chat.message", tmux.StateWorking},
-	{"opencode/chat_message_child.json", "opencode", "chat.message", tmux.StateWorking},
-	{"opencode/session_status_busy.json", "opencode", "session.status", tmux.StateWorking},
+	// The prompt is under output.parts[].text and is not used, on the root's
+	// message and on the child's alike. Same two reasons as claude's.
+	{"opencode/chat_message.json", "opencode", "chat.message", tmux.StateWorking, ""},
+	{"opencode/chat_message_child.json", "opencode", "chat.message", tmux.StateWorking, ""},
+	{"opencode/session_status_busy.json", "opencode", "session.status", tmux.StateWorking, ""},
 	// The turn end is session.idle, and one turn end is enough. session.status
 	// idle fires in the same millisecond; reporting both would write the same
 	// state twice with two timestamps for no gain.
-	{"opencode/session_status_idle.json", "opencode", "session.status", ""},
-	{"opencode/tool_execute_before_bash.json", "opencode", "tool.execute.before", tmux.StateWorking},
-	{"opencode/tool_execute_before_write.json", "opencode", "tool.execute.before", tmux.StateWorking},
-	{"opencode/tool_execute_before_todowrite.json", "opencode", "tool.execute.before", tmux.StateWorking},
-	{"opencode/tool_execute_before_task.json", "opencode", "tool.execute.before", tmux.StateWorking},
-	{"opencode/todo_updated.json", "opencode", "todo.updated", tmux.StateWorking},
-	{"opencode/permission_asked_bash.json", "opencode", "permission.asked", tmux.StateBlocked},
-	{"opencode/permission_asked_edit.json", "opencode", "permission.asked", tmux.StateBlocked},
-	{"opencode/session_idle_root.json", "opencode", "session.idle", tmux.StateIdle},
-	// Task 15's parentID filter is what keeps this one off the pane; it needs
-	// the session.created that named the parent, which is plugin state and not
-	// something this table can see. Same note as claude's subagent PreToolUse.
-	{"opencode/session_idle_child.json", "opencode", "session.idle", tmux.StateIdle},
+	{"opencode/session_status_idle.json", "opencode", "session.status", "", ""},
+	{"opencode/tool_execute_before_bash.json", "opencode", "tool.execute.before",
+		tmux.StateWorking, "run wc -l sample.txt"},
+	// opencode spells the path argument filePath, in camelCase, where claude
+	// spells it file_path and pi spells it path. `content` is not read: a
+	// file's length has no bound and MaxReportBytes does.
+	{"opencode/tool_execute_before_write.json", "opencode", "tool.execute.before", tmux.StateWorking, "write out.txt"},
+	// todowrite's argument is the todo list itself: no path, no command, so the
+	// tool name alone. The list arrives as text one event later, through
+	// todo.updated, which is rung 2 and says it better.
+	{"opencode/tool_execute_before_todowrite.json", "opencode", "tool.execute.before", tmux.StateWorking, "todowrite"},
+	// opencode's subagent launcher IS called task, and carries a prompt like
+	// claude's Agent. Same answer, same reason.
+	{"opencode/tool_execute_before_task.json", "opencode", "tool.execute.before", tmux.StateWorking, "task"},
+	// Rung 2: the agent's own statement of intent, which beats a mechanical
+	// trace of the tool it happens to be in. Exactly one entry is in_progress.
+	{"opencode/todo_updated.json", "opencode", "todo.updated", tmux.StateWorking, "Read sample.txt"},
+	// permission.asked carries NO question string -- the design says it does
+	// and the recorded payload says it does not -- so the text is read out of
+	// `metadata`, whose keys vary by permission class. bash's is {command},
+	// and the command IS the question the dialog is asking, so it goes whole.
+	{"opencode/permission_asked_bash.json", "opencode", "permission.asked",
+		tmux.StateBlocked, "run echo hello from opencode"},
+	// edit's metadata is {filepath, diff}, and that diff is a whole unified
+	// diff: unbounded, and over MaxReportBytes on its own in this one sample.
+	// Reducing per class rather than reading one fixed field is what keeps the
+	// report parseable; the filename answers the dialog's question.
+	{"opencode/permission_asked_edit.json", "opencode", "permission.asked", tmux.StateBlocked, "edit note.txt"},
+	{"opencode/session_idle_root.json", "opencode", "session.idle", tmux.StateIdle, ""},
+	// Still StateIdle, and that is the honest answer: this payload is
+	// {sessionID} and nothing else, byte-compatible with the root's shape, and
+	// it carries no parentID for Go to refuse. What keeps it off the pane is
+	// the plugin's child-session map -- the plugin saw the session.created that
+	// named the parent and a fresh Go process never can.
+	{"opencode/session_idle_child.json", "opencode", "session.idle", tmux.StateIdle, ""},
 	// session.created establishes parentage inside the plugin. It is not a
 	// state of the pane and the plugin never reports it.
-	{"opencode/session_created_root.json", "opencode", "session.created", ""},
-	{"opencode/session_created_child.json", "opencode", "session.created", ""},
+	{"opencode/session_created_root.json", "opencode", "session.created", "", ""},
+	{"opencode/session_created_child.json", "opencode", "session.created", "", ""},
 
 	// -- pi -------------------------------------------------------------
-	{"pi/session_start.json", "pi", "session_start", tmux.StateWorking},
-	{"pi/input.json", "pi", "input", tmux.StateWorking},
-	{"pi/tool_execution_start_bash.json", "pi", "tool_execution_start", tmux.StateWorking},
-	{"pi/tool_execution_start_read.json", "pi", "tool_execution_start", tmux.StateWorking},
-	{"pi/tool_execution_start_write.json", "pi", "tool_execution_start", tmux.StateWorking},
-	{"pi/tool_execution_start_subagent.json", "pi", "tool_execution_start", tmux.StateWorking},
-	{"pi/ui_prompt_start_input.json", "pi", "ui_prompt_start", tmux.StateBlocked},
+	{"pi/session_start.json", "pi", "session_start", tmux.StateWorking, ""},
+	// pi's prompt is under `text`, and goes the same nowhere.
+	{"pi/input.json", "pi", "input", tmux.StateWorking, ""},
+	{"pi/tool_execution_start_bash.json", "pi", "tool_execution_start", tmux.StateWorking, "run wc -l sample.txt"},
+	{"pi/tool_execution_start_read.json", "pi", "tool_execution_start", tmux.StateWorking, "read sample.txt"},
+	{"pi/tool_execution_start_write.json", "pi", "tool_execution_start", tmux.StateWorking, "write out.txt"},
+	// args here are {agent, async, task}: no path, no command, and `subagent`
+	// is not a tool whose argument shape anything here has verified. The tool
+	// name alone.
+	{"pi/tool_execution_start_subagent.json", "pi", "tool_execution_start", tmux.StateWorking, "subagent"},
+	// Rung 1 at its best: pi's title IS the literal question.
+	{"pi/ui_prompt_start_input.json", "pi", "ui_prompt_start", tmux.StateBlocked,
+		"Which sample color do you prefer?"},
 	// kind "custom" is an extension's own overlay and has no title at all. It
 	// still reports blocked: whether the screen really shows pi's selector is
 	// evidence rule 2's question, and rule 2 drops what no registered form
-	// confirms. That is the adjudication the form field exists to enable.
-	{"pi/ui_prompt_start_custom.json", "pi", "ui_prompt_start", tmux.StateBlocked},
-	{"pi/agent_settled.json", "pi", "agent_settled", tmux.StateIdle},
+	// confirms. That is the adjudication the form field exists to enable. With
+	// no title there is no text, and a blocked report with no text is a
+	// complete report.
+	{"pi/ui_prompt_start_custom.json", "pi", "ui_prompt_start", tmux.StateBlocked, ""},
+	{"pi/agent_settled.json", "pi", "agent_settled", tmux.StateIdle, ""},
 }
 
-// An unparseable payload is a silent no-op on a discriminated event, and does
-// not stop an undiscriminated one: Stop means the turn ended whatever else is
-// on stdin.
+// An unparseable payload is a silent no-op -- on a discriminated event because
+// its discriminator reads as "", and since Task 15 on an undiscriminated one
+// too.
+//
+// TASK 15 CHANGED THE SECOND HALF OF THIS TEST, and the change is deliberate
+// rather than incidental. Before it, "Stop means the turn ended whatever else
+// is on stdin" -- a Stop with junk on stdin still wrote idle. That reading is
+// what an absence-coded filter cannot afford: claude's root is coded by the
+// ABSENCE of agent_id, so a payload nobody could read is a payload in which
+// agent_id is absent for the worst possible reason, and reading it as a root
+// event is reading a parse failure as evidence. The tightening an
+// absence-coded filter can have is exactly this one: require that the payload
+// parsed and is the shape a hook sends.
+//
+// What it costs, stated rather than discovered: a Stop whose stdin was lost in
+// a wrapper writes nothing, and the pane keeps its working report until the
+// 60-second expiry. That is a late transition, not a wrong resting state.
 func TestAMalformedPayload(t *testing.T) {
 	for _, tc := range []struct {
 		name, event, stdin, want string
@@ -343,11 +432,21 @@ func TestAMalformedPayload(t *testing.T) {
 		{"a discriminated event with junk on stdin", "Notification", "not json at all", ""},
 		{"a discriminated event with no stdin", "Notification", "", ""},
 		{"a discriminated event with the wrong shape", "Notification", `{"notification_type":{"a":1}}`, ""},
-		{"an undiscriminated event with junk on stdin", "Stop", "not json at all", tmux.StateIdle},
-		{"an undiscriminated event with no stdin", "Stop", "", tmux.StateIdle},
+		{"an undiscriminated event with junk on stdin", "Stop", "not json at all", ""},
+		{"an undiscriminated event with no stdin", "Stop", "", ""},
+		// A JSON object is what every hook on all three agents sends. A
+		// scalar, an array or a truncated object is not one, and each is a
+		// different way for a wrapper or a schema change to go wrong.
+		{"an undiscriminated event with an array on stdin", "Stop", `["Stop"]`, ""},
+		{"an undiscriminated event with a truncated object", "Stop", `{"hook_event_name":"Stop"`, ""},
+		// The empty object still reports: it parsed, it is the right shape,
+		// and there is no agent_id in it. Without this row the test above is
+		// satisfied by a mutant that refuses every payload.
+		{"an undiscriminated event with an empty object", "Stop", `{}`, tmux.StateIdle},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, writes := reportOne(t, []string{"--agent", "claude", "--event", tc.event}, tc.stdin)
+			rep, writes := reportOne(t, []string{"--agent", "claude", "--event", tc.event}, tc.stdin)
+			got := rep.State
 			if tc.want == "" && writes != 0 {
 				t.Fatalf("wrote %q, want no write", got)
 			}
@@ -405,7 +504,12 @@ func TestEdgeAndReassertion(t *testing.T) {
 		// is the turn-start invariant, and a Stop that stayed silent here
 		// would lose this turn's badge.
 		r := &recordingTmux{standing: standingIdle}
-		runReportWith(t, r, []string{"--agent", "claude", "--event", "Stop"})
+		// The payload is the real thing since Task 15: an event's own JSON is
+		// now a precondition of reporting at all, because a payload nobody
+		// could read is a payload in which claude's agent_id is absent for the
+		// worst possible reason.
+		runReportWith(t, r, []string{"--agent", "claude", "--event", "Stop"},
+			withStdin(`{"hook_event_name":"Stop","background_tasks":[]}`))
 		if r.shows != 0 {
 			t.Errorf("an edge read the standing option %d times, want 0", r.shows)
 		}
@@ -507,9 +611,13 @@ func TestEdgeAndReassertion(t *testing.T) {
 			// The flag missing altogether: an integration that has not been
 			// updated, or one whose ctx read failed. It must fall to working,
 			// the state that expires on its own, and not to idle, which rests
-			// forever.
+			// forever. This is the contract Task 14 created and Task 17 has to
+			// honour, and Task 15 left it exactly as it found it: the
+			// discriminator's fail direction is about the FLAG, inside a
+			// payload that arrived.
 			`{"type":"session_start","reason":"startup"}`,
-			`not json at all`,
+			// A flag of the wrong TYPE reads as working too, for the same
+			// reason. Both branches here are known and only one of them rests.
 			`{"type":"session_start","wterm_is_idle":"yes"}`,
 		} {
 			r := &recordingTmux{standing: standingIdle}
@@ -520,6 +628,24 @@ func TestEdgeAndReassertion(t *testing.T) {
 			if got := wroteState(t, r); got != tmux.StateWorking {
 				t.Errorf("stdin %q wrote %q, want working", stdin, got)
 			}
+		}
+		// A payload that is not JSON at all is a different question from a
+		// flag that is missing, and Task 15 answers it differently: the
+		// payload gate refuses it before any discriminator runs. This row
+		// carried `not json at all` before that, under the working branch,
+		// and moving it here is the visible half of that change.
+		//
+		// The Task 14 contract is untouched by it. That contract is that an
+		// ABSENT OR MALFORMED wterm_is_idle reads as working -- the two rows
+		// above -- and an extension too old to send the flag still sends
+		// valid JSON. What is refused here is a payload that did not arrive,
+		// which is not evidence of anything and is not the case the
+		// splash-screen argument was about.
+		r := &recordingTmux{standing: standingIdle}
+		runReportWith(t, r, []string{"--agent", "pi", "--event", "session_start"},
+			withStdin(`not json at all`))
+		if r.shows != 0 || r.sets != 0 {
+			t.Errorf("an unreadable payload: shows=%d sets=%d, want 0 and 0", r.shows, r.sets)
 		}
 	})
 
@@ -678,7 +804,24 @@ func TestTheUnclassifiedDefault(t *testing.T) {
 // mapping in the table above writes what it would write as an edge. That is the
 // right fixture for a table test: it isolates what the table says from what the
 // pane happened to be carrying.
-func reportOne(t *testing.T, args []string, stdin string) (state string, writes int) {
+func reportOne(t *testing.T, args []string, stdin string) (rep tmux.Report, writes int) {
+	t.Helper()
+	value, writes := reportValue(t, args, stdin)
+	if writes == 0 {
+		return tmux.Report{}, 0
+	}
+	rep, ok := tmux.ParseReport(value, time.Now())
+	if !ok {
+		t.Fatalf("runReport%v wrote %q, which is not a readable report", args, value)
+	}
+	return rep, writes
+}
+
+// reportValue is reportOne one layer down: the raw string handed to tmux,
+// unparsed. A parsed report has been through SanitizeActivity a second time, so
+// asserting on the parse can hide what the value really said -- which matters
+// wherever the claim is about the text itself rather than about the state.
+func reportValue(t *testing.T, args []string, stdin string) (value string, writes int) {
 	t.Helper()
 	rec := &recordingTmux{}
 	var out, errb bytes.Buffer
@@ -695,11 +838,7 @@ func reportOne(t *testing.T, args []string, stdin string) (state string, writes 
 	if last == nil {
 		return "", 0
 	}
-	rep, ok := tmux.ParseReport(last[len(last)-1], time.Now())
-	if !ok {
-		t.Fatalf("runReport%v wrote %q, which is not a readable report", args, last[len(last)-1])
-	}
-	return rep.State, rec.sets
+	return last[len(last)-1], rec.sets
 }
 
 // runReportWith runs one report against a recording tmux and asserts only that

@@ -109,15 +109,55 @@ func reassertsFor(m mapping) bool {
 
 // textSource is where a mapping's activity text comes from.
 //
-// Task 15 owns it: the basename rule, the first-word rule, the tool name alone,
-// and the per-agent reductions that keep opencode's edit diff out of a 1 KiB
-// option. Declared here for the same reason as eventKind. Until it lands, the
-// integration form reports state only, which is a complete report -- a
-// three-part report is the ordinary Claude case and the reader accepts it.
+// It is declared here, next to the states, for the same reason eventKind is:
+// what an event MEANS and what it is allowed to SAY are one decision per row,
+// and separating them into two tables is how a row ends up accounted for by one
+// and not the other. activity.go holds the readers themselves -- the basename
+// default, the command sent whole, the tool name alone, and the per-class
+// reduction that keeps opencode's unbounded edit diff inside MaxReportBytes.
+//
+// THE LADDER, and which rung each source is. The label is the first of these
+// that is available, per agent:
+//
+//  1. The question, when blocked -- pi's ui_prompt_start.title, claude's
+//     Notification message, and for opencode a reduction of permission.asked,
+//     which carries no question at all.
+//  2. The current step, when opencode reports one: todo.updated's in_progress
+//     entry. Better than a tool call when it exists, because it is the agent's
+//     own statement of intent rather than a mechanical trace.
+//  3. The current tool call, verb plus object -- the command whole, a path
+//     reduced to its basename so the directories do not eat the line.
+//  4. Nothing -- AN EMPTY TEXT FIELD, NOT AN ABSENT REPORT. At turn end the
+//     integration reports idle with no text; the row falls back to the title
+//     and then to the command, and the STATE is still the agent's own.
+//
+// Rung 4 is why textNone is the zero value and why most rows carry it: a
+// three-part report is the ordinary claude case and the reader accepts three
+// parts or four.
 type textSource int
 
-// textNone is the zero value and today the only one: no activity text.
-const textNone textSource = 0
+const (
+	// textNone is the zero value: rung 4, a state-only report.
+	textNone textSource = iota
+	// textClaudeTool reads tool_name and tool_input.
+	textClaudeTool
+	// textClaudeNotification reads `message`. It is the only rung-1 field
+	// claude has, and it is not a question; see activityText.
+	textClaudeNotification
+	// textOpencodeTool reads input.tool and output.args -- the tool's
+	// arguments are under the SECOND of the hook's two arguments.
+	textOpencodeTool
+	// textOpencodeTodo reads the in_progress entry of properties.todos.
+	textOpencodeTodo
+	// textOpencodePermission reduces properties.metadata PER PERMISSION CLASS,
+	// because its keys vary by class and one of them is a full unified diff.
+	textOpencodePermission
+	// textPiTool reads toolName and args.
+	textPiTool
+	// textPiPrompt reads `title`, which pi is the only agent to send and which
+	// one captured kind omits entirely.
+	textPiPrompt
+)
 
 // mapping is what one (agent, event) means. The zero state is "ignore": no
 // write, no state change, no timestamp refresh, and not an error.
@@ -134,7 +174,13 @@ type mapping struct {
 	// resting claim for which no evidence can exist does not get to rest
 	// indefinitely.
 	form string
-	text textSource // Task 15
+	// text is which of activity.go's readers, if any, supplies this mapping's
+	// activity line. The zero value is rung 4 of the ladder -- no text -- and
+	// it is the right default for the three turn starts, whose only string is
+	// the prompt: history by the second tool call, and a fragment at 128
+	// runes. TestTheTextSourcesAreExactlyThese is the roll call that keeps a
+	// new one from being added without a reason next to it.
+	text textSource
 }
 
 // eventRule is one row of an agent's event table.
@@ -167,7 +213,8 @@ var eventRules = map[string]map[string]eventRule{
 		// tool calls keeps refreshing the 60-second working window -- and it is
 		// what the activity line comes from. It is also, see the file comment,
 		// what makes the connected-case blocked badge slower.
-		"PreToolUse": {mapping: mapping{name: "claude/PreToolUse", state: tmux.StateWorking, kind: kindEdge}},
+		"PreToolUse": {mapping: mapping{name: "claude/PreToolUse", state: tmux.StateWorking,
+			kind: kindEdge, text: textClaudeTool}},
 		// Not a state on its own. See claudeNotifications.
 		"Notification": {discriminate: claudeNotificationType, byValue: claudeNotifications},
 		// The turn end.
@@ -186,16 +233,19 @@ var eventRules = map[string]map[string]eventRule{
 		// turn -- 17 times in the three-tool turn Task 12 captured -- so
 		// nothing here may assume it arrives once.
 		"session.status": {discriminate: opencodeStatusType, byValue: opencodeStatuses},
-		"tool.execute.before": {mapping: mapping{
-			name: "opencode/tool.execute.before", state: tmux.StateWorking, kind: kindEdge}},
+		"tool.execute.before": {mapping: mapping{name: "opencode/tool.execute.before",
+			state: tmux.StateWorking, kind: kindEdge, text: textOpencodeTool}},
 		// The todo rung of the activity ladder. Rung 2, with the tool call
 		// underneath it, which is correct whether or not the list is empty.
-		"todo.updated": {mapping: mapping{name: "opencode/todo.updated", state: tmux.StateWorking, kind: kindEdge}},
+		"todo.updated": {mapping: mapping{name: "opencode/todo.updated", state: tmux.StateWorking,
+			kind: kindEdge, text: textOpencodeTodo}},
 		// The one blocked event any agent has that arrives with no delay.
-		// There is no question string on it -- see Task 15 -- but there does
-		// not need to be one for the state.
-		"permission.asked": {mapping: mapping{name: "opencode/permission.asked",
-			state: tmux.StateBlocked, kind: kindEdge, form: "opencode/permission"}},
+		// There is no question string on it -- the design says there is and the
+		// recorded payload says there is not -- but there does not need to be
+		// one for the state, and the text is reduced from `metadata` per
+		// permission class, whose keys vary and one of which is a whole diff.
+		"permission.asked": {mapping: mapping{name: "opencode/permission.asked", state: tmux.StateBlocked,
+			kind: kindEdge, form: "opencode/permission", text: textOpencodePermission}},
 		// The turn end. It carries a sessionID, and a subagent's arrives
 		// BEFORE the root's -- 2.05 s before, measured -- which is what Task
 		// 15's parentID filter is for. That filter lives in the plugin,
@@ -213,8 +263,8 @@ var eventRules = map[string]map[string]eventRule{
 		"session_start": {discriminate: piSessionStartIdle, byValue: piSessionStarts},
 		// The turn start.
 		"input": {mapping: mapping{name: "pi/input", state: tmux.StateWorking, kind: kindEdge}},
-		"tool_execution_start": {mapping: mapping{
-			name: "pi/tool_execution_start", state: tmux.StateWorking, kind: kindEdge}},
+		"tool_execution_start": {mapping: mapping{name: "pi/tool_execution_start",
+			state: tmux.StateWorking, kind: kindEdge, text: textPiTool}},
 		// Every kind of prompt, not only the numbered selector pi/selector was
 		// written against: one captured kind is "custom", an extension's own
 		// overlay with no title at all, and there are certainly more. Claiming
@@ -223,8 +273,8 @@ var eventRules = map[string]map[string]eventRule{
 		// matches no registered form for the agent, so a custom overlay that
 		// pi/selector cannot read costs a badge that lasts N_blocked polls,
 		// not one that lasts forever.
-		"ui_prompt_start": {mapping: mapping{name: "pi/ui_prompt_start",
-			state: tmux.StateBlocked, kind: kindEdge, form: "pi/selector"}},
+		"ui_prompt_start": {mapping: mapping{name: "pi/ui_prompt_start", state: tmux.StateBlocked,
+			kind: kindEdge, form: "pi/selector", text: textPiPrompt}},
 		// The turn end. Its entire payload is {"type":"agent_settled"} -- no
 		// session id, no agent id, no parent -- so nothing downstream of here
 		// can tell a root settle from an async subagent's, and Task 15's pi
@@ -262,8 +312,8 @@ var claudeNotifications = map[string]mapping{
 	// The only claude form any grammar can confirm, and the one claudeDialog
 	// was written against, so evidence rule 2 can adjudicate this badge rather
 	// than merely erase it.
-	"permission_prompt": {name: "claude/Notification(permission_prompt)",
-		state: tmux.StateBlocked, kind: kindEdge, form: "claude/permission"},
+	"permission_prompt": {name: "claude/Notification(permission_prompt)", state: tmux.StateBlocked,
+		kind: kindEdge, form: "claude/permission", text: textClaudeNotification},
 	// Claude Code is continuing the task.
 	"quota_auto_resume_fired": {name: "claude/Notification(quota_auto_resume_fired)",
 		state: tmux.StateWorking, kind: kindEdge},

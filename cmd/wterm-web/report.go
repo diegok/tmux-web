@@ -109,7 +109,28 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 	reassert := false
 
 	if integration {
-		m, known := lookupMapping(*agent, *event, readPayload(stdin))
+		payload := readPayload(stdin)
+		// The subagent filter, before the table. A report must only ever
+		// describe the ROOT session in its pane: TMUX_PANE is the same for a
+		// root session and its children on all three agents, so an unfiltered
+		// child event overwrites the root's state, and the specific damage is
+		// a child's turn end firing while the root is still working -- a false
+		// done badge, which is the failure v2 spent most of its complexity
+		// avoiding.
+		//
+		// It runs first because it is a claim about the PAYLOAD rather than
+		// about the event: a payload this subcommand could not read is not
+		// evidence that anything happened, whatever event name the caller put
+		// on the command line.
+		if root, why := payloadIsRoot(payload); !root {
+			// Worth a line, unlike an ignored notification_type. This one is
+			// either a subagent whose integration should not have spawned us
+			// or a payload that did not arrive, and both are things somebody
+			// debugging a missing badge needs to see.
+			fmt.Fprintf(stderr, "wterm-web report: refusing this %s %s payload: %s\n", *agent, *event, why)
+			return 0
+		}
+		m, known := lookupMapping(*agent, *event, payload)
 		if !known {
 			// A misconfigured integration, which is worth a line: an event
 			// name nobody recognises will never report anything, and silence
@@ -128,11 +149,13 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 		}
 		*state = m.state
 		reassert = reassertsFor(m)
-		// *text is empty by construction here -- --text belongs to the manual
-		// form and the two forms cannot be combined -- so the integration form
-		// reports state only. That is a complete report, not a degraded one: a
-		// three-part value is the ordinary claude case and the reader accepts
-		// three parts or four. Task 15 fills it in from m.text.
+		// *text was empty by construction -- --text belongs to the manual form
+		// and the two forms cannot be combined -- so the table's own reader is
+		// the only thing that can fill it. Most mappings have none, and that is
+		// rung 4 of the ladder: a three-part value is the ordinary claude case
+		// and the reader accepts three parts or four. What no reader ever
+		// returns is the user's prompt; see activity.go.
+		*text = activityText(m.text, payload)
 	}
 
 	switch *state {

@@ -241,7 +241,7 @@ func runInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fset := newFlagSet("install-integration", stderr,
 		"tmux-web install-integration --agent claude|opencode|pi [dir] [--global] [--yes] [--remove]")
 	agent := fset.String("agent", "", "which agent to install for: claude, opencode or pi")
-	global := fset.Bool("global", false, "install into the user's own configuration instead of a project (claude only)")
+	global := fset.Bool("global", false, "install into the user's own configuration instead of a project")
 	yes := fset.Bool("yes", false, "do not ask for confirmation")
 	remove := fset.Bool("remove", false, "remove what an install wrote, and nothing else")
 	operands, code, ok := parseFlags(fset, args)

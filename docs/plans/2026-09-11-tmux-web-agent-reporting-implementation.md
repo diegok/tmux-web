@@ -61,7 +61,7 @@ Per-package during a task: `go test ./internal/tmux/ -run TestName -v`, and `cd 
 1. **The report is not a fourteenth snapshot field.** `Format`'s last slot belongs to `@wterm_label`, and the last slot is the only position layer 2 of the label hardening protects. A second unsanitized field in the middle of the record fails *worse* than the label ever did: a surplus separator shifts every field after it and the row parses successfully **with another pane's values in it**. The report gets its own `list-panes` command inside the same fork.
 2. **A trailing `;` does not survive `set-option`, and `--` does not help.** tmux's own command parser eats it. So a state-only report is written `1;idle;<ts>` with three fields, and **the reader accepts three parts or four**. A reader demanding four rejects every Claude report.
 3. **The bracket set in the format string must be copied from source, not from prose.** `labelField` at `internal/tmux/snapshot.go:108` holds a *literal* newline byte and a *literal* `0x1f` byte. Written as a two-character `\n`, it leaves real newlines alive **and** puts a literal `n` in the set, so every lowercase `n` in a benign value becomes a space (`SECOnD` → `SECO D`). `[[:cntrl:]]` is worse: the `:` terminates the modifier's pattern and the whole expression expands to `""` for *every* value, good ones included.
-4. **`N_idle` and `N_blocked` are different numbers, and neither is ever written as a literal.** Both are expressed against `settleAfter` in code. A test hard-coding `3` or `4` passes straight through the next change to `settleAfter` — which is exactly how revision 3 shipped an off-by-one.
+4. **`N_idle` and `N_blocked` are different numbers, and neither is ever written as a literal.** Both are expressed against `settleAfter` in code. A test hard-coding `3` or `4` passes straight through the next change to `settleAfter` — which is exactly how revision 3 shipped an off-by-one. **But writing a test entirely against the constant is the opposite failure and is just as silent:** if a test's fixtures *and* its assertions are both written against the constant a mutant retargets, retargeting moves both sides at once and the mutant survives — a test that cannot fail is not caution, it is a false kill waiting to be recorded. The rule that satisfies both: **build the fixture from the constant the mutant does not touch (`settleAfter`), assert against the one it does (`NIdle`, `NBlocked`, `workingTTL`, `lateRepaintDwell`), and where a constant has a stated *relationship* rather than a measured value, assert that relationship on its own line.** `internal/tmux/report_test.go:56` is the model — one line, `MaxActivity != MaxLabel`, doing what none of the cap assertions around it can do. Where there is no relationship to assert, only a budget (`MaxReportBytes`, `reportFutureSkew`), literal fixtures either side of the boundary are the pattern, and Task 2 says so where they live.
 5. **Every write is fire-and-forget, and `wterm-web report` exits 0 unconditionally.** All three agents block on the hook: pi and opencode await handlers with no timeout at all, and Claude adds the full hook duration to the turn. A reporting integration that can stop an agent from working is worse than no reporting integration.
 6. **`asyncRewake` is never set on any hook this project installs.** An `"async": true` command hook has its exit code ignored *including exit 2* — unless `asyncRewake` is also set, which is documented as the thing that adds "exit code 2 wakes Claude". Setting it would re-arm the one sharp edge the exit-0 rule exists to blunt.
 
@@ -85,6 +85,10 @@ Each is carried into the task that would hit it, and repeated here so you meet t
 | Mid-turn stillness makes the classifier agree with an idle report before the turn ended | Tasks 7, 9 |
 | The classifier's tests run on a clock that starts at `time.Unix(0, 0)`, so "now minus the zero value is obviously huge" is false — a duration guard needs an explicit zero check | Task 21 |
 | A test fixture that does not exercise the mutant it names (`"01x"` against a `HasPrefix` mutant, an `ok` lookup of a key the mutant never produces) | Tasks 2, 3 |
+| **A self-referential assertion**: fixture and assertion both written against the constant the mutant retargets, so changing it moves both sides and the mutant survives | Tasks 5, 7, 8, 21 |
+| A boundary mutant (`>` against `>=`) asserted at a fixture that is not on the boundary — the two operators agree everywhere else | Tasks 5, 21 |
+| A **presence** assertion (`if _, ok := m[k]; !ok`) where the mutant changes the **value**, on a map every key is already in | Task 6 |
+| A one-pane tmux fixture against an option-scope mutant — tmux resolves `#{@wterm_agent}` pane → window → session → global, so a session-level `set` reads back through the *pane* format on every pane of the session | Task 6 |
 
 ---
 
@@ -411,12 +415,27 @@ func TestParseReport(t *testing.T) {
 		{"non-decimal timestamp", "1;idle;later", Report{}, false},
 		{"zero timestamp", "1;idle;0", Report{}, false},
 		{"negative timestamp", "1;idle;-5", Report{}, false},
+		// strconv does NOT refuse this on its own: ParseInt accepts a sign
+		// prefix for every base, exactly as Atoi does. What refuses it is the
+		// digits-only loop in the implementation below. Measured, Go 1.26.
 		{"timestamp with a plus", "1;idle;+1789075200000", Report{}, false},
 		// Discarded whole, not treated as stale: a future finishedAt is a done
 		// badge `seen` can never catch up with.
 		{"far future", "1;idle;1789075999000", Report{}, false},
 		// A second of clock jitter on the one machine involved is not an attack.
 		{"a moment in the future is tolerated", "1;idle;1789075201000", Report{StateIdle, 1789075201000, ""}, true},
+		// The pair above leaves reportFutureSkew free to be anything from one
+		// second to thirteen minutes -- neither row moves when the constant is
+		// retargeted anywhere inside that range, so neither pins it. Both rows
+		// are correctly CONSTRUCTED against the constant and survive any
+		// retargeting, which is why they say nothing about its value; and
+		// unlike MaxActivity/MaxLabel there is no relationship to another
+		// constant to assert instead. So the two rows below are literal
+		// offsets from `now` either side of the boundary, and they are the only
+		// thing that pins the number. Keep them literal; do not "simplify" them
+		// back to expressions in reportFutureSkew.
+		{"exactly the skew ahead is tolerated", "1;idle;1789075205000", Report{StateIdle, 1789075205000, ""}, true},
+		{"one millisecond past the skew is discarded", "1;idle;1789075205001", Report{}, false},
 		{"the past is fine -- freshness is not this function's job",
 			"1;working;1000", Report{StateWorking, 1000, ""}, true},
 	} {
@@ -442,8 +461,24 @@ func TestParseReportRefusesAnOversizeValue(t *testing.T) {
 		t.Fatal("a value over the byte cap must be discarded whole, before parsing")
 	}
 	// And the boundary is not off by one: a value at exactly the cap parses.
+	// Both halves above are written against MaxReportBytes, so they hold for
+	// any value of it -- retarget the constant at 128 or at 64 KiB and they
+	// both still pass. They test the > against the >=, and nothing else.
 	if _, ok := ParseReport(head+strings.Repeat("x", MaxReportBytes-len(head)), now); !ok {
 		t.Fatal("a value at exactly the cap must still parse")
+	}
+	// So the size itself is pinned here, with literals, and this is the only
+	// place it is. Nothing above pins MaxReportBytes = 1024 the way
+	// TestSanitizeActivityBounds pins MaxActivity with `MaxActivity !=
+	// MaxLabel`: there is no relationship to another constant to assert, only a
+	// budget -- 1 KiB for an option value the daemon carries through every
+	// poll, for every pane. Literal fixtures either side of it are the pattern
+	// for a constant like that. Do not "simplify" them into MaxReportBytes.
+	if _, ok := ParseReport(head+strings.Repeat("x", 1024), now); ok {
+		t.Error("a 1048-byte value parsed: MaxReportBytes has been widened past 1 KiB")
+	}
+	if _, ok := ParseReport(head+strings.Repeat("x", 1024-len(head)), now); !ok {
+		t.Error("a 1024-byte value was refused: MaxReportBytes has been narrowed below 1 KiB")
 	}
 }
 
@@ -556,9 +591,20 @@ func ParseReport(v string, now time.Time) (Report, bool) {
 	default:
 		return Report{}, false
 	}
-	// ParseInt rather than Atoi, for the explicit base: it refuses a leading
-	// "+" and every non-decimal spelling, so the only thing that parses is the
-	// only thing our own writer emits.
+	// Digits and nothing else, checked before strconv sees it. strconv does NOT
+	// do this for us: ParseInt accepts a sign prefix for every base, and Atoi
+	// is literally ParseInt(s, 10, 0), so both spell "+1789075200000" as a
+	// valid timestamp. Measured on Go 1.26. This loop is what actually holds
+	// the rule that the only thing that parses is the only thing our own writer
+	// emits, and it takes "-5" and the empty string with it.
+	for i := 0; i < len(parts[2]); i++ {
+		if parts[2][i] < '0' || parts[2][i] > '9' {
+			return Report{}, false
+		}
+	}
+	// ParseInt rather than Atoi for the explicit BIT SIZE, not for the base:
+	// Atoi is ParseInt at the width of an int, and on a 32-bit build every
+	// 13-digit unix-ms value is out of range there.
 	ms, err := strconv.ParseInt(parts[2], 10, 64)
 	if err != nil || ms <= 0 || ms > now.Add(reportFutureSkew).UnixMilli() {
 		return Report{}, false
@@ -603,10 +649,13 @@ func FormatReport(state string, ms int64, activity string) string {
 | Drop the version check | `unknown version` |
 | `parts[0] != ReportVersion` to `!strings.HasPrefix(parts[0], ReportVersion)` | `a version that merely starts with ours` |
 | Drop the state switch, or give it an accepting `default` | `unknown state`, `empty state`, `state case` |
-| `strconv.Atoi` in place of `ParseInt(..., 10, 64)` | `timestamp with a plus` |
-| Drop `ms <= 0` | `zero timestamp`, `negative timestamp` |
+| Drop the digits-only loop | `timestamp with a plus`. This is the row that refuses a sign prefix, and **strconv does not**: `ParseInt` accepts `+`/`-` for every base and `Atoi` is `ParseInt(s, 10, 0)` |
+| `strconv.Atoi` in place of `ParseInt(..., 10, 64)` | **nothing — equivalent, and record it as equivalent rather than as a kill.** With the digits-only loop in front of it the two differ only in bit size, which is unobservable on a 64-bit build. It is still written as `ParseInt(..., 10, 64)`, for the 32-bit build where `Atoi` would reject every 13-digit unix-ms value |
+| Drop `ms <= 0` | `zero timestamp`. (Not `negative timestamp` — the digits-only loop takes that one first, and both mutants have to be tried separately) |
 | Drop the future check | `far future` |
 | Future check without the skew (`ms > now.UnixMilli()`) | `a moment in the future is tolerated` |
+| `reportFutureSkew` retargeted (1s, 13min, anything) | `exactly the skew ahead is tolerated` and `one millisecond past the skew is discarded` — the two literal rows. Every other future row is constructed against the constant and survives any retargeting |
+| `MaxReportBytes` retargeted (128, 64 KiB) | the two literal rows in `TestParseReportRefusesAnOversizeValue`. The `MaxReportBytes`-relative halves survive it |
 | Drop `MaxReportBytes`, **or apply it after parsing** | `TestParseReportRefusesAnOversizeValue`. The second form is the subtle one: it still truncates the text through `MaxActivity`, so a test asserting only on `Activity` would not see it |
 | `len(v) > MaxReportBytes` to `>=` | the boundary half of the same test |
 | Drop the `SanitizeActivity` call inside `ParseReport` | `the text is sanitized on the way in` |
@@ -1330,9 +1379,16 @@ func TestReportsFreshness(t *testing.T) {
 
 	// Written against the constant, never against 60. The number is a guess
 	// (open question 2) and will change.
-	just := now.Add(workingTTL - time.Millisecond)
-	if _, ok := r.Observe("%1", w, "claude", just); !ok {
-		t.Fatal("a working report inside the window must still be in force")
+	//
+	// The in-force assertion is at EXACTLY workingTTL, not one millisecond
+	// short of it, and that is the whole point of it. `TTL - 1ms` is inside the
+	// window under `> workingTTL` and under `>= workingTTL` alike, so a fixture
+	// there cannot see the difference between the two operators and the `>=`
+	// mutant survives it. At exactly the boundary `>` keeps the report and `>=`
+	// expires it, and the fixture stays on the boundary whatever the constant
+	// becomes. Found by mutation.
+	if _, ok := r.Observe("%1", w, "claude", now.Add(workingTTL)); !ok {
+		t.Fatal("a working report at exactly workingTTL must still be in force: the comparison is `>`, not `>=`")
 	}
 	if _, ok := r.Observe("%1", w, "claude", now.Add(workingTTL+time.Second)); ok {
 		t.Fatal("a working report past the window must expire: a crashed agent must not show as busy")
@@ -1625,7 +1681,8 @@ func (p *Poller) classify(ctx context.Context, rows []Row, reports map[string]st
 | Drop the `!ok` clear (`return st.accepted, true` on an unset option) | `TestAnUnsetOptionClearsTheMemory` |
 | Drop the `KnownAgent` check | `TestReportsAreDroppedWhenTheAgentIsGone` |
 | Expire resting states too (drop the `State == StateWorking` guard) | `TestReportsFreshness`'s 24-hour assertions |
-| `now.Sub(...) > workingTTL` to `>=`, or to `<` | the boundary and the past-the-window assertions |
+| `now.Sub(...) > workingTTL` to `<` | the past-the-window assertion |
+| `now.Sub(...) > workingTTL` to `>=` | the assertion at **exactly** `now.Add(workingTTL)`, and only that one. A fixture at `workingTTL - time.Millisecond` does **not** kill it: `TTL-1ms > TTL` and `TTL-1ms >= TTL` are both false, so both operators keep the report and the mutant survives. Exactly the boundary is the only point at which the two differ |
 | `workingTTL` written as a literal `60` in the test | not a mutant — a **review check**. If any test in this task contains the number 60, reject it |
 | The capture taken *before* the report is consulted | `TestFreshReportSkipsTheCapture`'s empty `captured`. Asserting only on the state cannot see this: both authorities say `working` |
 | `p.classifier.Retain(agents)` instead of `Retain(captured)` | `TestACaptureSkippedPaneIsNotRetained` |
@@ -1734,11 +1791,31 @@ And the end-to-end one, which is the point of the task:
 // addresses whatever $TMUX names, so a test that let $TMUX leak through from
 // the environment it runs in would write into the developer's live session --
 // which holds real work and running agents.
+//
+// TWO panes, deliberately, and the second one is load-bearing. `set` without
+// `-p` writes a SESSION option, and tmux resolves #{@wterm_agent} up the
+// hierarchy -- pane, then window, then session, then global -- so a
+// session-level value shows through the PANE format on every pane of that
+// session. Measured on an isolated socket: after
+// `set -t probe @wterm_agent 'SESSIONLEVEL'`,
+// `list-panes -a -F '#{@wterm_agent}'` printed SESSIONLEVEL for both panes. A
+// one-pane fixture therefore cannot see the missing `-p` at all.
+//
+// And the assertion is on the VALUE, never on the presence of the key. Task 3's
+// batched read gives every pane a line, empty value and all, so
+// `if _, ok := reports[paneID]; !ok` is a check on something Task 3 guarantees
+// unconditionally -- it holds for a pane that was never written to, and it held
+// for the missing-`-p` mutant too.
 func TestReportReachesTheSnapshot(t *testing.T) {
 	agent := testutil.FakeAgent(t, "claude")
 	srv := testutil.NewServer(t)
 	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24", agent)
-	paneID := srv.Run(t, "list-panes", "-t", "work", "-F", "#{pane_id}")
+	srv.Run(t, "split-window", "-t", "work", "-d", agent)
+	panes := strings.Fields(srv.Run(t, "list-panes", "-t", "work", "-F", "#{pane_id}"))
+	if len(panes) != 2 {
+		t.Fatalf("setup: %d panes, want 2", len(panes))
+	}
+	paneID, otherPane := panes[0], panes[1]
 
 	env := map[string]string{
 		"TMUX":      srv.SocketPath() + ",1,0",
@@ -1757,13 +1834,24 @@ func TestReportReachesTheSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SnapshotAndReports: %v", err)
 	}
-	if _, ok := reports[paneID]; !ok {
-		t.Fatalf("no report for %s: %v", paneID, reports)
+	// The value, parsed. Not the key.
+	rep, ok := tmux.ParseReport(reports[paneID], time.Now())
+	if !ok || rep.State != tmux.StateWorking || rep.Activity != "running go test" {
+		t.Fatalf("report for %s = %q -> %+v, %v; want a working report reading %q",
+			paneID, reports[paneID], rep, ok, "running go test")
+	}
+	// The pane that was NOT written to must read empty. This is the half that
+	// kills the missing-`-p` mutant: a session option shows through the pane
+	// format on every pane of the session, so the mutant sets this one too.
+	if reports[otherPane] != "" {
+		t.Fatalf("the pane nobody reported on reads %q: the write was not scoped to a pane (`set` without `-p` sets a SESSION option, which tmux resolves through #{@wterm_agent} on every pane of the session)",
+			reports[otherPane])
 	}
 	// And through the poller's precedence, which is what the sidebar sees.
 	// ... build a poller over this server with Connected: func() bool { return false },
-	// assert the row reads working / event / "running go test" with NO client
-	// connected, which is the case the whole feature exists for.
+	// assert the row for paneID reads working / event / "running go test" with
+	// NO client connected, which is the case the whole feature exists for --
+	// and that the row for otherPane carries no agent state at all.
 	_ = rows
 }
 ```
@@ -1918,7 +2006,7 @@ Then the same value through the reader, which is what `TestReportReachesTheSnaps
 | Dropping the state switch | needs its own assertion: after `report --state nonsense`, the option must be **unset**, not merely the exit code 0. Add it, or the mutant that writes `1;nonsense;<ts>` survives |
 | Stamping `ms` after the tmux call returns | not observable in a unit test — a **review check**. The comment is the defence; if the `time.Now()` moves below the `Run`, reject it |
 | Writing to stdout | `TestReportAlwaysExitsZero`'s stdout assertion |
-| `set` without `-p` (a session option rather than a pane one) | `TestReportReachesTheSnapshot` — the report never appears against the pane |
+| `set` without `-p` (a session option rather than a pane one) | `TestReportReachesTheSnapshot`, and **only its `reports[otherPane] == ""` half**. Not "the report never appears against the pane" — it does appear: tmux resolves `#{@wterm_agent}` up the hierarchy (pane, window, session, global), so a session-level value reads back through the *pane* format on **every pane of that session**. Measured on an isolated socket. The mutant is visible only as the value leaking onto the pane nobody reported on, which is why the fixture has two panes. A presence check (`if _, ok := reports[paneID]; !ok`) sees nothing either way — Task 3 puts a line on the map for every pane, empty value and all |
 
 **Step 7: Commit**
 
@@ -1958,6 +2046,16 @@ All three rules require a connected client. With no client there is no screen to
 // The measured fixture, and the constants are the point of it. A test spelling
 // 3 and 4 out would pass straight through the next change to settleAfter --
 // which is exactly how revision 3 of the design shipped an off-by-one.
+//
+// EVERYTHING here is built from settleAfter and asserted against settleAfter,
+// and NIdle appears nowhere in this test. That is not style. NIdle is the
+// constant the headline mutant retargets, so a fixture driven by NIdle and an
+// assertion made against NIdle move TOGETHER when it is retargeted and the
+// mutant survives them both: with NIdle = settleAfter + 1 the window rejects at
+// poll 3, the fixture stops there, `captures == NIdle == 3`, green. Build from
+// the constant the mutant does not touch; assert against the one it does. The
+// model is TestSanitizeActivityBounds' `MaxActivity != MaxLabel` line
+// (internal/tmux/report_test.go:56).
 func TestIdleWindowSurvivesTheTurnEndRepaint(t *testing.T) {
 	// Poll 1: a first sight of the PRE-FINAL screen. The turn-end event fired
 	// 7-52 ms before the agent's last repaint, so the report is written to a
@@ -1966,17 +2064,33 @@ func TestIdleWindowSurvivesTheTurnEndRepaint(t *testing.T) {
 	// Polls 3..settleAfter+2: identical.
 	// The classifier says idle at poll settleAfter+2, the report stands, and
 	// finishedAt is derived from the REPORT's timestamp, not from now.
+	//
+	// The fixture drives its screens off settleAfter -- repaint at poll 2, then
+	// identical captures through poll settleAfter+2 -- and keeps feeding the
+	// poller until the window closes on its own.
 	...
-	if captures != NIdle {
-		t.Fatalf("took %d captures, want %d (settleAfter + 2)", captures, NIdle)
+	// settleAfter + 2, spelled out, NOT NIdle. This is the assertion that pins
+	// the constant, and it can only pin it by being written in something else.
+	if captures != settleAfter+2 {
+		t.Fatalf("took %d captures, want settleAfter+2 = %d (NIdle is %d)", captures, settleAfter+2, NIdle)
 	}
+	// And this is the assertion that actually kills NIdle = settleAfter + 1:
+	// the shortened window rejects the report at poll settleAfter+1, one poll
+	// before the classifier settles, so the pane falls through to the
+	// classifier and the row's finishedAt is no longer the report's own.
+	// Confirm the kill from THIS line. An implementer who writes the count
+	// assertion first and reads its green as a survival has learned nothing.
 	if row.FinishedAt != reportTS {
 		t.Fatalf("finishedAt = %d, want the report's own timestamp %d", row.FinishedAt, reportTS)
 	}
 }
 
-// The same fixture one poll short of the constant drops it. Written as a loop
-// over NIdle-1 so it moves with settleAfter.
+// The same fixture one poll short of the window drops it. Written against
+// settleAfter -- a loop over `settleAfter+1` polls -- and NOT over NIdle-1: a
+// bound written as NIdle-1 tracks the very constant the headline mutant
+// retargets, so it holds for settleAfter+1, settleAfter+2 and settleAfter+3
+// alike and proves nothing on its own. This test is a sibling of the one above,
+// not a substitute for it.
 func TestAWindowOnePollShortWouldDropATrueTurnEnd(t *testing.T) { ... }
 
 // A screen that changes at every poll for the whole window: dropped, no
@@ -2107,7 +2221,7 @@ In the poller's report branch, before setting the row: if `connected && rep.Stat
 
 | Mutant | Killed by |
 | --- | --- |
-| `NIdle = settleAfter + 1` | `TestIdleWindowSurvivesTheTurnEndRepaint`. **The headline mutant**: it is the value revision 3 of the design shipped, and it discards about 1 true turn end in 50 |
+| `NIdle = settleAfter + 1` | `TestIdleWindowSurvivesTheTurnEndRepaint`, at its **`row.FinishedAt != reportTS`** assertion — the shortened window rejects the report one poll before the classifier settles, the pane falls through to the classifier, and the row's `finishedAt` stops being the report's own. **Confirm the kill from that line, not from the capture count**, and note that the count assertion only helps because it is written `settleAfter+2`: a count compared against `NIdle` would move with the mutant and go green. **The headline mutant**: it is the value revision 3 of the design shipped, and it discards about 1 true turn end in 50 |
 | `NIdle = settleAfter + 3` (padding "for safety") | not killed by any test, and it should not be — say so in the commit. It is refused on the measurement, not on a test: a wider window accepts more mid-turn stillness as corroboration |
 | `NIdle` written as the literal `4` | a **review check**: change `settleAfter` to 3 locally and re-run the package. If nothing goes red, a literal has crept in |
 | `st.windowPolls >= NIdle` to `>` | `TestAWindowOnePollShortWouldDropATrueTurnEnd`'s sibling — add a churning-screen assertion that pins the exact poll at which the drop happens |
@@ -2152,14 +2266,37 @@ Rule 2's test needs a **true premise**, not a counter. Revision 2 of the design 
 // present, and the same screen after the dialog is answered. The off-by-one is
 // still a point; it is no longer the only point.
 func TestRule2NeedsATruePremise(t *testing.T) {
+	// The relationship, on its own line, first. Every count below is a count of
+	// POLLS, and a poll count written against NBlocked moves with NBlocked:
+	// retarget the constant at 4 and the fixture drives 4 polls, drops at 4 and
+	// not at 3, and the whole test is green on the mutant it exists to kill.
+	// Unlike Task 7 there is no second assertion here to catch it -- nothing in
+	// this test depends on anything but the count -- so the only thing that can
+	// pin the value is a statement of the relationship, in terms of a constant
+	// the mutant does not touch. This kills BOTH `NBlocked = NIdle` (which is
+	// settleAfter+2) and `NBlocked = settleAfter`. The model is
+	// TestSanitizeActivityBounds' `MaxActivity != MaxLabel` line
+	// (internal/tmux/report_test.go:56).
+	if NBlocked != settleAfter+1 {
+		t.Fatalf("NBlocked = %d, want settleAfter+1 = %d: rule 1 drops anything that moves before rule 2 sees it, so rule 2 never has to absorb a repaint and needs no R -- it is NOT NIdle (%d), and 4 must not be carried across",
+			NBlocked, settleAfter+1, NIdle)
+	}
+
 	blocked := readFixture(t, "claude-blocked.txt")
 	answered := readFixture(t, "claude-idle.txt")
 
 	// A settled screen with the dialog still on it never drops, at any count.
-	for i := 0; i < NBlocked*3; i++ { /* ... report stands ... */ }
+	// Bound written off settleAfter, like everything else here.
+	for i := 0; i < (settleAfter+1)*3; i++ { /* ... report stands ... */ }
 
-	// The same screen answered drops at exactly NBlocked settled polls, and not
-	// at NBlocked-1.
+	// The same screen answered drops at exactly settleAfter+1 settled polls,
+	// and not at settleAfter. Loop and boundary both built from settleAfter, so
+	// that they stay where they are when NBlocked is retargeted:
+	//
+	//   for i := 0; i < settleAfter+1; i++ { ... feed the answered screen ... }
+	//
+	// with the report asserted still standing after poll settleAfter and gone
+	// after poll settleAfter+1.
 }
 
 // Rule 2 asks "no registered form for this agent", not "not the one grammar
@@ -2269,8 +2406,8 @@ The poller captures a pane for as long as a `blocked` report stands, and feeds `
 | --- | --- |
 | Rule 1 keyed on `st.State == StateWorking` rather than `st.Changed` | `TestRule1DropsOnAChangedHashOnly` |
 | Rule 2's counter not reset when a form matches | `TestRule2NeedsATruePremise`'s "never drops at any count" |
-| `NBlocked = NIdle` | the exact-count half of `TestRule2NeedsATruePremise` |
-| `NBlocked = settleAfter` | the `NBlocked-1` assertion |
+| `NBlocked = NIdle` | `TestRule2NeedsATruePremise`'s **`NBlocked != settleAfter+1`** line, and nothing else. Not the exact-count half: every poll count in that test is written against `NBlocked`, so retargeting the constant moves the fixture and the assertion together — at `NBlocked = 4` the test drives 4 polls, drops at 4, does not drop at 3, green. The counts kill it only once they are built from `settleAfter` as well |
+| `NBlocked = settleAfter` | the same `NBlocked != settleAfter+1` line. Same reasoning: a `NBlocked-1` assertion tracks the mutant |
 | Rule 2 asking `blockedRules[agent][0]` rather than every form | `TestRule2AsksAboutEveryRegisteredForm` |
 | `IsBlocked` returning on the first form's verdict rather than any match | the same test |
 | Rule 2 applied while the screen is still churning | assert a churning screen with no dialog is rule 1's drop, not rule 2's — the tombstone is the same, but the counter must not advance |
@@ -2294,7 +2431,7 @@ git commit -m "feat: check a reported blocked against every registered screen fo
 The evidence rules say a report is "dropped". Left unspecified against an option that still holds the same value on the next poll, the daemon re-reads it, re-evaluates it, and flips it back to accepted the moment the screen settles again.
 
 - **The daemon keeps two timestamps per pane**: the last report it **accepted**, and the standing report if it was **rejected on evidence**. One slot each rather than a set — the option holds exactly one value, so the only report that can be re-seen is the current one.
-- **A report whose timestamp matches the rejection slot is re-rejected without re-evaluating the evidence**, whichever rule condemned it. The evidence that condemned it was a screen that has since moved on; re-running the test against a screen that has since settled is exactly how a dropped report comes back to life.
+- **The report in force is re-rejected, without re-evaluating the evidence, for as long as its own timestamp matches the rejection slot**, whichever rule condemned it. The evidence that condemned it was a screen that has since moved on; re-running the test against a screen that has since settled is exactly how a dropped report comes back to life. The comparison is against the report that has passed the ordering filter and is about to go into force — `st.accepted` — and **not** against the raw value just parsed off the option; the difference is not cosmetic and Step 2–4 gives the fixture that separates them.
 - **A rejection changes what is believed, not what was accepted.** Be precise about this, because the two are easy to conflate and Task 5's data model settles it: a report reaches the evidence rules only by passing the ordering filter first, so the condemned report **is** `st.accepted` and stays there. The rejection slot marks it as not in force; it does not rewind the filter. The filter therefore goes on measuring against that same timestamp, which is what makes a delayed older write a non-event: it is refused for being older, and refusing it must not clear the rejection.
 - **A newer value clears the rejection slot.** It is a different report and earns its own verdict.
 - **Across a restart both slots are empty**, so the standing report is a first sight: accepted by the ordering filter and then verified from scratch. A resting `idle` **enters the verification window** rather than being re-derived immediately, and a `blocked` that had been dropped can re-badge for up to `NBlocked` polls. That is the honest cost of holding the rejection in daemon memory rather than in tmux — bounded, one-shot, and only on restart.
@@ -2337,9 +2474,16 @@ func TestARejectionSurvivesADelayedOlderWrite(t *testing.T) {
 	// Then a delayed write lands carrying a timestamp T with T0 < T < T1 --
 	// a fire-and-forget working write from an earlier hook, arriving late.
 	//
-	//   (a) It is REFUSED: it is older than st.accepted, so nothing goes into
-	//       force and the pane stays on the classifier. A mutant that accepts
-	//       it puts a stale `working` back on the row.
+	//   (a) It is REFUSED and NOTHING goes into force on that poll: the pane
+	//       stays on the classifier. Assert both halves -- that the row does
+	//       not read `working` (a mutant that accepts the late write puts a
+	//       stale working on the row) AND that it does not read the rejected
+	//       idle either. The second half is the one that catches the rejection
+	//       guard written on `parsed.Timestamp` at the entry rather than on
+	//       `st.accepted.Timestamp` at the return: the late write does not
+	//       match the slot, so an entry guard lets the poll through, the
+	//       ordering filter refuses the write, and the function then hands back
+	//       st.accepted -- the rejected report -- with ok = true.
 	//   (b) It does not clear the rejection, and the only way to see that is to
 	//       keep polling: the NEXT poll re-reads the standing idle@T1 -- the
 	//       option still holds it -- and it must still be refused, with NO
@@ -2367,7 +2511,31 @@ func TestAfterARestartAStandingIdleEntersTheWindow(t *testing.T) {
 }
 ```
 
-**Step 2–4: Run (FAIL), implement, run (PASS).** `reportState` gains `rejected int64`; `Observe` refuses a parsed report whose `Timestamp == st.rejected` before anything else looks at it, and clears `st.rejected` when a strictly newer value arrives.
+**Step 2–4: Run (FAIL), implement, run (PASS).** `reportState` gains `rejected int64`. The guard goes **on `st.accepted` at the return, not on `parsed` at the entry**, and this is the part to get right:
+
+```go
+	// ... the ordering filter from Task 5, with one line added:
+	if parsed.Timestamp > st.accepted.Timestamp {
+		st.accepted = parsed
+		// A newer value is a different report and earns its own verdict.
+		st.rejected = 0
+	}
+	// The guard is on what is ABOUT TO GO INTO FORCE, which is st.accepted --
+	// never on `parsed` at the top of the function. A delayed older write does
+	// not match the rejection slot (it carries its own, earlier timestamp), so
+	// an entry guard waves it through; the ordering filter then refuses it for
+	// being older, leaves st.accepted alone -- and st.accepted IS the report
+	// that was rejected on evidence, which the function would then return with
+	// ok = true. The rejected report comes back in force on the strength of an
+	// unrelated late write. Written here, the same poll returns nothing in
+	// force, whichever value tmux happened to be holding.
+	if st.accepted.Timestamp == st.rejected {
+		return Report{}, false
+	}
+	// ... the workingTTL check, then `return st.accepted, true`.
+```
+
+Note that this is also what makes the design's own sentence above true — "refusing it must not clear the rejection". Refusing a delayed older write leaves both slots untouched, and the pane stays on the classifier.
 
 **The alternative that must not be built:** writing the rejection back into the option so it survives with the report. Rejected on a rule this design has held since "Not `@wterm_label`" — **the daemon reads that option, it does not write it.** A reader that edits the channel it reads cannot be reasoned about when two of them run, and nothing promises `wterm-web` is a singleton.
 
@@ -2378,8 +2546,10 @@ func TestAfterARestartAStandingIdleEntersTheWindow(t *testing.T) {
 | Clear the rejection on a classifier `idle` verdict (revision 4's behaviour) | `TestARejectionIsNotClearedByAClassifierIdle`. **This is the mutant the test exists for**, and it is the one a reader will re-add as an improvement |
 | Give rule 3 a different slot semantic from rules 1 and 2 | the same test's loop over all three |
 | Clear `st.rejected` on any parsed value rather than only on a strictly newer one | `TestARejectionSurvivesADelayedOlderWrite`'s half (b) |
-| Accept a report older than `st.accepted` after a rejection ( `>` to `>=`, or dropping the comparison) | the same test's half (a) |
-| `Timestamp == st.rejected` to `<=` | a newer report after a rejection is refused; `TestANewerValueClearsTheRejection` |
+| Accept a report older than `st.accepted` after a rejection (dropping the ordering comparison) | the same test's half (a) |
+| `parsed.Timestamp > st.accepted.Timestamp` to `>=` | still nothing, exactly as in Task 5 — it changes only what happens to two writes in the same millisecond, and the delayed-older-write fixture (`T < T1`) is false under both operators. Do not list it here as killed by half (a); it is the same honest survivor Task 5 already records |
+| `st.accepted.Timestamp == st.rejected` to `>=` | a newer report after a rejection is refused; `TestANewerValueClearsTheRejection`. (**Not `<=`** — that one is *equivalent* and no test can kill it: after a newer value clears the slot `st.rejected` is 0 and `st.accepted.Timestamp <= 0` is false, and whenever the slot is set the two timestamps are equal, so `<=` behaves exactly as `==` everywhere. `>=` is the mutant with a difference) |
+| The guard written on `parsed.Timestamp` at the entry instead of on `st.accepted.Timestamp` at the return | `TestARejectionSurvivesADelayedOlderWrite` half (a). The delayed write carries its own earlier timestamp, so it does not match the slot and the entry guard waves it through; the ordering filter then refuses it and the function returns `st.accepted` — which *is* the rejected report — with `ok = true` |
 | Persist the rejection across a fresh `Reports` | `TestAfterARestartAStandingIdleEntersTheWindow` |
 | Re-evaluate the evidence for a re-seen rejected report | assert the poller takes **no capture** for a pane whose standing report is already rejected and whose fallback classifier path has settled |
 
@@ -3630,11 +3800,37 @@ func TestObserveDoesNotRestampWithinTheDwell(t *testing.T) {
 			9*time.Second, first, st.FinishedAt)
 	}
 
+	// A genuine second run whose stamp attempt lands at EXACTLY
+	// `first + lateRepaintDwell` still stamps. This is the assertion that kills
+	// `>=` -> `>`, and it is the only one that can: seconds past the boundary
+	// the two operators agree, so the "beyond the dwell" assertion below --
+	// which advances lateRepaintDwell + time.Second and then runs a whole
+	// change-and-settle on top of that, landing several more seconds out -- is
+	// green under both. Found by mutation.
+	//
+	// Built backwards from the boundary rather than forwards from `now`, so
+	// that it stays exactly on it whatever lateRepaintDwell becomes: the
+	// SETTLING poll is placed at time.UnixMilli(first).Add(lateRepaintDwell),
+	// and the one changed capture that opens the run is stepped back
+	// settleAfter polls of 1.5s from there, so the settleAfter-th identical
+	// comparison lands exactly on it. On today's constants (settleAfter 2,
+	// dwell 15s) the settling poll is the 10th 1.5s poll after the first stamp.
+	settleAt := time.UnixMilli(first).Add(lateRepaintDwell)
+	now = settleAt.Add(-1500 * time.Millisecond * time.Duration(settleAfter))
+	// ... one changed capture at `now`, then settleAfter identical ones at
+	// 1.5s steps, the last of them at exactly settleAt ...
+	if st.FinishedAt != settleAt.UnixMilli() {
+		t.Fatalf("a finish at exactly lateRepaintDwell after the last one did not stamp (finishedAt %d, want %d): the comparison is `>= lateRepaintDwell`, not `>`",
+			st.FinishedAt, settleAt.UnixMilli())
+	}
+
 	// And a genuine second run, beyond the dwell, still stamps -- or the badge
-	// works once per pane per dwell forever.
+	// works once per pane per dwell forever. This one pins `lateRepaintDwell =
+	// 0` and the stamp-once-per-pane mutant; it does NOT pin `>=` against `>`.
+	second := st.FinishedAt
 	now = now.Add(lateRepaintDwell + time.Second)
 	// ... change, change, settle ...
-	if st.FinishedAt <= first {
+	if st.FinishedAt <= second {
 		t.Fatalf("a real second finish beyond the dwell did not stamp")
 	}
 }
@@ -3716,7 +3912,8 @@ and the guard, which needs no new state — `p.finishedAt` is already there — 
 | --- | --- |
 | Drop the dwell conjunct | `TestObserveDoesNotRestampWithinTheDwell`'s middle assertion |
 | Drop the `p.finishedAt == 0` disjunct (the "it is trivially true anyway" simplification) | `TestAShortTurnStillStamps` **and the whole existing v2 stamp suite** — `TestClassifierWorkingAndIdle` first, because on a `time.Unix(0, 0)` clock the first genuine stamp is 7.5 seconds from the epoch (0 -> 1.5 -> 3.0 settles without stamping -> 4.5 changes -> 6.0 -> 7.5 stamps), and the next one 4.5s later is refused too. Run `go test ./internal/tmux/` after applying it: if only the new test goes red, a fixture has drifted onto a wall clock |
-| `>=` to `>` , or the subtraction reversed | the beyond-the-dwell assertion |
+| the subtraction reversed (`time.UnixMilli(p.finishedAt).Sub(now)`) | the beyond-the-dwell assertion |
+| `>=` to `>` | **only** the assertion at exactly `first + lateRepaintDwell`. Not the beyond-the-dwell one: that fixture advances `lateRepaintDwell + time.Second` and then runs a whole change-and-settle on top, landing seconds past the boundary where `>` and `>=` agree, so the mutant survives it. The boundary is the one point at which they differ, and a stamp attempt has to be placed on it exactly — settle poll at `time.UnixMilli(first).Add(lateRepaintDwell)`, which on today's constants is the 10th 1.5 s poll after the first stamp |
 | `lateRepaintDwell = 0` | the middle assertion |
 | Guard with `p.finishedAt == 0` instead (stamp once per pane, ever) | the beyond-the-dwell assertion. This is v2's own recorded trap arriving through a new door |
 | Require a run of changed polls instead of the dwell | `TestAShortTurnStillStamps` — **the wrong fix the measurement refutes** |

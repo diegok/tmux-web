@@ -271,7 +271,10 @@ export function AppSidebar({
                     sidebar keyed and labelled on it shows the pre-rename name
                     forever -- which makes renaming from the browser look like it
                     did nothing. The key is still the identity: it is the React
-                    key, the `?session=` value and what a click carries.
+                    key and what a click carries -- but never an address.
+                    `?session=` carries the session id instead: the group key is
+                    frozen at the name the group was created under, so attaching
+                    by it 404s the moment somebody renames. See `attachTarget`.
                   */}
                   <span className="truncate">{session.name}</span>
                   {session.appOnly && (

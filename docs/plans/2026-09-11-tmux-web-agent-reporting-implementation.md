@@ -83,6 +83,8 @@ Each is carried into the task that would hit it, and repeated here so you meet t
 | A turn end with no preceding `working` loses its badge | Task 14 |
 | A rule-2 test that tests the counter over a false premise | Task 8 |
 | Mid-turn stillness makes the classifier agree with an idle report before the turn ended | Tasks 7, 9 |
+| The classifier's tests run on a clock that starts at `time.Unix(0, 0)`, so "now minus the zero value is obviously huge" is false — a duration guard needs an explicit zero check | Task 21 |
+| A test fixture that does not exercise the mutant it names (`"01x"` against a `HasPrefix` mutant, an `ok` lookup of a key the mutant never produces) | Tasks 2, 3 |
 
 ---
 
@@ -112,7 +114,7 @@ Every task is independently committable and reviewable. Where a task changes the
 | 6 | `wterm-web report`, skeleton | `--state`/`--text`, `$TMUX`/`$TMUX_PANE`, one `set-option`, exit 0 always. **First end-to-end demo** |
 | 7 | Evidence rule 3, the idle verification window | `NIdle = settleAfter + 2`, the window closes at the verdict, and a capture-skipped pane is a first sight |
 | 8 | Evidence rules 1 and 2, and the form registry | `blockedRules` holds several named forms per agent; rule 2 drops only when **no** registered form matches; `NBlocked = settleAfter + 1` |
-| 9 | The rejection slot | One semantic for all three rules; a classifier `idle` does not clear one; a rejection never advances the ordering filter |
+| 9 | The rejection slot | One semantic for all three rules; a classifier `idle` does not clear one; only a strictly newer report does, and a delayed older write clears nothing |
 | 10 | `finishedAt` and the authority switch | Derived statelessly from a resting report; report→classifier stamps nothing, classifier→report does |
 | 11 | The row in the browser | `paneText` becomes question → label → activity → title → command; the label joins the first line when both exist; `stateSource` must not change a row's appearance |
 | 12 | Recorded hook payloads as fixtures | One file per agent per event, captured from your own content; the two that matter most are a real `agent_settled` and a real `session.idle` taken while a subagent runs |
@@ -394,7 +396,13 @@ func TestParseReport(t *testing.T) {
 		{"two parts", "1;idle", Report{}, false},
 		{"unknown version", "2;idle;" + ts, Report{}, false},
 		{"empty version", ";idle;" + ts, Report{}, false},
-		{"a version that merely starts with ours", "01x;idle;" + ts, Report{}, false},
+		// The fixture must START WITH "1", or it does not exercise the mutant it
+		// is here for: strings.HasPrefix("01x", "1") is false, so a prefix-match
+		// mutant rejects "01x" exactly as correct code does and survives the
+		// whole table. Schema 10 is the case this will really be: it is a
+		// different schema and must not be read as this one.
+		{"a version that merely starts with ours", "10;idle;" + ts, Report{}, false},
+		{"a version with a suffix", "1x;idle;" + ts, Report{}, false},
 		{"unknown state", "1;thinking;" + ts, Report{}, false},
 		{"empty state", "1;;" + ts, Report{}, false},
 		// A state differing only in case is not the state. The writer is ours;
@@ -620,6 +628,7 @@ git commit -m "feat: parse and format the @wterm_agent report value"
 - Modify: `internal/tmux/report.go`, `internal/tmux/report_test.go`
 - Modify: `internal/tmux/client.go`
 - Create: `internal/tmux/report_integration_test.go` (package `tmux_test`, real tmux)
+- Create: `internal/tmux/report_internal_test.go` (package `tmux`, real tmux — it swaps `batchArgs`, which is unexported; `snapshot_label_internal_test.go` is the precedent for both)
 
 **The report is not a fourteenth snapshot field, and this is the task where somebody will try to make it one.** `Format`'s last slot belongs to `@wterm_label`, and the last slot is the only position layer 2 of the hardening protects. A second unsanitized field in the *middle* of the record fails worse than the label ever did: a surplus separator at index *k* shifts every field after it, the greedy last field absorbs the overflow, and the row **parses successfully with another pane's values in it**. `ParseRows` cannot detect that. So the report is read by a **second `list-panes`, with its own format string, in the same tmux invocation**.
 
@@ -729,9 +738,28 @@ func TestParseReports(t *testing.T) {
 	if got, ok := reports["%2"]; !ok || got != "" {
 		t.Errorf("reports[%%2] = %q, ok=%v; want an empty value present", got, ok)
 	}
-	if _, ok := reports["S"]; ok {
-		t.Error("a snapshot line was read as a report: the tag is the discriminator")
+	// The exact key set, and it has to be the key SET.
+	//
+	// `if _, ok := reports["S"]; ok` is the assertion this wants to be and it
+	// cannot fail: drop the tag check from ParseReports and a snapshot line
+	// splits SplitN(line, Sep, 3) into ("S", "work", <the rest>), so it is keyed
+	// "work" -- parts[1] -- and never "S". The mutant it exists for survives it.
+	if len(reports) != 2 {
+		t.Errorf("reports = %v, want exactly two entries, for %%1 and %%2: a third "+
+			"entry keyed by a snapshot line's SECOND field is what a missing tag "+
+			"check looks like", reports)
 	}
+}
+
+// ParseRows' own tag check, which the batch fixture above cannot see: with the
+// reportTag `continue` sitting above it, a report line is skipped either way.
+// What the check is really for is a line that is neither block, and the only
+// way to produce one is to write it.
+func TestParseRowsRefusesALineWithAnUnknownTag(t *testing.T) {
+	// A record with the full fieldCount fields and the tag "X". It must be
+	// counted dropped and must not become a Row -- otherwise the tag is not the
+	// discriminator, the field count is, which is the thing this whole design
+	// refuses to rely on.
 }
 
 // A report value that arrived with a separator in it -- which needs layer 1 to
@@ -810,6 +838,18 @@ func TestReportFormatRoundTripsThroughRealTmux(t *testing.T) {
 // Sibling to TestSnapshotHostileLabelCannotRemoveAPane. It should pass
 // trivially, because @wterm_agent is not in Format at all -- and it is worth
 // having precisely so that the day somebody appends it there, this goes red.
+//
+// Worth recording, because the batched read opens a direction the label
+// hardening did not have to think about: the two blocks share one stdout, so if
+// layer 1 ever failed open, a newline inside a hostile LABEL could forge a
+// whole REPORT-block line -- "...\nA<Sep>%2<Sep>1;idle;<ts>" -- and thereby set
+// another pane's state. It is not worth a code change: the value has to be
+// written through the tmux socket, and anyone holding that socket can
+// `set -p -t %2 @wterm_agent` directly with no forgery at all. It is worth
+// writing down so nobody rediscovers it years from now and reads it as a hole.
+// What bounds it is unchanged and is layer 1 plus layer 3: the substitution
+// turns both record-breaking bytes into spaces, and ParseReport re-sanitises
+// whatever arrives.
 func TestHostileAgentReportCannotRemoveAPane(t *testing.T) {
 	srv := testutil.NewServer(t)
 	srv.Run(t, "new-session", "-d", "-s", "probe", "-x", "80", "-y", "24")
@@ -837,16 +877,60 @@ func TestHostileAgentReportCannotRemoveAPane(t *testing.T) {
 	}
 }
 
+```
+
+And one more against real tmux, in **`internal/tmux/report_internal_test.go`** — `package tmux`, not `tmux_test`, for the reason given below. The precedent for both the file and the technique is `snapshot_label_internal_test.go`, which is `package tmux`, imports `testutil` (no cycle), and drives a real server with one internal constant swapped out:
+
+```go
+package tmux
+
 // A failure in the second command must cost the reports and never the sidebar.
 // Measured in the design and re-measured in step 1: the first command's output
 // is complete on stdout before the error, so the daemon parses stdout on its
 // own terms and does NOT gate on the exit status. "Check the error first" is
 // the reflex, and here the reflex trades a degraded feature for a blank
 // sidebar.
+//
+// THE SEAM IS THE POINT OF THIS TEST. SnapshotAndReports takes no arguments and
+// calls batchArgs() itself, so there is no way in from outside: a test that
+// drove runKeepingOutput directly with a broken argv would assert that
+// runKeepingOutput keeps its output -- which it plainly does -- and would NOT
+// kill the mutant this test exists for, "SnapshotAndReports returns early on
+// err != nil". So batchArgs is declared as a package-level var holding a func,
+// and this test replaces it for the duration. That is the whole reason it is a
+// var rather than a func; say so at the declaration.
+//
+// Not parallel, and it restores the var with t.Cleanup: it is process-wide
+// state for as long as it is swapped.
 func TestABrokenReportReadStillYieldsTheSnapshot(t *testing.T) {
-	// Drive the same argv the client builds, with the report command pointed at
-	// a target that does not exist, through the real server.
-	// ... assert: rows parse, reports is empty, err is nil.
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "probe", "-x", "80", "-y", "24")
+
+	orig := batchArgs
+	t.Cleanup(func() { batchArgs = orig })
+	batchArgs = func() []string {
+		return []string{
+			"list-panes", "-a", "-F", Format,
+			// The report command, pointed at a target that does not exist.
+			";", "list-panes", "-t", "nosuch", "-F", ReportFormat,
+		}
+	}
+
+	rows, reports, err := NewClient(srv.Args()).SnapshotAndReports(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v; a failed report read must not fail the poll", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want the snapshot block intact despite the nonzero exit", len(rows))
+	}
+	if len(reports) != 0 {
+		t.Fatalf("reports = %v, want none", reports)
+	}
+
+	// The sibling that keeps the rule from becoming "ignore the error": with
+	// NOTHING usable on stdout the error must come back. Kill the server and
+	// re-run -- noServer() must still be the only silent path.
+	// ...
 }
 ```
 
@@ -854,7 +938,7 @@ func TestABrokenReportReadStillYieldsTheSnapshot(t *testing.T) {
 
 ```bash
 go test ./internal/tmux/ -run 'TestReportFormat|TestParseReports' -v
-go test ./internal/tmux/ -run 'Report.*Tmux|HostileAgentReport' -v
+go test ./internal/tmux/ -run 'Report.*Tmux|HostileAgentReport|ABrokenReportRead' -v
 ```
 
 **Step 4: Implement**
@@ -992,7 +1076,14 @@ func (c *Client) Run(ctx context.Context, args ...string) (string, error) {
 //
 // A lone ";" argv element is tmux's own command separator -- the same shape
 // AttachArgs already uses. There is no shell here, so it needs no escaping.
-func batchArgs() []string {
+//
+// It is a var rather than a func for exactly one reason: SnapshotAndReports
+// takes no arguments and calls this itself, so this is the only seam through
+// which a test can make the SECOND command fail while the first succeeds. That
+// is what TestABrokenReportReadStillYieldsTheSnapshot swaps, and without the
+// seam the rule "parse stdout on its own terms, do not gate on the exit status"
+// has no test that can see it. Nothing in production reassigns it.
+var batchArgs = func() []string {
 	return []string{
 		"list-panes", "-a", "-F", Format,
 		";", "list-panes", "-a", "-F", ReportFormat,
@@ -1051,7 +1142,8 @@ The frontend suite must stay green here: no json tag changed, so the contract te
 | Append `reportField` to `formatFields` and drop the second command | `TestReportFormat`'s first assertion, and `TestHostileAgentReportCannotRemoveAPane` |
 | Put `reportField` before the label in `formatFields` | `TestFormatFieldCount`'s "label must be last" |
 | `ParseRows` counts report lines as `dropped` | `TestParseReports`'s `dropped != 0` |
-| `ParseRows` accepts a line without checking `fields[0] == snapshotTag` | `TestParseReports`'s `reports["S"]` sibling — add the reverse assertion (a report line must not become a Row) if it is missing |
+| `ParseRows` accepts a line without checking `fields[0] == snapshotTag` | `TestParseRowsRefusesALineWithAnUnknownTag`. The batch fixture cannot kill this one: the `reportTag` continue sits above the check, so a report line is skipped either way, and a report line is too short for `fieldCount` regardless. It takes a synthetic full-width record tagged `X` |
+| `ParseReports` drops its `parts[0] != reportTag` check | `TestParseReports`'s **key-set** assertion — not an `ok` lookup of `"S"`, which passes under the mutant because the line is keyed `"work"` |
 | `ParseReports` uses `Split` rather than `SplitN(…, 3)` | `TestParseReportsRejoinsASurplusSeparator` |
 | `ParseReports` skips empty values (`if parts[2] == "" { continue }`) | `TestParseReports`'s `%2` present-and-empty assertion. **This is the tempting "cleanup"** and it is what makes "a pane with no report" and "a pane the batch did not mention" indistinguishable |
 | `SnapshotAndReports` returns early on `err != nil` | `TestABrokenReportReadStillYieldsTheSnapshot` |
@@ -1062,6 +1154,7 @@ The frontend suite must stay green here: no json tag changed, so the contract te
 
 ```bash
 git add internal/tmux/report.go internal/tmux/report_test.go internal/tmux/report_integration_test.go \
+        internal/tmux/report_internal_test.go \
         internal/tmux/snapshot.go internal/tmux/snapshot_test.go internal/tmux/client.go
 git commit -m "feat: read @wterm_agent in the poll's own tmux invocation"
 ```
@@ -1185,6 +1278,14 @@ That last row supersedes v2's rule that `AgentState` is empty whenever no browse
 3. **An unset or unparseable value clears the memory.** Otherwise `tmux set -p -u @wterm_agent`, the documented escape hatch for a stuck report, does nothing.
 4. **A capture-skipped pane is not passed to `Retain`.** Its classifier entry is dropped, so the first capture whenever one is taken again is a **first sight**. Two reasons, and Task 7 rests on the second: `Observe`'s contract is "changed since the previous poll" at a fixed 1.5s interval, and a baseline from minutes ago answers a different question; and a retained baseline that differs sets `everChanged`, which is the flag licensing a `time.Now()` finish stamp.
 
+**What dropping does NOT mean, and this is a bounded exposure the task accepts rather than a gap to close.** `delete(r.panes, paneID)` forgets the pane; it does not tombstone it. So a pane that goes `claude` → `zsh` → `claude` is a **first sight** for the relaunched agent, and the stale `@wterm_agent` value tmux is still holding — tmux options outlive the process that wrote them — is accepted on the terms every first sight is accepted on. **Do not build a tombstone to prevent that.** Three reasons, and the first is decisive on its own:
+
+- A tombstone in `Reports` cannot deliver the property anyway. `classify` never reaches `Observe` for a non-agent pane (it `continue`s on `agent == ""`), and then calls `p.reports.Retain(agents)` — where the `zsh` pane is absent, so the entry *and* any tombstone beside it are deleted one line later. The unit test would be green and the deployed behaviour unchanged: this plan's own named failure mode.
+- It is the same exposure the design already accepts and documents elsewhere. Task 9's restart case is identical — both slots empty, the standing report a first sight — and the answer there is not a tombstone either.
+- What it costs is bounded and self-clearing: the relaunched agent's row shows the previous agent's resting state, with `finishedAt` derived from the **old** timestamp, until that agent's first turn start writes `working` (the turn-start invariant, which every integration has). With a client connected the `idle` also has to get past the verification window first. A device that had already seen that `finishedAt` does not re-badge, because the browser compares against the value it was shown. The escape hatch is `tmux set -p -u @wterm_agent`, which Task 5 already makes work.
+
+The only complete fix is a writer-side one — the integration clearing the option as the agent exits — and no agent gives a shutdown event any of them can be trusted to deliver. Record this in the commit message; do not implement half of it.
+
 **Step 1: Write the failing tests**
 
 ```go
@@ -1265,10 +1366,9 @@ func TestReportsAreDroppedWhenTheAgentIsGone(t *testing.T) {
 	if _, ok := r.Observe("%1", v, "zsh", now.Add(time.Second)); ok {
 		t.Fatal("a report on a pane that is no longer an agent must be dropped")
 	}
-	// And it does not come back when an agent is relaunched into that pane.
-	if _, ok := r.Observe("%1", v, "claude", now.Add(2*time.Second)); ok {
-		t.Fatal("a dropped report must not resurrect for a newly launched agent")
-	}
+	// There is deliberately no third assertion here. See "What dropping does
+	// NOT mean" below: a claude -> zsh -> claude pane IS a first sight, and a
+	// first sight is accepted.
 }
 
 func TestAnUnsetOptionClearsTheMemory(t *testing.T) {
@@ -1395,6 +1495,11 @@ func (r *Reports) Observe(paneID, raw, command string, now time.Time) (Report, b
 		// write that landed and the daemon has no better information. Accepted
 		// by this filter is not the same as believed -- a resting report still
 		// has to earn its way past the evidence rules (Tasks 7 and 8).
+		//
+		// Including the first sight after claude -> zsh -> claude, whose value
+		// the PREVIOUS agent in this pane wrote. That is deliberate and
+		// bounded; a tombstone here would not survive Retain. See the task's
+		// note on what dropping does not mean.
 		st = &reportState{}
 		r.panes[paneID] = st
 	}
@@ -1550,6 +1655,8 @@ After this task you can type one command into a tmux pane and watch the sidebar 
 1. **`report` exits 0. Always.** Every failure — no `$TMUX`, no `$TMUX_PANE`, tmux missing, the pane gone, unparseable stdin, a state we do not recognise — is a **silent no-op with status 0**. Running an agent outside tmux is not an error, it is a no-op. The precise hazard is narrow — for a Claude `PreToolUse` hook, exit code **2** specifically blocks the tool call, and every other nonzero code is a non-blocking error — but the distance between `exit 1` and `exit 2` is one character in a wrapper nobody will re-read, and a reporting integration that can stop an agent from working is worse than no reporting integration. **This deliberately breaks the CLI's own convention** that a malformed command line exits 2; say so in the comment.
 2. **`report` talks to tmux, never to the daemon.** No socket, no auth, no dependency on tmux-web running. That is what makes the state survive a daemon restart, and it is why nothing here can ever wait on a network.
 
+**`--state`/`--text` are permanent, not scaffolding.** Task 13 adds `--agent`/`--event` beside them — the form the integrations use, with the payload on stdin — and does not replace them: this pair is the manual form, the one the demo below uses, the one a user's own script can use, and the only form that exercises the write path without an event table in the way. Task 13 states how the two modes combine; nothing in this task needs to anticipate it beyond not designing them out.
+
 **The server is addressed as `tmux -S "${TMUX%%,*}"`.** `$TMUX`'s first comma-separated field is the socket path, and a bare `tmux` can reach a different server than the one the agent is running inside. The pane is `-t "$TMUX_PANE"`, which held on all three agents. There is no alternative for Claude Code in particular: a hook's stdin is a socket and it has no controlling tty, so no tty-derived pane id is available.
 
 **Step 1: Write the failing tests**
@@ -1604,7 +1711,7 @@ func TestReportAlwaysExitsZero(t *testing.T) {
 		{"report", "--state", "idle", "extra"},  // a stray operand
 	} {
 		var out, errb bytes.Buffer
-		if code := runReport(args[1:], &out, &errb, envWithout("TMUX")); code != 0 {
+		if code := runReport(args[1:], &out, &errb, envWithout("TMUX"), dialReal); code != 0 {
 			t.Errorf("%v exited %d, want 0 (stderr: %s)", args, code, errb.String())
 		}
 		if out.Len() != 0 {
@@ -1638,7 +1745,10 @@ func TestReportReachesTheSnapshot(t *testing.T) {
 		"TMUX_PANE": paneID,
 	}
 	var out, errb bytes.Buffer
-	if code := runReport([]string{"--state", "working", "--text", "running go test"}, &out, &errb, mapEnv(env)); code != 0 {
+	// dialReal, because this test is the end-to-end one: a real client against
+	// the real server testutil started.
+	if code := runReport([]string{"--state", "working", "--text", "running go test"},
+		&out, &errb, mapEnv(env), dialReal); code != 0 {
 		t.Fatalf("report exited %d: %s", code, errb.String())
 	}
 
@@ -1678,14 +1788,29 @@ func TestReportReachesTheSnapshot(t *testing.T) {
 // will re-read. A reporting integration that can stop an agent from working is
 // worse than no reporting integration.
 func cmdReport(args []string, stdout, stderr io.Writer) int {
-	return runReport(args, stdout, stderr, os.Getenv)
+	return runReport(args, stdout, stderr, os.Getenv, dialReal)
 }
 
-// runReport is cmdReport with the environment injected, so a test can drive it
-// without setting process-wide variables -- which would race every other test
-// in the package and, if $TMUX leaked through, would write into the developer's
-// live tmux session.
-func runReport(args []string, stdout, stderr io.Writer, getenv func(string) string) int {
+// tmuxRunner is the little of tmux.Client this subcommand uses.
+//
+// Injected from the first version rather than retrofitted. Task 14 adds a
+// `show-options` read before a re-assertion write and tests it by counting the
+// reads and the writes a given event makes -- which needs a recording stub in
+// this position, and a hardcoded tmux.NewClient(...) here would force that task
+// to refactor this one. It takes no new parameter then; only the stub changes.
+type tmuxRunner interface {
+	Run(ctx context.Context, args ...string) (string, error)
+}
+
+// dialReal is the production dial: one client per socket, built after the
+// environment has been read, because the socket comes from $TMUX.
+func dialReal(socket string) tmuxRunner { return tmux.NewClient([]string{"-S", socket}) }
+
+// runReport is cmdReport with the environment and the tmux client injected, so
+// a test can drive it without setting process-wide variables -- which would
+// race every other test in the package and, if $TMUX leaked through, would
+// write into the developer's live tmux session.
+func runReport(args []string, stdout, stderr io.Writer, getenv func(string) string, dial func(socket string) tmuxRunner) int {
 	fset := newFlagSet("report", stderr, "wterm-web report --state working|blocked|idle [--text TEXT]")
 	state := fset.String("state", "", "working, blocked or idle")
 	text := fset.String("text", "", "what the agent is doing; omitted for a state-only report")
@@ -1723,8 +1848,7 @@ func runReport(args []string, stdout, stderr io.Writer, getenv func(string) stri
 	// No "--": an option value is the second positional argument and tmux never
 	// re-scans it for flags -- verified for @wterm_label in SetLabel, and the
 	// same command.
-	if _, err := tmux.NewClient([]string{"-S", socket}).
-		Run(ctx, "set", "-p", "-t", pane, tmux.AgentOption, value); err != nil {
+	if _, err := dial(socket).Run(ctx, "set", "-p", "-t", pane, tmux.AgentOption, value); err != nil {
 		fmt.Fprintf(stderr, "wterm-web report: %v\n", err)
 	}
 	return 0
@@ -1878,11 +2002,23 @@ func TestTheWindowClosesAtTheVerdict(t *testing.T) {
 func TestWithNoClientTheDerivationIsImmediate(t *testing.T) { ... }
 
 // The premise the arithmetic rests on: window poll 1 is a FIRST SIGHT, because
-// a capture-skipped pane was never passed to Retain. everChanged is therefore
-// false through the whole window, so no time.Now() finish edge can be stamped
-// inside it -- which is this design's rule that a change of authority stamps
-// nothing, holding in the one place it would otherwise leak. It is also what
-// stops finding A's late repaint from reaching finishedAt inside the window.
+// a capture-skipped pane was never passed to Retain. So the settle count the
+// window measures is the window's own -- `still` starts at 0 here -- and not a
+// leftover from a baseline taken minutes ago, which is what NIdle = settleAfter
+// + 2 is counting.
+//
+// Do NOT also assert that everChanged stays false through the window, and do not
+// write that sentence into a comment: it is false in this very fixture. The
+// repaint at window poll 2 differs from poll 1's capture, which is the whole
+// point of the fixture, and a differing capture sets everChanged -- so at the
+// settling poll the classifier does stamp its own finishedAt = now
+// (state.go:123). That stamp is not what the row carries: while the report is in
+// force the row's FinishedAt is the report's derivation, and the window closes
+// at the verdict so no further capture is taken. It matters only if the report
+// later leaves force, and then it dates the same turn end the report dated,
+// within a poll of it. An implementer who asserts everChanged == false here will
+// either go red against correct code or "fix" it by withholding the stamp --
+// which is the blocked=true mutant that was in this table and has been removed.
 func TestTheFirstWindowPollIsAFirstSight(t *testing.T) { ... }
 ```
 
@@ -1979,7 +2115,7 @@ In the poller's report branch, before setting the row: if `connected && rep.Stat
 | Derive `finishedAt` while the window is pending | `TestIdleWindowSurvivesTheTurnEndRepaint` — add an assertion that `FinishedAt` is 0 at every poll before the verdict |
 | `Confirmed` returning false when `!connected` | `TestWithNoClientTheDerivationIsImmediate` |
 | Capture inside the window but pass the pane to `Retain` **with** the skipped ones | `TestTheFirstWindowPollIsAFirstSight` |
-| `Observe(..., blocked=true)` inside the window | the stamp guard would be withheld for the wrong reason; assert the classifier's own `FinishedAt` stays 0 inside the window |
+| `Observe(..., blocked=true)` inside the window | **nothing, and the row has been reduced to a review check** rather than left as a mutant somebody will mark killed. `blocked` has exactly one effect in `Observe` — it withholds the stamp (`state.go:123`) — and the row's `FinishedAt` inside the window comes from the report's derivation either way, so no assertion can separate the two. Pass `false`, and pass it because the window asks the classifier one question only ("has the screen settled"); if a reader changes it, reject it on that reasoning, not on a test |
 
 **Step 6: Commit**
 
@@ -2159,7 +2295,7 @@ The evidence rules say a report is "dropped". Left unspecified against an option
 
 - **The daemon keeps two timestamps per pane**: the last report it **accepted**, and the standing report if it was **rejected on evidence**. One slot each rather than a set — the option holds exactly one value, so the only report that can be re-seen is the current one.
 - **A report whose timestamp matches the rejection slot is re-rejected without re-evaluating the evidence**, whichever rule condemned it. The evidence that condemned it was a screen that has since moved on; re-running the test against a screen that has since settled is exactly how a dropped report comes back to life.
-- **A rejection does not advance the ordering filter.** A dropped report was never accepted, so the next genuine report must still be strictly newer than the last *accepted* one.
+- **A rejection changes what is believed, not what was accepted.** Be precise about this, because the two are easy to conflate and Task 5's data model settles it: a report reaches the evidence rules only by passing the ordering filter first, so the condemned report **is** `st.accepted` and stays there. The rejection slot marks it as not in force; it does not rewind the filter. The filter therefore goes on measuring against that same timestamp, which is what makes a delayed older write a non-event: it is refused for being older, and refusing it must not clear the rejection.
 - **A newer value clears the rejection slot.** It is a different report and earns its own verdict.
 - **Across a restart both slots are empty**, so the standing report is a first sight: accepted by the ordering filter and then verified from scratch. A resting `idle` **enters the verification window** rather than being re-derived immediately, and a `blocked` that had been dropped can re-badge for up to `NBlocked` polls. That is the honest cost of holding the rejection in daemon memory rather than in tmux — bounded, one-shot, and only on restart.
 
@@ -2189,10 +2325,27 @@ func TestARejectionIsNotClearedByAClassifierIdle(t *testing.T) {
 // write -- an edge, which writes unconditionally.
 func TestANewerValueClearsTheRejection(t *testing.T) { ... }
 
-// A rejection was never an acceptance, so it must not move the ordering filter:
-// a report NEWER than the rejected one but OLDER than the last ACCEPTED one is
-// still refused.
-func TestARejectionDoesNotAdvanceTheOrderingFilter(t *testing.T) { ... }
+// A delayed older write neither wins nor rescues the rejected report.
+//
+// There is no report "newer than the rejected one but older than the last
+// accepted one" to test with: the rejected report IS st.accepted, so that
+// interval is empty, and a test written to the earlier wording would have had
+// to invent a state the implementation cannot reach. The fixture that matters
+// is the one ordinary scheduling jitter actually produces.
+func TestARejectionSurvivesADelayedOlderWrite(t *testing.T) {
+	// accept working@T0; accept idle@T1 (T1 > T0); reject it on evidence.
+	// Then a delayed write lands carrying a timestamp T with T0 < T < T1 --
+	// a fire-and-forget working write from an earlier hook, arriving late.
+	//
+	//   (a) It is REFUSED: it is older than st.accepted, so nothing goes into
+	//       force and the pane stays on the classifier. A mutant that accepts
+	//       it puts a stale `working` back on the row.
+	//   (b) It does not clear the rejection, and the only way to see that is to
+	//       keep polling: the NEXT poll re-reads the standing idle@T1 -- the
+	//       option still holds it -- and it must still be refused, with NO
+	//       capture taken and no evidence re-run. A mutant that clears the slot
+	//       on any parsed value resurrects it here.
+}
 
 // The claim that makes a permanent rejection affordable. Same fixture as the
 // rule-3 drop, continued: the pane is back on the classifier, everChanged is
@@ -2224,7 +2377,8 @@ func TestAfterARestartAStandingIdleEntersTheWindow(t *testing.T) {
 | --- | --- |
 | Clear the rejection on a classifier `idle` verdict (revision 4's behaviour) | `TestARejectionIsNotClearedByAClassifierIdle`. **This is the mutant the test exists for**, and it is the one a reader will re-add as an improvement |
 | Give rule 3 a different slot semantic from rules 1 and 2 | the same test's loop over all three |
-| A rejection also sets `accepted` | `TestARejectionDoesNotAdvanceTheOrderingFilter` |
+| Clear `st.rejected` on any parsed value rather than only on a strictly newer one | `TestARejectionSurvivesADelayedOlderWrite`'s half (b) |
+| Accept a report older than `st.accepted` after a rejection ( `>` to `>=`, or dropping the comparison) | the same test's half (a) |
 | `Timestamp == st.rejected` to `<=` | a newer report after a rejection is refused; `TestANewerValueClearsTheRejection` |
 | Persist the rejection across a fresh `Reports` | `TestAfterARestartAStandingIdleEntersTheWindow` |
 | Re-evaluate the evidence for a re-seen rejected report | assert the poller takes **no capture** for a pane whose standing report is already rejected and whose fallback classifier path has settled |
@@ -2332,7 +2486,11 @@ Also: the header comment on `paneText` currently says a title is "what it is wor
 **Step 1: Write the failing tests**
 
 ```tsx
-// @vitest-environment jsdom   -- follow the existing AppSidebar.test.tsx
+// No jsdom and no testing library -- follow the existing AppSidebar.test.tsx,
+// whose header comment says why: renderToStaticMarkup in the same node
+// environment as the rest of the suite. Its `render`, `fromRows` and `row`
+// helpers are what these tests use; do not introduce a second rendering style
+// in the same file.
 
 it('shows the activity under the name', () => { /* ... */ })
 
@@ -2360,16 +2518,26 @@ it('falls back to the title, then the command, when there is no activity', () =>
 // (expect(cls).toContain('disabled') on a shadcn button, which passes
 // unconditionally because the Tailwind class list contains
 // disabled:pointer-events-none).
+// There is no <PaneRow> to render: AppSidebar.tsx exports AppSidebar and
+// AGENT_TITLE_PREFIXES, and the row is internal to it. Do NOT extract and
+// export one for this test -- that is a refactor of a 1,000-line component in
+// a task whose Files list says `paneText`, `PaneLines` and a comment. Use the
+// file's own `render(fromRows([...]))` helper, which returns the whole
+// sidebar's static markup, and compare the STRINGS. That is a stronger
+// assertion than a class list anyway: it covers the dot, the title attribute,
+// the aria labels and anything else somebody might key on stateSource.
 it('renders a row identically whichever authority decided its state', () => {
-  const fromEvent = render(<PaneRow pane={{ ...base, stateSource: 'event' }} />)
-  const fromScreen = render(<PaneRow pane={{ ...base, stateSource: 'screen' }} />)
-  expect(classListOf(fromEvent)).toEqual(classListOf(fromScreen))
-  expect(classListOf(fromEvent).length).toBeGreaterThan(0)   // not vacuously equal
+  const base = { command: 'claude', agentState: 'idle', activity: 'run go' }
+  const fromEvent = render(fromRows([row({ ...base, stateSource: 'event' })]))
+  const fromScreen = render(fromRows([row({ ...base, stateSource: 'screen' })]))
+  expect(fromEvent).toBe(fromScreen)
+  // Not vacuously equal: the row really is in there.
+  expect(fromEvent).toContain('run go')
 
   // Positive control: something the row IS allowed to change on must differ,
   // or the comparison above is measuring nothing.
-  const blocked = render(<PaneRow pane={{ ...base, agentState: 'blocked' }} />)
-  expect(classListOf(blocked)).not.toEqual(classListOf(fromEvent))
+  const blocked = render(fromRows([row({ ...base, agentState: 'blocked', stateSource: 'event' })]))
+  expect(blocked).not.toBe(fromEvent)
 })
 ```
 
@@ -2413,8 +2581,8 @@ interface PaneText {
 | The label dropped when an activity exists | the same test |
 | The label moved to the first line **always** | `keeps a lone label on the second line` |
 | Activity rendered even when it is `''` | a row with an empty activity must fall through to the title; add the assertion if it is missing, because an empty second line is a worse row than no second line |
-| `stateSource` added to the dot's class list | `renders a row identically whichever authority decided its state` |
-| The whole row's class list replaced by a constant | the **positive control** in that same test. Without the control this mutant lives |
+| `stateSource` added to the dot's class list, or to a `title`/`aria-label` | `renders a row identically whichever authority decided its state` — the markup comparison sees all three |
+| The row rendered as a constant, or the two renders compared against each other by accident | the **positive control** in that same test. Without the control this mutant lives |
 | `rowsEqual` not comparing `activity` (Task 4's mutant, re-run here) | the activity never updates after first paint — worth re-checking from the component side, because that is where it would be noticed |
 
 **Step 6: Commit**
@@ -2493,6 +2661,18 @@ There is no mutation step here — there is no logic yet. **What replaces it:** 
 **Files:**
 - Create: `cmd/wterm-web/events.go`, `cmd/wterm-web/events_test.go`
 - Modify: `cmd/wterm-web/report.go` (`--agent`, `--event`, payload on stdin)
+
+**Two modes, and the rule between them is settled here rather than discovered.** `report` accepts either:
+
+| Given | Means |
+| --- | --- |
+| `--state` (with optional `--text`) | The **manual** form from Task 6. Unchanged, still supported, still what the demo and a user's own script use. The state is taken literally; no table is consulted and stdin is not read |
+| `--agent` + `--event` (payload on stdin) | The **integration** form. The table decides the state, the text and the edge/re-assertion kind |
+| `--event` without `--agent`, or `--agent` without `--event` | A usage error: **no write**, a line on stderr, exit 0 |
+| **both** `--state` and `--agent`/`--event` | A usage error, for the same reason and with the same outcome: **no write**, a line on stderr, exit 0. It is refused rather than given a precedence, because a precedence is a rule somebody has to remember and neither caller has any reason to send both. A silent winner here would be a wrong state written from a hook that was passing an argument it believed was doing something |
+| neither | A usage error, as in Task 6 |
+
+Each of those rows gets a row in `TestReportAlwaysExitsZero` (exit 0, nothing on stdout) **and** an assertion that the option is still unset afterwards — "exit 0" alone does not distinguish "refused" from "wrote something wrong and said nothing".
 
 **Step 1: Write the failing tests**
 
@@ -2692,7 +2872,7 @@ func TestEveryAgentHasATurnStartWorkingEdge(t *testing.T) {
 }
 ```
 
-**Step 2–4: Run (FAIL), implement, run (PASS).** A re-assertion runs one `tmux show-options -p -t <pane> -v @wterm_agent` before deciding. `ParseReport` is what reads the answer; a standing value that will not parse counts as disagreeing, so the repair still happens.
+**Step 2–4: Run (FAIL), implement, run (PASS).** A re-assertion runs one `tmux show-options -p -t <pane> -v @wterm_agent` before deciding, **through the same `tmuxRunner` Task 6 injected** — no new parameter, no refactor of `runReport`'s signature. `recordingTmux` implements that one-method interface, counting `show-options` calls as `shows` and `set` calls as `sets`, and answering a `show-options` with its `standing` field; `runReportWith(r, args...)` is the test helper that calls `runReport(args, io.Discard, io.Discard, mapEnv(...), func(string) tmuxRunner { return r })` with a `$TMUX`/`$TMUX_PANE` environment that resolves. `ParseReport` is what reads the answer; a standing value that will not parse counts as disagreeing, so the repair still happens.
 
 **What it costs, stated rather than discovered:**
 
@@ -2850,7 +3030,10 @@ Only what needs a **runtime object** (pi's `ctx`) or **memory across events** (o
 - Create: `internal/integrations/queue.ts`, `internal/integrations/queue.test.ts`
 - Modify: `web/vitest.config.ts` (one line in `include`)
 
-**This logic has no test story today, which is how it would ship untested.** It goes in a tiny pure module with the spawn injected.
+**This logic has no test story today, which is how it would ship untested.** It goes in a tiny pure module with the spawn injected. Two exports, and Tasks 17 and 18 both import them rather than reimplementing either:
+
+- `makeQueue(spawn)` — the slot. `spawn(item)` returns a promise; the queue never looks inside an item.
+- `spawnReport(agent)` — the argv, in one place: it returns a `spawn` that runs `wterm-web report --agent <agent> --event <item.event>` with `JSON.stringify(item.payload ?? {})` on stdin, and never awaits the child. Neither integration builds a command line of its own.
 
 **What it is for:** a burst of tool calls must not become a queue of forks. At most one `report` in flight per pane; if a new state arrives while one is running, keep only the latest and drop what it replaced. Both pi and opencode are long-lived runtimes and can hold the slot in module scope. **Claude Code gets no queue**, because each hook is a fresh process and there is nowhere to put one; the daemon's ordering rule is what stands in for the queue it cannot have.
 
@@ -2865,25 +3048,31 @@ Only what needs a **runtime object** (pi's `ctx`) or **memory across events** (o
 
 **Step 1: Write the failing test**
 
+**The item carries no timestamp, and there is no place in this design for one to come from.** An item is exactly what `report` needs on its command line and its stdin — `{ event, payload }` — and the timestamp is stamped by `report` itself, from `time.Now()` at process start (Task 6, where that is spelled out as deliberate). Neither `pi.ts` nor `opencode.js` has an event timestamp to pass, and nothing downstream would read one. So the queue's ordering guarantee is **serialization, not stamping**: the collapsed spawn starts only after the in-flight one has finished, so the process it starts stamps a strictly later millisecond, and the daemon's ordering filter sees the two states in the order the events happened. Say that in the module comment; a reader who assumes the queue carries times will add a field nothing fills.
+
 ```ts
 it('keeps exactly one report in flight and collapses a burst to the newest', async () => {
   const q = makeQueue(spy)          // the spawn is injected
-  q.push({ state: 'working', event: 'tool_execution_start', ts: 1 })
-  q.push({ state: 'working', event: 'tool_execution_start', ts: 2 })
-  q.push({ state: 'working', event: 'tool_execution_start', ts: 3 })
-  q.push({ state: 'working', event: 'tool_execution_start', ts: 4 })
-  q.push({ state: 'blocked', event: 'ui_prompt_start', ts: 5 })
+  q.push({ event: 'tool_execution_start', payload: { tool: 'read' } })
+  q.push({ event: 'tool_execution_start', payload: { tool: 'edit' } })
+  q.push({ event: 'tool_execution_start', payload: { tool: 'bash' } })
+  q.push({ event: 'tool_execution_start', payload: { tool: 'grep' } })
+  q.push({ event: 'ui_prompt_start', payload: { title: 'Approve?' } })
   await settle()
-  // Five states, one in flight: exactly one queued, and it is the newest.
+  // Five events, one in flight: exactly one queued, and it is the newest.
   expect(spy.calls).toHaveLength(2)
-  expect(spy.calls[1].ts).toBe(5)
+  expect(spy.calls[1].event).toBe('ui_prompt_start')
 })
 
-it('carries the newest EVENT timestamp, not the time the collapsed one ran', async () => {
-  // Collapsing a burst must never resurrect an older state. The daemon's
-  // ordering filter refuses anything not newer than what it accepted, so a
-  // collapsed report carrying the wrong timestamp is a report the daemon
-  // silently drops.
+it('starts the queued spawn only after the in-flight one has finished', async () => {
+  // This is what the queue gives the daemon's ordering filter, and it is the
+  // whole of it: `report` stamps its own timestamp at process start, so two
+  // reports that overlap could be stamped in either order, and the filter
+  // refuses anything not newer than what it accepted -- i.e. it would silently
+  // drop the newer STATE for having the older stamp.
+  //
+  // Assert on the spawn's lifecycle, not on a field: resolve the first spawn's
+  // promise by hand and check that spy.calls is still length 1 until you do.
 })
 
 it('never rejects, whatever the spawn does', async () => {
@@ -2905,11 +3094,11 @@ it('does not await the spawn', async () => {
 | Mutant | Killed by |
 | --- | --- |
 | Queue everything (an array rather than a slot) | the burst test's call count |
-| Keep the **oldest** queued rather than the newest | `spy.calls[1].ts` |
-| Stamp the collapsed report at run time | `carries the newest EVENT timestamp` |
+| Keep the **oldest** queued rather than the newest | `spy.calls[1].event` |
+| Spawn the queued item immediately rather than after the in-flight one resolves | `starts the queued spawn only after the in-flight one has finished` |
 | `await` the spawn | `does not await the spawn` |
 | Let a spawn failure reject | `never rejects` |
-| Drop the newest instead of the in-flight one when both exist | the burst test — assert the final state is `blocked`, not `working` |
+| Drop the newest instead of the in-flight one when both exist | the burst test — the last call must be `ui_prompt_start`, not a `tool_execution_start` |
 
 **Step 6: Commit**
 
@@ -2943,41 +3132,62 @@ What must be confirmed before a line of the real file is written: the module's e
 // Reinstalling or updating the integration overwrites this file.
 // It does one thing: `tmux set-option -p @wterm_agent`. Nothing else.
 
-export default function (pi) {
+import { makeQueue, spawnReport } from "./queue.ts"
+
+// handlers is exported, and that export is what makes this file testable at all.
+// Its three filters -- the mode gate, the root flag and agent_settled's
+// isIdle check -- are the only logic in the integration, and the Go wiring test
+// that would otherwise be their only cover is allowed to t.Skip when pi is not
+// installed. Driven here with a fake `report`, they are covered on every run.
+export function handlers(report) {
   let root = false
 
-  pi.on("session_start", async (event, ctx) => {
-    // TUI only. RPC/JSON/print modes are headless, and RPC reports hasUI=true,
-    // so `mode` is the reliable gate and `hasUI` is not. This is the ONE filter
-    // of the three that fails CLOSED: a missing or unexpected mode reports
-    // nothing.
-    if (ctx?.mode !== "tui") return
-    root = true
-    // A reload can replace this extension mid-run without another
-    // agent_start, so an extension that only ever sets state on transitions
-    // comes back from a reload believing nothing is happening.
-    //
-    // The idle branch is a RE-ASSERTION, not an edge -- a reload can recur
-    // arbitrarily often inside one resting period, so as an edge it would
-    // write idle;<now> and re-badge every device on every reload. `report`
-    // knows that from its own table; the extension just names the event.
-    report({ event: "session_start", idle: ctx?.isIdle?.() === true })
-  })
+  return {
+    session_start: async (event, ctx) => {
+      // TUI only. RPC/JSON/print modes are headless, and RPC reports hasUI=true,
+      // so `mode` is the reliable gate and `hasUI` is not. This is the ONE filter
+      // of the three that fails CLOSED: a missing or unexpected mode reports
+      // nothing.
+      if (ctx?.mode !== "tui") return
+      root = true
+      // A reload can replace this extension mid-run without another
+      // agent_start, so an extension that only ever sets state on transitions
+      // comes back from a reload believing nothing is happening.
+      //
+      // The idle branch is a RE-ASSERTION, not an edge -- a reload can recur
+      // arbitrarily often inside one resting period, so as an edge it would
+      // write idle;<now> and re-badge every device on every reload. `report`
+      // knows that from its own table; the extension just names the event.
+      report({ event: "session_start", payload: { idle: ctx?.isIdle?.() === true } })
+    },
 
-  // The turn-start invariant. Without this write, agent_settled's write is
-  // suppressed and that turn loses its badge.
-  pi.on("input", () => root && report({ event: "input" }))
-  pi.on("tool_execution_start", (e) => root && report({ event: "tool_execution_start", payload: e }))
-  pi.on("ui_prompt_start", (e) => root && report({ event: "ui_prompt_start", payload: e }))
-  pi.on("agent_settled", (_e, ctx) => root && ctx?.isIdle?.() === true && report({ event: "agent_settled" }))
+    // The turn-start invariant. Without this write, agent_settled's write is
+    // suppressed and that turn loses its badge.
+    input: () => root && report({ event: "input" }),
+    tool_execution_start: (e) => root && report({ event: "tool_execution_start", payload: e }),
+    ui_prompt_start: (e) => root && report({ event: "ui_prompt_start", payload: e }),
+    agent_settled: (_e, ctx) => root && ctx?.isIdle?.() === true && report({ event: "agent_settled" }),
+  }
+}
+
+// What pi loads. It owns one thing the factory does not: the real queue.
+export default function (pi) {
+  const q = makeQueue(spawnReport("pi"))
+  for (const [name, fn] of Object.entries(handlers((item) => q.push(item)))) pi.on(name, fn)
 }
 ```
 
-`report()` is the queue from Task 16, spawning `wterm-web report --agent pi --event <name>` with the payload as JSON on stdin. **Nothing else is in this file.** No state machine, no mapping table, no string handling.
+The item shape is Task 16's exactly — `{ event, payload }`, no timestamp — and `spawnReport` owns the argv, so this file builds no command line and carries no state name. **Nothing else is in this file.** No state machine, no mapping table, no string handling.
 
 **Step 3: The test story**
 
-Three layers, and none of them is "read it and hope":
+Four layers, and none of them is "read it and hope". Layer 0 is `internal/integrations/pi.test.ts`, named in this task's Files — **it has real content and here is what it is**, because an unspecified test file in a Files list becomes a "registers five handlers" mock test that asserts nothing:
+
+0. **The filters**, in vitest, against the exported `handlers(report)` with a fake `report` that records items. Four cases, and they are the three mutants below that the wiring test can only cover when pi happens to be installed:
+   - `session_start` with `ctx.mode = "rpc"` records **nothing**, and the `input` handler that follows it records nothing either — the fails-closed gate and the `root` flag in one fixture.
+   - `session_start` with `ctx.mode = "tui"` records a `session_start` item whose payload is `{ idle: … }`, and then `input` records an `input` item.
+   - `agent_settled` with `ctx.isIdle() === false` records nothing; with `true` it records.
+   - Every recorded item is `{ event, payload? }` and nothing else: no state name, no timestamp, no text. That is the file's one-line contract with Go, and it is the assertion that catches somebody "helpfully" adding `--text` here.
 
 1. **The queue** is Task 16's, already covered.
 2. **The mapping** — which state each event means, what text comes out of `tool_execution_start.args`, whether a payload is refused — is a **Go** table test over Task 12's recorded fixtures. That is where it belongs: it is the same table all three agents share.
@@ -2985,16 +3195,18 @@ Three layers, and none of them is "read it and hope":
 
 **What cannot be tested in CI**: that a real agent, running a real integration, produces the events we mapped. That is a manual check per agent per upgrade, and the honest mitigation is that a wrong mapping degrades to no report, which degrades to v2.
 
-**Step 4: Mutation testing** (against layers 2 and 3)
+**Step 4: Mutation testing** (against layers 0, 2 and 3)
+
+Every row names a test that runs unconditionally where one exists: layer 3 is allowed to skip, so a mutant whose only cover is the wiring test is a mutant nobody verifies on a machine without pi.
 
 | Mutant | Killed by |
 | --- | --- |
-| Drop the `ctx?.mode !== "tui"` gate | the wiring test driven in a non-TUI mode: it must record **no** call |
-| Invert it to `=== "tui"` returning early | any TUI run recording no calls |
-| Drop the `input` handler | **the turn-start invariant**: drive a turn and assert the recorded sequence *starts* with a `working`-producing event. Without this, `agent_settled` is suppressed |
-| Drop the `root` guard on any handler | a subagent run recording a call |
-| `agent_settled` without the `ctx.isIdle() === true` check | a settled-child run recording an idle |
-| Pass the raw payload as `--text` instead of on stdin | the Go smoke test's argv assertion — the reductions and the sanitizer live in Go and must not be bypassed |
+| Drop the `ctx?.mode !== "tui"` gate | layer 0's `rpc` case; the wiring test driven in a non-TUI mode seconds it |
+| Invert it to `=== "tui"` returning early | layer 0's `tui` case — no items recorded |
+| Drop the `input` handler | layer 0's `tui` case, and **the turn-start invariant** in the wiring test: drive a turn and assert the recorded sequence *starts* with a `working`-producing event. Without this, `agent_settled` is suppressed |
+| Drop the `root` guard on any handler | layer 0's `rpc` case: `input` after a refused `session_start` must record nothing |
+| `agent_settled` without the `ctx.isIdle() === true` check | layer 0's `isIdle() === false` case; a settled-child run in the wiring test seconds it |
+| Pass the raw payload as `--text` instead of on stdin | layer 0's item-shape assertion **and** the Go smoke test's argv assertion — the reductions and the sanitizer live in Go and must not be bypassed |
 
 **Step 5: Commit**
 
@@ -3033,12 +3245,38 @@ git commit -m "feat: a pi extension that maps events and delegates everything el
 // inverted, because "missing means silence" silences all normal reporting. It
 // can only be tightened, and it is: a payload that does not parse, or does not
 // carry the fields we expect, is refused.
-const children = new Map()
+//
+// EXPORTED, and for the same reason pi.ts exports its handlers: this is the
+// only real logic in the file, and the Go wiring test that would otherwise be
+// its only cover is allowed to t.Skip when opencode is not installed. A
+// module-scope `const` inside the plugin factory cannot be reached from
+// opencode.test.ts, and the test named in this task's Files is then either not
+// written or written against a copy.
+export function sessionTree() {
+  const parents = new Map() // session id -> parent id, for sessions we have seen
+
+  return {
+    // note records what one payload says about parentage. Called on every
+    // event, before the root gate.
+    note(payload) { /* ... */ },
+    // isRoot walks the chain to the top. An id we have never seen is root:
+    // absence-coded, failing open, as above.
+    isRoot(sessionID) { /* ... */ },
+  }
+}
+
+// What opencode loads. One tree and one queue per plugin instance.
+export default async function () {
+  const tree = sessionTree()
+  const q = makeQueue(spawnReport("opencode"))
+  // ... the handlers, each gated on tree.isRoot(...) and each pushing
+  // { event, payload } -- Task 16's item shape, no timestamp, no state name.
+}
 ```
 
 Handlers: `"chat.message"` and `event` → `session.status` (busy is the **turn-start `working` edge**; the invariant), tool events, `permission.asked`, `todo.updated`, `session.idle`. Each one root-only, each one pushed through the queue, each one delegating to `wterm-web report --agent opencode --event <type>` with the payload on stdin.
 
-**Step 3: The test story** — the same three layers as pi. The **child-session map is pure and gets its own vitest test** in `internal/integrations/opencode.test.ts`: a `session.created` with a `parentID` registers a child, a `session.idle` for that child is refused, one for the root is not, and a chain of nested children resolves to the root. That is the half of the filter that has real logic in it.
+**Step 3: The test story** — the same four layers as pi, and layer 0 here is the bigger half. The **child-session map is pure and gets its own vitest test** in `internal/integrations/opencode.test.ts`, driving the exported `sessionTree()` directly: a `session.created` with a `parentID` registers a child, `isRoot` is false for that child and true for the root, a chain of nested children resolves to the root, and an id never seen reads as root (the fail-open direction, asserted deliberately so that inverting it goes red). That is the half of the filter that has real logic in it. As with pi, every item the handlers push is `{ event, payload? }` and nothing else.
 
 **The honest statement of what this buys, which goes in the file's comment:** behind this filter there is exactly one thing — evidence rule 3, which needs a connected client, needs the pane to keep churning for a whole window, and leaks at a measured rate even then (4 of 88 turns went still while waiting on the model). **With no client connected, a subagent false-idle on opencode is undefended.** That is the true state of it; it is not two independent mechanisms, it is one mechanism that only runs when somebody is watching.
 
@@ -3066,6 +3304,22 @@ git commit -m "feat: an opencode plugin whose only state is which sessions are c
 
 **Files:**
 - Create: `internal/integrations/claude-report.sh`, `internal/integrations/claude_hooks.go` (the settings block as data), and their tests
+
+**`claude_hooks.go` is also this directory's `//go:embed` host, and that is not an aside — Task 20 cannot work without it.** `//go:embed` reads only from the directory of the file that declares it and its subtree: `cmd/wterm-web` **cannot** embed `../../internal/integrations`, and a path with `..` in it is a compile error, not a lookup that fails at run time. Until this task there is no `.go` file in `internal/integrations` at all — Tasks 16, 17 and 18 put only `.ts` and `.js` there — so this file is where `package integrations` begins. Give it the directives and the exported accessors the installer will use:
+
+```go
+package integrations
+
+// The files the installer writes, embedded here because this is the only
+// package that can embed them: //go:embed cannot climb out of its own
+// directory, so cmd/wterm-web has no way to reach these bytes. Task 20 is the
+// only consumer.
+//
+//go:embed pi.ts opencode.js queue.ts claude-report.sh
+var files embed.FS
+```
+
+`queue.ts` is in that list deliberately: both integrations import it (Task 16), so the installer has to write it beside them. Task 20 decides the layout; this task only has to make sure the bytes are reachable.
 
 **The hook set is small and closed**: `UserPromptSubmit`, `PreToolUse`, `Notification`, `Stop`, **and nothing else**. In particular **`SubagentStop` is never registered** — that is the whole of what the structural guard against Task-tool subagents buys, and it buys nothing against the two other doors.
 
@@ -3183,6 +3437,7 @@ git commit -m "feat: four Claude hooks, async, and never asyncRewake"
 **Files:**
 - Create: `cmd/wterm-web/install.go`, `cmd/wterm-web/install_test.go`
 - Modify: `cmd/wterm-web/cli.go` (dispatch and usage)
+- Modify: `internal/front/server.go` (a comment at the mux, and nothing else — see the prohibition test below)
 
 **Installation is a CLI act, and it is never a button in the web UI.** Not a "we detected claude, shall we…" prompt either. The web UI is reachable over the network from a phone, and "write executable code into a repo" is not a thing a network request should be able to do however well authenticated it is. The Origin middleware is the boundary for tmux operations; **this is not a tmux operation.**
 
@@ -3198,7 +3453,16 @@ It prints the exact paths it will write and requires confirmation unless `--yes`
 | opencode | `<proj>/.opencode/plugin/wterm.js` | A file we own. Auto-loaded, no config entry needed |
 | claude | `<proj>/.claude/settings.json` | **A file the user owns**, merged into |
 
-**The claude case is different in kind and the installer must treat it that way.** It refuses if the file is not valid JSON, **never rewrites the whole file**, adds only entries whose command is recognisably ours, and removes exactly those on uninstall. A user's own hooks in that file are not ours to reformat.
+**Where the bytes come from.** `cmd/wterm-web` imports `internal/integrations` and reads them out of the `embed.FS` Task 19 declares there. It does **not** embed them itself: `//go:embed` cannot reach outside its own directory, so a directive in `cmd/wterm-web` naming `../../internal/integrations/pi.ts` does not compile. If that package or its directives are missing, the task to fix is Task 19, not this one.
+
+**One thing this task has to settle and must not settle by guessing: how the queue module gets to the destination.** `pi.ts` and `opencode.js` both `import { makeQueue, spawnReport } from "./queue.ts"` (Task 16), so writing one file per agent leaves a dangling import. Two shapes, and the choice is a measurement, not a preference:
+
+- **Write `queue.ts` beside the integration** — `.pi/extensions/wterm-queue.ts`, `.opencode/plugin/wterm-queue.js` — with its own managed header, subject to the same ownership rules, and removed by `--remove` along with its sibling. Requires the import specifier in the written file to match the written name, and requires each runtime to accept it.
+- **Inline it at install time**, so each agent gets exactly one self-contained file. One source of truth is preserved (the concatenation happens in Go from the embedded bytes), and there is no import to resolve at all.
+
+**Verify before choosing**, because the deciding fact is whether opencode's runtime will load a `.js` plugin that imports a `.ts` sibling — bun will, node will not, and which one opencode uses under the user's install is not something to assume. Both runtimes are on this machine. Record what you ran and what it printed in the commit message, exactly as Task 3 does for tmux. Whichever shape wins, `--remove` must leave nothing of ours behind, and the "not ours, refuse" rule applies to every file written.
+
+**The claude case is different in kind and the installer must treat it that way.** It refuses if the file is not valid JSON, adds only entries whose command is recognisably ours, and removes exactly those on uninstall. What it promises about the rest of the file is that **nothing of the user's is lost or changed in meaning** — not that the bytes are preserved, which `encoding/json` cannot do; see the test below for why that line is drawn there and what is scoped instead.
 
 **Every file we own carries a managed header, and the schema line is what makes `install` safe:**
 
@@ -3237,8 +3501,30 @@ func TestInstallOverwritesItsOwnFile(t *testing.T) { /* current: silent; outdate
 func TestClaudeMergePreservesTheUsersOwnHooks(t *testing.T) {
 	// A settings.json with the user's own PreToolUse entry and an unrelated
 	// top-level key. After install: our four entries are present, THEIR entry
-	// is still there, the unrelated key is untouched.
-	// After --remove: ours are gone, theirs is still there, byte-comparable.
+	// is still there, the unrelated key is still there with the same value.
+	// After --remove: ours are gone, theirs is still there.
+	//
+	// SEMANTICALLY identical, compared as parsed JSON -- not byte-comparable,
+	// and the difference is a scoping decision rather than a slack assertion.
+	// encoding/json does not preserve key order or formatting, so a promise
+	// that the user's file comes back byte-for-byte is a promise to write a
+	// format-preserving JSON editor: a token walk, or json.RawMessage surgery
+	// with the key order recovered by a Decoder. That is a real piece of work
+	// and it is NOT scoped here. What bounds the damage instead is that we
+	// touch this file at all only under the rules above -- valid JSON or
+	// refuse, our entries only, named by our command.
+}
+
+// The one place a byte assertion belongs, and it is cheap to honour: a merge
+// that would change nothing must not write.
+func TestAMergeThatChangesNothingDoesNotTouchTheFile(t *testing.T) {
+	// Install twice; the second run must leave the file byte-identical (compare
+	// the contents, and the mtime if the implementation makes that meaningful).
+	// Likewise --remove when none of our entries are present.
+	//
+	// This is what stops "it only reformats the file when something changed"
+	// from quietly becoming "it reformats the file every time anybody runs it",
+	// which is the wholesale-rewrite mutant wearing a different hat.
 }
 
 func TestClaudeRefusesInvalidJSON(t *testing.T) {
@@ -3247,8 +3533,28 @@ func TestClaudeRefusesInvalidJSON(t *testing.T) {
 }
 
 func TestInstallIsNeverReachableFromHTTP(t *testing.T) {
-	// A route table assertion: no handler anywhere serves installation. This
-	// is a prohibition, so it needs a test that goes red if somebody adds one.
+	// NOT a route-table assertion. http.ServeMux exposes no way to enumerate
+	// its patterns, so "no handler anywhere serves installation" is not a
+	// question any Go test can ask it.
+	//
+	// Two things stand in its place, and being honest about which is which
+	// matters more than the test:
+	//
+	//  1. The compiler already enforces the direct half. This installer lives
+	//     in `package main`, and a package main cannot be imported -- so
+	//     internal/front CANNOT call it, today or ever, without somebody first
+	//     moving it. That is a stronger guarantee than any assertion here.
+	//  2. This test covers the other half: a REIMPLEMENTATION inside
+	//     internal/front. It is a grep -- it reads internal/front/*.go and
+	//     fails if the install symbols (install-integration, claudeHookBlock,
+	//     wterm-schema, the .pi/.opencode/.claude paths) appear there at all.
+	//     A grep is a blunt instrument and this comment says so plainly rather
+	//     than dressing it up: what it really buys is that somebody adding an
+	//     install route has to delete a test with this comment in it.
+	//
+	// The prohibition itself also goes where the routes are built, in a comment
+	// at internal/front/server.go's mux (server.go:227), because that is where
+	// the person who would add the route is reading.
 }
 
 func TestNoGlobalForOpencode(t *testing.T) {
@@ -3265,17 +3571,19 @@ func TestNoGlobalForOpencode(t *testing.T) {
 | --- | --- |
 | Overwrite a file with no managed header | `TestInstallRefusesAFileItDoesNotOwn` |
 | Match the header by prefix rather than by the schema line | add an outdated-schema fixture; it must be detected as ours-but-outdated, not as not-ours |
-| Rewrite claude's `settings.json` wholesale (marshal the parsed map back) | `TestClaudeMergePreservesTheUsersOwnHooks` on the unrelated top-level key **and its formatting** |
+| Rewrite claude's `settings.json` wholesale (marshal the parsed map back, dropping the user's other keys) | `TestClaudeMergePreservesTheUsersOwnHooks` on the unrelated top-level key |
+| Rewrite it on every run, including one that changes nothing | `TestAMergeThatChangesNothingDoesNotTouchTheFile` |
 | `--remove` deleting every hook rather than ours | the same test's second half |
 | `--remove` matching by hook *name* rather than by our command | a fixture where the user has their own `PreToolUse` entry: it must survive |
 | Accept `--global --agent opencode` | `TestNoGlobalForOpencode` |
+| Reimplement any of this inside `internal/front` | `TestInstallIsNeverReachableFromHTTP`'s grep. Apply it for real — paste `claudeHookBlock` into a file under `internal/front` — and watch it go red, because a grep test that matches nothing is the easiest vacuous test in this plan to write by accident |
 | Skip the confirmation without `--yes` | a test driving it with no `--yes` and asserting nothing was written |
 | Write before printing the paths | the same test |
 
 **Step 6: Commit**
 
 ```bash
-git add cmd/wterm-web/install.go cmd/wterm-web/install_test.go cmd/wterm-web/cli.go
+git add cmd/wterm-web/install.go cmd/wterm-web/install_test.go cmd/wterm-web/cli.go internal/front/server.go
 git commit -m "feat: install and remove the three integrations, from the CLI only"
 ```
 
@@ -3292,7 +3600,7 @@ git commit -m "feat: install and remove the three integrations, from the CLI onl
 
 **What was measured.** On **2 of 30 claude turns**, a single line near the input box repainted **5.0 s and 9.0 s after everything else on the screen had stopped** — both on a "write a file, then reply done" prompt; not periodic, not reproducible on demand. It does not stop the turn settling. What it does is produce a **second working→idle edge and a fresh `finishedAt` about 13 s after the real turn end**, and since `finishedAt` is compared against each browser's stored `seen` **value**, a stamp 13 s later than the one a device was shown **re-lights a done badge the user has already cleared.**
 
-**Where it bites, and where it cannot.** On a pane whose report is in force it reaches nothing, for two independent reasons: a fresh report outranks the classifier for the derivation, and the capture is skipped so the classifier never sees the repaint. Inside the verification window the pane *is* captured, but window poll 1 is a **first sight** — a capture-skipped pane's baseline was dropped — so `everChanged` is false and no `time.Now()` stamp is licensed. So it bites where the classifier is the authority: **a pane with no integration at all** (the common case, and pure v2), and a pane whose report is not in force — dropped on evidence, expired after a missed turn end, or demoted for want of a grammar.
+**Where it bites, and where it cannot.** On a pane whose report is in force it reaches nothing, for two independent reasons: a fresh report outranks the classifier for the derivation, and the capture is skipped so the classifier never sees the repaint. Inside the verification window the pane *is* captured and the classifier may well stamp its own `finishedAt` there — window poll 1 is a first sight, but the repaint at poll 2 sets `everChanged` — and it still reaches nothing, for a different reason: while the report is in force the row's `finishedAt` is the report's own, and the window **closes at the verdict**, so there is no later capture for a late repaint to land in. So it bites where the classifier is the authority: **a pane with no integration at all** (the common case, and pure v2), and a pane whose report is not in force — dropped on evidence, expired after a missed turn end, or demoted for want of a grammar.
 
 **The repair that does not work, and this is the thing to write down so nobody tries it.** The obvious fix is to require *more* movement before arming an edge — a run of changed polls rather than a single one, by symmetry with `settleAfter`. **The same measurement refutes it: a genuinely short turn presents exactly one changed poll too.** In 29 of 72 claude turn-phase replays and 19 of 72 opencode ones, the *entire* turn — prompt echo, answer, prompt box redrawn — changed the screen at exactly one poll of the 1.5 s grid before settling. A late repaint and a two-second turn are the same signal at the hash level, and any threshold discarding the first discards the second. That is not a limitation of the threshold; it is what the classifier **is**: it dates our noticing, where a report dates the finish.
 
@@ -3336,10 +3644,13 @@ func TestObserveDoesNotRestampWithinTheDwell(t *testing.T) {
 // them.
 func TestAShortTurnStillStamps(t *testing.T) {
 	c := NewClassifier()
+	now := time.Unix(0, 0) // the same clock the rest of this file uses
 	// first sight, one changed capture, then settleAfter identical ones.
 	// It must stamp, because nothing was stamped before it -- the dwell is
 	// about the gap since the LAST stamp, not about how much movement this run
-	// had.
+	// had. On this clock the stamp lands about 6s past the epoch, which is
+	// INSIDE the dwell: without the `finishedAt == 0` disjunct this test is red,
+	// and so is every stamp assertion in TestClassifierWorkingAndIdle.
 }
 ```
 
@@ -3379,13 +3690,21 @@ const lateRepaintDwell = 15 * time.Second
 and the guard, which needs no new state — `p.finishedAt` is already there — and no clock inside the classifier, because `now` is already a parameter and the purity rule holds:
 
 ```go
+	// The `p.finishedAt == 0` disjunct is LOAD-BEARING and must be written out.
+	// "A pane that has never finished has finishedAt 0, and now - epoch is
+	// obviously more than 15s" is true only when `now` is a real wall clock.
+	// Every test in this file starts at `now := time.Unix(0, 0)` (state_test.go
+	// lines 12, 102, 130, 151, 203, 244) and advances in 1.5s steps, so at the
+	// first genuine stamp `now` is nine seconds past the epoch and
+	// time.UnixMilli(0) IS the epoch: the subtraction gives 9s, which is less
+	// than the dwell, and the first stamp of the existing v2 suite is refused.
 	if p.still == settleAfter && p.everChanged && !blocked &&
-		now.Sub(time.UnixMilli(p.finishedAt)) >= lateRepaintDwell {
+		(p.finishedAt == 0 || now.Sub(time.UnixMilli(p.finishedAt)) >= lateRepaintDwell) {
 		p.finishedAt = now.UnixMilli()
 	}
 ```
 
-Note that `p.finishedAt == 0` makes the new conjunct trivially true for a pane that has never finished, which is what `TestAShortTurnStillStamps` asserts — but **write that as a deliberate property with a comment**, not as an accident of the zero value.
+**Do not "simplify" the disjunct away and do not repair it by moving the tests' clocks.** The v2 stamp suite in `state_test.go` is not this task's to weaken — it is the suite that pins the behaviour this task is adding one conjunct to — and its epoch-based clock is what makes the disjunct observable rather than decorative: with a `time.Now()` fixture the whole guard would pass for the wrong reason and every mutant below would survive. For the same reason, **both new tests start at `time.Unix(0, 0)` like the rest of the file.**
 
 **Step 4: Run, expect PASS.**
 
@@ -3394,6 +3713,7 @@ Note that `p.finishedAt == 0` makes the new conjunct trivially true for a pane t
 | Mutant | Killed by |
 | --- | --- |
 | Drop the dwell conjunct | `TestObserveDoesNotRestampWithinTheDwell`'s middle assertion |
+| Drop the `p.finishedAt == 0` disjunct (the "it is trivially true anyway" simplification) | `TestAShortTurnStillStamps` **and the whole existing v2 stamp suite** — `TestClassifierWorkingAndIdle` first, because on a `time.Unix(0, 0)` clock the first genuine stamp is nine seconds from the epoch. Run `go test ./internal/tmux/` after applying it: if only the new test goes red, a fixture has drifted onto a wall clock |
 | `>=` to `>` , or the subtraction reversed | the beyond-the-dwell assertion |
 | `lateRepaintDwell = 0` | the middle assertion |
 | Guard with `p.finishedAt == 0` instead (stamp once per pane, ever) | the beyond-the-dwell assertion. This is v2's own recorded trap arriving through a new door |

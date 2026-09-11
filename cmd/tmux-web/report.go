@@ -188,7 +188,9 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 
 	// The re-assertion read. It happens on this path only -- PreToolUse, the
 	// hot hook and the whole subject of open question 1, pays nothing, and
-	// opencode pays nothing at all.
+	// opencode pays it once per turn, on session.idle, and on nothing else:
+	// its two hot events (session.status busy, 17 times in one three-tool
+	// turn, and tool.execute.before) are working edges and read nothing.
 	if reassert && standingState(ctx, tm, pane) == *state {
 		return 0
 	}

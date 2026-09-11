@@ -128,7 +128,7 @@ func TestOpencodePluginWiresTheBusToTheReportArgv(t *testing.T) {
 	// suppressed by `report`, and the pane loses that turn's badge.
 	start, end := indexOfEvent(events, "chat.message"), indexOfEvent(events, "session.idle")
 	if start < 0 || end < 0 || start > end {
-		t.Errorf("recorded events = %v; want a turn start before the turn end. opencode's session.idle is an EDGE -- it writes a resting state without reading what is standing -- and with no working reported in front of it the daemon suppresses the finish",
+		t.Errorf("recorded events = %v; want a turn start before the turn end. opencode's session.idle is a RE-ASSERTION -- measured firing twice inside one resting period, so it reads the standing report and writes only on a disagreement -- and with no working reported in front of it there is nothing to disagree with and the finish is suppressed",
 			events)
 	}
 	if last := events[len(events)-1]; last != "session.idle" {

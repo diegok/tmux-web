@@ -251,7 +251,31 @@ var eventRules = map[string]map[string]eventRule{
 		// 15's parentID filter is for. That filter lives in the plugin,
 		// because only the plugin saw the session.created that named the
 		// parent.
-		"session.idle": {mapping: mapping{name: "opencode/session.idle", state: tmux.StateIdle, kind: kindEdge}},
+		//
+		// A RE-ASSERTION, and the only turn end on any agent that is one.
+		// MEASURED on opencode 1.18.30: a turn that DIED AT THE PROVIDER fired
+		// session.idle, then message.updated, then session.idle again, about a
+		// second apart, with no session.status(busy) between them. That is the
+		// criterion exactly -- an event that can recur inside one resting
+		// period and writes a resting state -- and the fact that it is named
+		// like a turn end has no vote. As an edge the second idle re-dates a
+		// finish the first already dated, and finishedAt is derived from the
+		// report's own timestamp, so every device that had seen the finish
+		// badges again about a second later. Bounded and small: failed turns
+		// only, and about a second of re-dating.
+		//
+		// WHAT IT COSTS opencode, which had paid nothing until now: ONE
+		// show-options fork per turn end. Not per event -- the hot paths
+		// (session.status busy, 17 times in one three-tool turn, and
+		// tool.execute.before) are working edges and still read nothing.
+		//
+		// WHAT IT COSTS THE BADGE: nothing the turn-start invariant does not
+		// already cover. session.status(busy) writes working before this can
+		// fire, so the standing state disagrees and the finish is written. The
+		// one case it loses is a turn whose START write also failed, and that
+		// is a pane that never showed working either.
+		"session.idle": {mapping: mapping{name: "opencode/session.idle", state: tmux.StateIdle,
+			kind: kindReassertion}},
 		// session.created is absent on purpose: it is the plugin's own
 		// bookkeeping, the event that establishes parentage, and not a state
 		// of the pane.

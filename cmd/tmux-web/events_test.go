@@ -200,6 +200,14 @@ func TestTheRepairsAreExactlyThese(t *testing.T) {
 		// criterion, and revision 3 of the design classified this event
 		// nowhere at all.
 		"pi/session_start(idle)": true,
+		// opencode's TURN END, which reads like an edge and is not one.
+		// MEASURED on opencode 1.18.30: on a turn that died at the provider,
+		// session.idle fired TWICE inside one resting period -- idle,
+		// message.updated, idle, about a second apart, with no busy between
+		// them. An event that can recur inside one resting period and writes a
+		// resting state is a re-assertion by the criterion, and the name of
+		// the event has no vote.
+		"opencode/session.idle": true,
 	}
 	for _, m := range allMappings() {
 		if got := m.kind == kindReassertion; got != want[m.name] {
@@ -650,19 +658,73 @@ func TestEdgeAndReassertion(t *testing.T) {
 	})
 
 	t.Run("a turn-end event writes unconditionally", func(t *testing.T) {
-		// All three, each against a STALE standing idle left by the previous
-		// turn. As re-assertions they would all be silent here and every turn
-		// after the first would lose its badge.
+		// Two of the three, each against a STALE standing idle left by the
+		// previous turn. As re-assertions they would be silent here and every
+		// turn after the first would lose its badge.
+		//
+		// opencode's session.idle is NOT here and that is the subject of the
+		// subtest below: it was measured firing twice inside one resting
+		// period, so it is the one turn end the criterion calls a
+		// re-assertion. What keeps ITS badge is the same turn-start invariant
+		// the other two lean on -- session.status(busy) writes working before
+		// the end can fire -- so the disagreement is there to be found.
 		for _, tc := range []struct{ agent, event, stdin string }{
 			{"claude", "Stop", `{"hook_event_name":"Stop"}`},
 			{"pi", "agent_settled", `{"type":"agent_settled"}`},
-			{"opencode", "session.idle", `{"type":"session.idle","properties":{"sessionID":"ses_1"}}`},
 		} {
 			r := &recordingTmux{standing: standingIdle}
 			runReportWith(t, r, []string{"--agent", tc.agent, "--event", tc.event}, withStdin(tc.stdin))
 			if r.shows != 0 || r.sets != 1 {
 				t.Errorf("%s/%s: shows=%d sets=%d, want 0 and 1", tc.agent, tc.event, r.shows, r.sets)
 			}
+		}
+	})
+
+	// The fourth row that carries more weight than the rest, and the one this
+	// table got wrong for three revisions.
+	//
+	// MEASURED on opencode 1.18.30, on the run that drove the integration
+	// test: a turn that DIED AT THE PROVIDER fired session.idle, then
+	// message.updated, then session.idle again, about a second apart, with no
+	// session.status(busy) anywhere between them. Two turn ends, one resting
+	// period, and nothing in the payload distinguishes them -- both are
+	// {type, properties.sessionID} on the same session.
+	//
+	// It is driven as two consecutive calls rather than asserted on the table,
+	// because the damage is entirely in the SECOND one: finishedAt is derived
+	// statelessly from a resting report's own timestamp, so an edge here
+	// re-dates a finish a device has already seen and badges it again about a
+	// second later. Small, bounded, failed turns only -- and wrong.
+	t.Run("opencode's session.idle can fire twice in one resting period", func(t *testing.T) {
+		const idleEvent = `{"type":"session.idle","properties":{"sessionID":"ses_1"}}`
+
+		// The turn end proper. The pane carries this turn's working, the two
+		// states disagree, and the finish is written: a re-assertion still
+		// badges every finish the turn-start invariant put a working in front
+		// of, it just looks before it writes.
+		first := &recordingTmux{standing: standingWorking}
+		runReportWith(t, first, []string{"--agent", "opencode", "--event", "session.idle"}, withStdin(idleEvent))
+		if first.shows != 1 || first.sets != 1 {
+			t.Fatalf("the turn end over a standing working: shows=%d sets=%d, want 1 and 1 -- "+
+				"a re-assertion that never writes is a turn that never badges", first.shows, first.sets)
+		}
+		if got := wroteState(t, first); got != tmux.StateIdle {
+			t.Fatalf("the turn end wrote %q, want idle", got)
+		}
+		set := first.lastSet()
+		finish := set[len(set)-1]
+
+		// The second idle, about a second later. What tmux is holding is what
+		// the first call really wrote, not a fixture built to agree with it.
+		second := &recordingTmux{standing: finish}
+		runReportWith(t, second, []string{"--agent", "opencode", "--event", "session.idle"}, withStdin(idleEvent))
+		if second.sets != 0 {
+			t.Errorf("the second session.idle of one resting period wrote %q over the finish %q; "+
+				"that is a second finish, under a newer timestamp, on every device that had "+
+				"already seen the first", second.lastSet(), finish)
+		}
+		if second.shows != 1 {
+			t.Errorf("shows=%d, want 1: a re-assertion decides by reading what is standing", second.shows)
 		}
 	})
 

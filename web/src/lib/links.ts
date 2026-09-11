@@ -70,6 +70,12 @@ export function urlAt(text: string, index: number): string | null {
   token = trimUnbalanced(token, '[', ']')
 
   try {
+    // The definitive scheme gate, and not a second copy of SCHEME above. SCHEME
+    // matched the *raw* token, and the token has been rewritten since --
+    // opening brackets, TRAILING and trimUnbalanced each cut characters off it
+    // -- while `startsWith('http')` only catches a token whose scheme was eaten
+    // outright. What the caller opens is `u.href`, so the protocol has to be
+    // read off the same parse that produced it.
     const u = new URL(token)
     return u.protocol === 'http:' || u.protocol === 'https:' ? u.href : null
   } catch {
@@ -142,6 +148,13 @@ function joinedLine(row: Element): { text: string; base: number } {
  * Runs in the capture phase so it settles the click before wterm decides
  * whether to forward it to tmux as a mouse report. A plain click is left alone
  * and still reaches tmux.
+ *
+ * The two `open` features are load-bearing, not boilerplate. `noopener` severs
+ * `window.opener`, so a page reached from a terminal row cannot navigate the
+ * tab it came from -- reverse tabnabbing, aimed at a window that is a live
+ * shell on an already-enrolled device. `noreferrer` keeps this host out of the
+ * `Referer` the opened site reads; on a deployment that is one private name,
+ * the name is the thing worth not announcing.
  */
 export function installLinkOpener(
   el: HTMLElement,
@@ -156,6 +169,11 @@ export function installLinkOpener(
     // An OSC 8 anchor already knows its own destination, and it is the one the
     // emitting program chose -- the visible text is often not the URL at all
     // ("#13914"), so re-deriving it from the text would be wrong.
+    //
+    // Its href gets no scheme check here because it never had a chance to be
+    // anything else: wterm builds `a.term-link` only for http(s) and emits no
+    // anchor at all otherwise. That is a dependency's invariant holding a click
+    // path, so links.test.ts pins it against the installed renderer.
     const anchor = target.closest('a.term-link')
     if (anchor instanceof HTMLAnchorElement && anchor.href) {
       event.preventDefault()

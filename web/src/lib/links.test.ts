@@ -1,3 +1,4 @@
+import { Renderer } from '@wterm/dom'
 import { describe, expect, it } from 'vitest'
 import { isOpenModifier, urlAt } from './links'
 
@@ -64,5 +65,88 @@ describe('isOpenModifier', () => {
 
   it('rejects a plain click, which belongs to tmux', () => {
     expect(isOpenModifier(ev({}))).toBe(false)
+  })
+})
+
+/**
+ * The other half of `installLinkOpener`: what an OSC 8 anchor's href can be.
+ *
+ * That path hands `anchor.href` to `open()` with no scheme check of its own,
+ * because wterm builds `a.term-link` only for http(s) -- `safeLinkHref` in
+ * @wterm/dom's renderer. Nothing in this repo would notice that filter going
+ * away in a `^0.5.0` bump, and the first place it would show is a terminal row
+ * turning `javascript:` into a click, so it is pinned here against whatever
+ * renderer is actually installed.
+ *
+ * This suite has no DOM, so the anchor cannot be built and clicked; the row
+ * markup is checked at the point the filter runs instead. `_buildRowContent` is
+ * the narrowest way into it -- of the DOM it only writes `innerHTML` and two
+ * style properties, which a plain object can stand in for. If a later version
+ * renames it, failing here is still the right outcome: the invariant has to be
+ * re-read either way, and the throw below says so.
+ */
+describe('the renderer this delegates OSC 8 hrefs to', () => {
+  /** One row of `link`, every cell carrying `uri` as its OSC 8 target. */
+  function rowMarkup(uri: string): string {
+    const renderer = Object.create(Renderer.prototype) as unknown as {
+      cols: number
+      prevRowBg: string[]
+      _buildRowContent: (
+        rowEl: { innerHTML: string; style: Record<string, string> },
+        getCell: (col: number) => unknown,
+        lineLen: number,
+        cursorCol: number,
+        rowIndex: number,
+      ) => void
+    }
+    if (typeof renderer._buildRowContent !== 'function') {
+      throw new Error('@wterm/dom moved Renderer#_buildRowContent: re-check its href filter')
+    }
+    const text = 'link'
+    renderer.cols = text.length
+    renderer.prevRowBg = []
+    const rowEl = { innerHTML: '', style: {} as Record<string, string> }
+    renderer._buildRowContent(
+      rowEl,
+      (col) => ({
+        char: text.codePointAt(col),
+        chars: text[col],
+        width: 1,
+        fg: -1,
+        bg: -1,
+        flags: 0,
+        linkUri: uri,
+        linkId: '1',
+      }),
+      text.length,
+      -1,
+      -1,
+    )
+    return rowEl.innerHTML
+  }
+
+  it('turns an http or https target into a term-link anchor', () => {
+    // Not a formality: without it every refusal below would also pass against a
+    // renderer that had stopped emitting anchors at all.
+    expect(rowMarkup('https://example.com/a')).toContain(
+      '<a class="term-link" href="https://example.com/a"',
+    )
+    expect(rowMarkup('http://example.com/a')).toContain(
+      '<a class="term-link" href="http://example.com/a"',
+    )
+  })
+
+  it('emits no anchor at all for a target we would otherwise open', () => {
+    for (const uri of [
+      'javascript:alert(1)',
+      'data:text/html,<script>alert(1)</script>',
+      'file:///etc/passwd',
+      'vbscript:msgbox(1)',
+      'https://example.com /a',
+    ]) {
+      const markup = rowMarkup(uri)
+      expect(markup, uri).not.toContain('term-link')
+      expect(markup, uri).not.toContain('href=')
+    }
   })
 })

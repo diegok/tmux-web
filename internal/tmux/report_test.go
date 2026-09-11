@@ -3,6 +3,7 @@ package tmux
 import (
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -93,5 +94,133 @@ func TestSanitizeActivityBounds(t *testing.T) {
 	// own writer; it can from anything else holding the tmux socket.
 	if n := utf8.RuneCountInString(SanitizeActivity(strings.Repeat("x", 10<<10))); n != MaxActivity {
 		t.Errorf("10 KiB input kept %d runes, want %d", n, MaxActivity)
+	}
+}
+
+func TestParseReport(t *testing.T) {
+	now := time.UnixMilli(1789075200000)
+	const ts = "1789075200000"
+
+	for _, tc := range []struct {
+		name string
+		in   string
+		want Report
+		ok   bool
+	}{
+		{"four parts", "1;working;" + ts + ";run go", Report{StateWorking, 1789075200000, "run go"}, true},
+		// The common shape. A reader demanding four parts rejects every Claude
+		// report there has ever been.
+		{"three parts is a state-only report", "1;idle;" + ts, Report{StateIdle, 1789075200000, ""}, true},
+		{"blocked", "1;blocked;" + ts + ";Approve?", Report{StateBlocked, 1789075200000, "Approve?"}, true},
+		// Only the first three separators are structural.
+		{"semicolons in the text survive", "1;working;" + ts + ";a;b;c", Report{StateWorking, 1789075200000, "a;b;c"}, true},
+		{"the text is sanitized on the way in", "1;working;" + ts + ";\x1b[31mred\x1fx", Report{StateWorking, 1789075200000, "red x"}, true},
+
+		{"unset", "", Report{}, false},
+		{"two parts", "1;idle", Report{}, false},
+		{"unknown version", "2;idle;" + ts, Report{}, false},
+		{"empty version", ";idle;" + ts, Report{}, false},
+		// The fixture must START WITH "1", or it does not exercise the mutant it
+		// is here for: strings.HasPrefix("01x", "1") is false, so a prefix-match
+		// mutant rejects "01x" exactly as correct code does and survives the
+		// whole table. Schema 10 is the case this will really be: it is a
+		// different schema and must not be read as this one.
+		{"a version that merely starts with ours", "10;idle;" + ts, Report{}, false},
+		{"a version with a suffix", "1x;idle;" + ts, Report{}, false},
+		{"unknown state", "1;thinking;" + ts, Report{}, false},
+		{"empty state", "1;;" + ts, Report{}, false},
+		// A state differing only in case is not the state. The writer is ours;
+		// a value that is not exactly what we write did not come from us.
+		{"state case", "1;Idle;" + ts, Report{}, false},
+		{"non-decimal timestamp", "1;idle;later", Report{}, false},
+		{"zero timestamp", "1;idle;0", Report{}, false},
+		{"negative timestamp", "1;idle;-5", Report{}, false},
+		// strconv does NOT refuse this on its own: ParseInt accepts a sign
+		// prefix for every base, exactly as Atoi does. Measured, Go 1.26. The
+		// plan claimed base 10 refused it; it does not, and this row was red
+		// against the plan's own implementation.
+		{"timestamp with a plus", "1;idle;+1789075200000", Report{}, false},
+		// Discarded whole, not treated as stale: a future finishedAt is a done
+		// badge `seen` can never catch up with.
+		{"far future", "1;idle;1789075999000", Report{}, false},
+		// A second of clock jitter on the one machine involved is not an attack.
+		{"a moment in the future is tolerated", "1;idle;1789075201000", Report{StateIdle, 1789075201000, ""}, true},
+		// The pair above leaves reportFutureSkew free to be anything from one
+		// second to thirteen minutes -- neither row moves when the constant is
+		// retargeted anywhere inside that range, so neither pins it. These two
+		// are literal offsets from `now` either side of the boundary, and they
+		// are the only thing that does. Found by mutation; change them when the
+		// constant changes, deliberately.
+		{"exactly the skew ahead is tolerated", "1;idle;1789075205000", Report{StateIdle, 1789075205000, ""}, true},
+		{"one millisecond past the skew is discarded", "1;idle;1789075205001", Report{}, false},
+		{"the past is fine -- freshness is not this function's job",
+			"1;working;1000", Report{StateWorking, 1000, ""}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := ParseReport(tc.in, now)
+			if ok != tc.ok {
+				t.Fatalf("ParseReport(%q) ok = %v, want %v (got %+v)", tc.in, ok, tc.ok, got)
+			}
+			if ok && got != tc.want {
+				t.Errorf("ParseReport(%q) = %+v, want %+v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// The rune cap only applies to a field we have successfully parsed out, and
+// nothing stops anything holding the tmux socket from storing a megabyte the
+// daemon would then carry through every 1.5s poll.
+func TestParseReportRefusesAnOversizeValue(t *testing.T) {
+	now := time.UnixMilli(1789075200000)
+	head := "1;working;1789075200000;"
+	if _, ok := ParseReport(head+strings.Repeat("x", MaxReportBytes), now); ok {
+		t.Fatal("a value over the byte cap must be discarded whole, before parsing")
+	}
+	// And the boundary is not off by one: a value at exactly the cap parses.
+	// Both halves above are written against MaxReportBytes, so they hold for
+	// any value of it -- retarget the constant at 128 or at 64 KiB and they
+	// both still pass. They test the > against the >=, and nothing else.
+	if _, ok := ParseReport(head+strings.Repeat("x", MaxReportBytes-len(head)), now); !ok {
+		t.Fatal("a value at exactly the cap must still parse")
+	}
+	// So the size itself is pinned here, with literals, and this is the only
+	// place it is. 1 KiB is the budget: an option value the daemon carries
+	// through every poll, for every pane. Found by mutation.
+	if _, ok := ParseReport(head+strings.Repeat("x", 1024), now); ok {
+		t.Error("a 1048-byte value parsed: MaxReportBytes has been widened past 1 KiB")
+	}
+	if _, ok := ParseReport(head+strings.Repeat("x", 1024-len(head)), now); !ok {
+		t.Error("a 1024-byte value was refused: MaxReportBytes has been narrowed below 1 KiB")
+	}
+}
+
+func TestFormatReport(t *testing.T) {
+	// A state-only report carries no trailing separator, because tmux would
+	// strip it anyway and a reader written to expect it would then see three
+	// parts where it wanted four.
+	if got := FormatReport(StateIdle, 1789075200000, ""); got != "1;idle;1789075200000" {
+		t.Errorf("state-only = %q, want no trailing separator", got)
+	}
+	if got := FormatReport(StateWorking, 1789075200000, "run go"); got != "1;working;1789075200000;run go" {
+		t.Errorf("with text = %q", got)
+	}
+	// Text that sanitises to nothing is a state-only report, NOT an unset
+	// option. Revision 1 of the design conflated those and thereby deleted the
+	// whole Claude integration: Claude ships state-only, so every one of its
+	// reports has an empty text field.
+	if got := FormatReport(StateIdle, 1789075200000, "\x1b[0m\n"); got != "1;idle;1789075200000" {
+		t.Errorf("empty-after-sanitising = %q, want a three-part report", got)
+	}
+	// Whatever it writes, it can read back. The writer checks its own shape
+	// before the write, because a botched write does not clear a report: a
+	// value of exactly ";" is refused by tmux with "empty value" and the option
+	// KEEPS ITS PREVIOUS CONTENTS, which is the more dangerous of the two
+	// outcomes -- a stale report preserved rather than a missing one.
+	for _, text := range []string{"", "run go", "a;b", "trailing;", "✳ wide", "\x1b[31mred"} {
+		v := FormatReport(StateWorking, 1789075200000, text)
+		if _, ok := ParseReport(v, time.UnixMilli(1789075200000)); !ok {
+			t.Errorf("FormatReport(%q) produced %q, which ParseReport rejects", text, v)
+		}
 	}
 }

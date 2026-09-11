@@ -37,27 +37,46 @@ type dialog interface {
 	extractQuestion(screen string) *Question
 }
 
+// form is one screen shape an agent draws when it is waiting, with the
+// identifier a report can name.
+//
+// The identifier exists because Claude's notification whitelist maps a
+// notification_type to blocked only where a grammar can confirm it, and the
+// test that holds those two tables together has to name something. "Every
+// blocked entry names an agent with a grammar" is VACUOUS -- claude is in the
+// map -- so the three types the design demoted would all have passed it.
+type form struct {
+	ID     string // e.g. "claude/permission"
+	dialog dialog
+}
+
 // blockedRules is the whole of the detector's knowledge, per agent.
 //
-// One entry per agent whose screen has been captured. An agent with no entry --
-// any command on the Agents list that nobody has recorded asking a question --
-// reports working or idle and is never blocked, which is preferable to guessing
-// at a dialog nobody has seen. The day one is captured, the entry is a data
-// change.
-var blockedRules = map[string]dialog{
-	"claude": claudeDialog{
+// Several forms per agent, in match order. One entry per agent whose screen has
+// been captured: an agent with no entry -- any command on the Agents list that
+// nobody has recorded asking a question -- reports working or idle and is never
+// blocked, which is preferable to guessing at a dialog nobody has seen.
+//
+// It used to be one dialog per agent, which made "promote a second claude
+// screen" a restructuring rather than the data change it should be: an MCP
+// elicitation form and a quota press-Enter banner match none of claudeDialog's
+// markers, so each needs its own grammar beside it rather than instead of it.
+// claude still has EXACTLY ONE today, and until a second is captured the
+// whitelist may claim blocked for nothing this registry cannot confirm.
+var blockedRules = map[string][]form{
+	"claude": {{ID: "claude/permission", dialog: claudeDialog{
 		rules:        "─╌",
 		cursorChoice: regexp.MustCompile(`^❯ \d+\. `),
 		choice:       regexp.MustCompile(`^(?:❯ )?\d+\. `),
 		minChoices:   2,
 		question:     regexp.MustCompile(`\?$`),
-	},
-	"opencode": opencodeDialog{
+	}}},
+	"opencode": {{ID: "opencode/permission", dialog: opencodeDialog{
 		gutter:  "┃",
 		header:  regexp.MustCompile(`^\W*Permission required$`),
 		request: regexp.MustCompile(`^→\s+(\S.*)$`),
-	},
-	"pi": piDialog{
+	}}},
+	"pi": {{ID: "pi/selector", dialog: piDialog{
 		top:          regexp.MustCompile(`╭.*╮`),
 		bottom:       regexp.MustCompile(`╰.*╯`),
 		wall:         "│",
@@ -65,19 +84,46 @@ var blockedRules = map[string]dialog{
 		choice:       regexp.MustCompile(`^(?:→ )?\d+\. `),
 		minChoices:   2,
 		question:     regexp.MustCompile(`\?$`),
-	},
+	}}},
+}
+
+// RegisteredForm reports whether an id names a form some agent's grammar can
+// confirm.
+//
+// Task 13's notification whitelist is the caller: a notification_type may claim
+// blocked only where a registered form can confirm it on the root screen, which
+// is why agent_needs_input and the MCP and quota types are ignored pending a
+// capture. The consequence, stated plainly so nobody reads it as a bug: an MCP
+// form or a quota banner left overnight produces no badge at all.
+func RegisteredForm(id string) bool {
+	for _, forms := range blockedRules {
+		for _, f := range forms {
+			if f.ID == id {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // IsBlocked reports whether an agent's screen shows a prompt waiting on the
 // user. It is deliberately strict and it never guesses: no match means the
 // pane keeps whatever state churn decided, and a wrong "this one needs you"
 // trains the owner to ignore the badge, which destroys the feature.
+//
+// ANY registered form for the agent matching is enough. That is the same
+// question as "the one grammar this agent has" only for as long as every agent
+// has one, and evidence rule 2 is the caller that stops being true for: a
+// standing permission report on a screen showing a second, later-promoted form
+// must not be dropped, because the agent is waiting and which form it waits at
+// is not rule 2's business.
 func IsBlocked(agent, screen string) bool {
-	d, ok := blockedRules[agent]
-	if !ok {
-		return false
+	for _, f := range blockedRules[agent] {
+		if f.dialog.isBlocked(screen) {
+			return true
+		}
 	}
-	return d.isBlocked(screen)
+	return false
 }
 
 // MaxQuestion bounds a question's text, and each of its choices, in runes.
@@ -109,30 +155,39 @@ type Question struct {
 // ExtractQuestion returns the request on a blocked agent's screen, or nil if it
 // cannot be read with confidence.
 //
-// It is meaningful only for a screen IsBlocked has already matched, and it
-// deliberately does not re-check the markers IsBlocked checks -- the selection
-// cursor in particular. Two copies of that rule would be two things to keep in
-// step, and the caller has just run the authoritative one.
+// It is meaningful only for a screen IsBlocked has already matched. Which of an
+// agent's forms to read it with is decided here, by asking each form whether it
+// is the one on screen; what is NOT re-checked is anything inside a grammar,
+// the selection cursor in particular, because two copies of that rule would be
+// two things to keep in step.
 //
 // Everything here fails closed: a dialog it cannot read yields nil rather than
 // half a dialog. The caller keeps the state it already decided.
 func ExtractQuestion(agent, screen string) *Question {
-	d, ok := blockedRules[agent]
-	if !ok {
-		return nil
+	for _, f := range blockedRules[agent] {
+		// Only a form that MATCHED may be quoted. Within one grammar the
+		// extractor deliberately does not re-check the markers isBlocked checks
+		// -- two copies of that rule would be two things to keep in step -- but
+		// choosing between forms is a different question, and asking a form
+		// that is not on screen for the text on it is how a screen showing one
+		// dialog gets quoted with another's words.
+		if !f.dialog.isBlocked(screen) {
+			continue
+		}
+		q := f.dialog.extractQuestion(screen)
+		if q == nil {
+			continue
+		}
+		// Capped here rather than in each grammar, so that an agent added to
+		// the table later cannot forget to do it: the rules table is meant to
+		// be edited as data, and a length cap is not part of reading a dialog.
+		q.Text = truncateRunes(q.Text, MaxQuestion)
+		for i := range q.Choices {
+			q.Choices[i] = truncateRunes(q.Choices[i], MaxQuestion)
+		}
+		return q
 	}
-	q := d.extractQuestion(screen)
-	if q == nil {
-		return nil
-	}
-	// Capped here rather than in each grammar, so that an agent added to the
-	// table later cannot forget to do it: the rules table is meant to be edited
-	// as data, and a length cap is not part of reading a dialog.
-	q.Text = truncateRunes(q.Text, MaxQuestion)
-	for i := range q.Choices {
-		q.Choices[i] = truncateRunes(q.Choices[i], MaxQuestion)
-	}
-	return q
+	return nil
 }
 
 // truncateRunes cuts s to at most maxRunes runes.

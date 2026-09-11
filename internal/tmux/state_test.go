@@ -296,3 +296,39 @@ func TestClassifierBlockedDoesNotStampAFinishEdge(t *testing.T) {
 			st, now.UnixMilli())
 	}
 }
+
+// Changed is the RAW FACT -- this capture differed from the previous one -- and
+// it is not the verdict. Evidence rule 1 rests on the difference: State says
+// working on a first sight and on every poll before settleAfter, which is
+// precisely what settleAfter exists to declare is noise, so a rule keyed on the
+// verdict would drop a true blocked report on an ordinary settle.
+func TestChangedIsTheRawFactAndNotTheVerdict(t *testing.T) {
+	c := NewClassifier()
+	now := time.Unix(0, 0)
+
+	// A first sight has nothing to compare against, so nothing changed -- even
+	// though the verdict is working. This is the poll that matters most: it is
+	// the first poll of every blocked report's evidence.
+	if st := c.Observe("%1", "frame 1", now, false); st.Changed || st.State != StateWorking {
+		t.Errorf("a first sight = %+v, want working with Changed false", st)
+	}
+	if st := c.Observe("%1", "frame 2", now, false); !st.Changed || st.State != StateWorking {
+		t.Errorf("a differing capture = %+v, want working with Changed true", st)
+	}
+	// Identical captures that have not yet settled: still working, still no
+	// change. settleAfter-1 of them, written against settleAfter so that they
+	// stay put if it moves.
+	for i := 1; i < settleAfter; i++ {
+		st := c.Observe("%1", "frame 2", now, false)
+		if st.State != StateWorking {
+			t.Fatalf("poll %d after the change = %q, want working: without this the test "+
+				"cannot tell the verdict from the fact", i, st.State)
+		}
+		if st.Changed {
+			t.Errorf("poll %d after the change reported Changed on an identical capture", i)
+		}
+	}
+	if st := c.Observe("%1", "frame 2", now, false); st.Changed || st.State != StateIdle {
+		t.Errorf("the settling poll = %+v, want idle with Changed false", st)
+	}
+}

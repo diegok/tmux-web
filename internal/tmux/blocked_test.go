@@ -919,3 +919,123 @@ func TestExtractQuestionPiFailureKeepsTheState(t *testing.T) {
 		}
 	}
 }
+
+// --- the form registry -------------------------------------------------------
+
+// markerDialog is a form nobody has captured: it matches a screen holding a
+// literal marker.
+//
+// Test-only, and deliberately trivial. What the multi-form tests are about is
+// the REGISTRY -- that every form an agent has is asked, and that the matching
+// one is the one quoted -- and a second real grammar would test a grammar.
+type markerDialog struct{ marker string }
+
+func (d markerDialog) isBlocked(screen string) bool { return strings.Contains(screen, d.marker) }
+
+// extractQuestion quotes UNCONDITIONALLY, including on a screen this form does
+// not match, and that is the point of it.
+//
+// Every shipped grammar happens to fail closed on a screen it was not written
+// for, so a registry that asked each form for text without first asking whether
+// it is the form on screen would look correct against all three -- and would
+// quote the wrong dialog the day one of them is less shy. This is the form that
+// is less shy.
+func (d markerDialog) extractQuestion(string) *Question {
+	return &Question{Text: d.marker + " is waiting"}
+}
+
+// registerTestAgent installs a throwaway agent and its forms for one test.
+//
+// A throwaway rather than a second claude form, because claude has exactly one
+// and promoting a second is a decision with a capture behind it (open question
+// 10), not something a test gets to make. The registry is a package var, so it
+// is restored on the way out and no test in this package runs in parallel.
+func registerTestAgent(t *testing.T, name string, forms ...form) {
+	t.Helper()
+	if _, taken := blockedRules[name]; taken {
+		t.Fatalf("%q is a real agent: pick a name nothing ships", name)
+	}
+	agents := Agents
+	blockedRules[name] = forms
+	Agents = append(append([]string{}, Agents...), name)
+	t.Cleanup(func() {
+		delete(blockedRules, name)
+		Agents = agents
+	})
+}
+
+// Every form carries a non-empty, unique identifier.
+//
+// Task 13's whitelist names one of these, and "every blocked entry names an
+// agent with a grammar" is VACUOUS -- claude is in the map whatever its forms
+// say -- so the id is the only thing that consistency test can fail on. A form
+// registered with "" would make RegisteredForm("") true and let a whitelist
+// entry naming nothing pass.
+func TestEveryRegisteredFormHasAUniqueID(t *testing.T) {
+	seen := map[string]string{}
+	for agent, forms := range blockedRules {
+		if len(forms) == 0 {
+			t.Errorf("%s is registered with no forms at all: it can never report blocked", agent)
+		}
+		for _, f := range forms {
+			if f.ID == "" {
+				t.Errorf("%s has a form with no id", agent)
+				continue
+			}
+			if other, dup := seen[f.ID]; dup {
+				t.Errorf("form id %q is registered for both %s and %s", f.ID, other, agent)
+			}
+			seen[f.ID] = agent
+			if !RegisteredForm(f.ID) {
+				t.Errorf("RegisteredForm(%q) = false for a form that is in the registry", f.ID)
+			}
+		}
+	}
+	// The three the design names, exactly. A form renamed out from under the
+	// whitelist is a rename somebody makes on purpose.
+	for _, id := range []string{"claude/permission", "opencode/permission", "pi/selector"} {
+		if !RegisteredForm(id) {
+			t.Errorf("RegisteredForm(%q) = false: the whitelist names it", id)
+		}
+	}
+	for _, id := range []string{"", "claude", "claude/elicitation", "claude/permission "} {
+		if RegisteredForm(id) {
+			t.Errorf("RegisteredForm(%q) = true, want false", id)
+		}
+	}
+}
+
+// An agent with several forms is blocked when ANY of them matches, and the
+// question comes from the one that matched rather than from the first in the
+// list.
+//
+// Today every agent has one form and this is untestable against the shipped
+// registry, which is why it is tested against a throwaway one: the day a second
+// claude screen is promoted, "does the first grammar match" and "is this agent
+// waiting" stop being the same question, and a standing report on the second
+// screen must not be treated as a screen with nothing on it.
+func TestIsBlockedMatchesAnyRegisteredForm(t *testing.T) {
+	registerTestAgent(t, "twoform",
+		form{ID: "twoform/first", dialog: markerDialog{marker: "FIRST FORM"}},
+		form{ID: "twoform/second", dialog: markerDialog{marker: "SECOND FORM"}})
+
+	second := "an elicitation-shaped screen\nSECOND FORM\nwaiting on you"
+	if blockedRules["twoform"][0].dialog.isBlocked(second) {
+		t.Fatal("the first form matches the second form's screen, so this test proves nothing")
+	}
+	if !IsBlocked("twoform", second) {
+		t.Error("IsBlocked asked only the first registered form")
+	}
+	q := ExtractQuestion("twoform", second)
+	if q == nil || q.Text != "SECOND FORM is waiting" {
+		t.Errorf("ExtractQuestion = %+v, want the quote from the form that MATCHED", q)
+	}
+	if !IsBlocked("twoform", "FIRST FORM\nstill on screen") {
+		t.Error("IsBlocked stopped matching the first form once a second was registered")
+	}
+	// And nothing has become loose: a screen matching neither form is not
+	// blocked, which is what rule 2 is entitled to act on.
+	if IsBlocked("twoform", "an ordinary prompt\nnothing to decide") {
+		t.Error("a screen matching no registered form reported blocked")
+	}
+}

@@ -185,19 +185,99 @@ func TestANewerReportOpensAFreshWindow(t *testing.T) {
 	}
 }
 
-// The window is for resting idles only. A working report is re-asserted by its
-// own writer and expires on a clock; blocked is rules 1 and 2 (Task 8), and
-// neither is checked here.
-func TestOnlyARestingIdleNeedsTheScreen(t *testing.T) {
+// Only the RESTING states are checked against the screen. A working report is
+// re-asserted by its own writer and expires on a clock, so there is nothing for
+// a capture to add and taking one would give back the fork the whole feature
+// exists to save.
+//
+// idle and blocked both ask for one, for different reasons and over different
+// counts: idle has a window that closes at the classifier's verdict (rule 3),
+// blocked is checked for as long as it stands, because rule 1's evidence -- a
+// capture that moved -- can arrive at any poll.
+func TestOnlyARestingReportNeedsTheScreen(t *testing.T) {
 	now := time.UnixMilli(1789075200000)
-	for _, state := range []string{StateWorking, StateBlocked} {
+	for _, tc := range []struct {
+		state string
+		want  bool
+	}{
+		{StateWorking, false},
+		{StateIdle, true},
+		{StateBlocked, true},
+	} {
 		r := NewReports()
-		if _, ok := r.Observe("%1", FormatReport(state, now.UnixMilli(), ""), "claude", now); !ok {
-			t.Fatalf("setup: the %s report was not accepted", state)
+		if _, ok := r.Observe("%1", FormatReport(tc.state, now.UnixMilli(), ""), "claude", now); !ok {
+			t.Fatalf("setup: the %s report was not accepted", tc.state)
 		}
-		if r.NeedsScreen("%1") {
-			t.Errorf("a %s report asked for a capture", state)
+		if got := r.NeedsScreen("%1"); got != tc.want {
+			t.Errorf("NeedsScreen with a %s report in force = %v, want %v", tc.state, got, tc.want)
 		}
+	}
+}
+
+// A blocked report's window never closes on agreement the way an idle one's
+// does. There is no verdict that ends the checking: the dialog can be answered
+// at the terminal at any poll, and the poll it is answered at is the one rule 2
+// starts counting from.
+func TestABlockedReportIsCheckedForAsLongAsItStands(t *testing.T) {
+	now := time.UnixMilli(1789075200000)
+	r := NewReports()
+	if _, ok := r.Observe("%1", FormatReport(StateBlocked, now.UnixMilli(), ""), "claude", now); !ok {
+		t.Fatal("setup: the blocked report was not accepted")
+	}
+	// A form on screen every poll: the report stands and the counter never
+	// reaches NBlocked, however long it goes on.
+	for i := 0; i < (settleAfter+1)*3; i++ {
+		if !r.NeedsScreen("%1") {
+			t.Fatalf("poll %d: the captures stopped while the report still stood", i+1)
+		}
+		if !r.CorroborateBlocked("%1", false, true) {
+			t.Fatalf("poll %d: a settled screen still showing a form dropped the report", i+1)
+		}
+	}
+	// A pane with no report in force has nothing to check.
+	if r.CorroborateBlocked("%2", false, false) {
+		t.Error("evidence for a pane with no report in force was accepted")
+	}
+}
+
+// Rule 2 counts a RUN of consecutive settled polls with no registered form on
+// screen, and a form on screen starts the run again.
+//
+// Driven at the method rather than through the poller, because through the
+// poller it is unreachable today: a form arriving on a screen is a capture that
+// moved, and rule 1 drops the report on that poll before rule 2 is asked
+// anything. So "never drops at any count" -- the kill the plan's mutant table
+// names for this -- cannot see it: on a screen that shows the dialog at every
+// poll the counter is never incremented, and deleting the reset changes
+// nothing. What the reset is for is the contract: the day rule 1 becomes
+// something softer than a drop, a total rather than a run would drop a true
+// blocked after NBlocked scattered polls spread over an afternoon.
+func TestRule2CountsARunAndAFormStartsItAgain(t *testing.T) {
+	now := time.UnixMilli(1789075200000)
+	r := NewReports()
+	if _, ok := r.Observe("%1", FormatReport(StateBlocked, now.UnixMilli(), ""), "claude", now); !ok {
+		t.Fatal("setup: the blocked report was not accepted")
+	}
+	// settleAfter settled polls with nothing on screen: one short of the count,
+	// and written off settleAfter so it stays there if NBlocked moves.
+	for i := 1; i <= settleAfter; i++ {
+		if !r.CorroborateBlocked("%1", false, false) {
+			t.Fatalf("poll %d of settleAfter = %d: dropped early", i, settleAfter)
+		}
+	}
+	if !r.CorroborateBlocked("%1", false, true) {
+		t.Fatal("a form back on screen dropped the report")
+	}
+	// The run starts again from here, so settleAfter more polls must not drop.
+	for i := 1; i <= settleAfter; i++ {
+		if !r.CorroborateBlocked("%1", false, false) {
+			t.Fatalf("poll %d after the form: dropped at %d polls since the form, want the run "+
+				"counted from the form and not the total since the report", i, i)
+		}
+	}
+	if r.CorroborateBlocked("%1", false, false) {
+		t.Errorf("settleAfter+1 = %d settled formless polls after the form left the screen did "+
+			"not drop the report", settleAfter+1)
 	}
 }
 

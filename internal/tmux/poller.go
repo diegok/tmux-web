@@ -267,25 +267,43 @@ func (p *Poller) classify(ctx context.Context, rows []Row, reports map[string]st
 		// already settled which wins -- so the second fork buys nothing either
 		// way, and not taking it is the whole win of the feature.
 		if rep, ok := p.reports.Observe(rows[i].PaneID, reports[rows[i].PaneID], rows[i].Command, now); ok {
-			// Evidence rule 3. A resting idle makes a claim about the screen,
-			// and while a client is connected the claim is checked over a
-			// window of NIdle polls: the pane IS captured, and the report is
-			// dropped only if the classifier says working for the whole of it.
-			// Every other report -- and every report at all with nobody
-			// watching -- skips the capture entirely, which is the win.
+			// Both RESTING states make a claim about the screen, and while a
+			// client is connected each is checked against one: a reported idle
+			// over a window of NIdle polls (rule 3), a reported blocked for as
+			// long as it stands (rules 1 and 2). A working report -- and every
+			// report at all with nobody watching -- skips the capture entirely,
+			// which is the win.
 			stands := true
 			var st Status
-			if connected && rep.State == StateIdle && p.reports.NeedsScreen(rows[i].PaneID) {
+			var blocked bool
+			var checked string
+			if connected && p.reports.NeedsScreen(rows[i].PaneID) {
 				screen, err := p.capture(ctx, rows[i].PaneID)
 				if err == nil {
 					captured = append(captured, rows[i].PaneID)
-					// blocked=false: the window asks the classifier one
-					// question only -- has the screen settled. blocked's only
-					// effect in Observe is to withhold the finish stamp, and
-					// inside the window the row's FinishedAt is the report's
-					// derivation either way.
-					st = p.classifier.Observe(rows[i].PaneID, screen, now, false)
-					stands = p.reports.Corroborate(rows[i].PaneID, st.State == StateIdle)
+					checked = screen
+					if rep.State == StateBlocked {
+						// Evidence rules 1 and 2. The grammars run on this
+						// capture whatever the verdict turns out to be: they
+						// are rule 2's premise, and on a drop they are what
+						// keeps the badge -- see below.
+						blocked = IsBlocked(agent, screen)
+						st = p.classifier.Observe(rows[i].PaneID, screen, now, blocked)
+						// Status.Changed, not st.State: the verdict is working
+						// on a first sight and on every poll before settleAfter,
+						// and a rule 1 keyed on it would drop a true blocked on
+						// an ordinary settle.
+						stands = p.reports.CorroborateBlocked(rows[i].PaneID, st.Changed, blocked)
+					} else {
+						// Evidence rule 3. blocked=false: the window asks the
+						// classifier one question only -- has the screen
+						// settled. blocked's only effect in Observe is to
+						// withhold the finish stamp, and inside the window the
+						// row's FinishedAt is the report's derivation either
+						// way.
+						st = p.classifier.Observe(rows[i].PaneID, screen, now, false)
+						stands = p.reports.Corroborate(rows[i].PaneID, st.State == StateIdle)
+					}
 				}
 			}
 			if stands {
@@ -322,6 +340,15 @@ func (p *Poller) classify(ctx context.Context, rows []Row, reports map[string]st
 			rows[i].AgentState = st.State
 			rows[i].FinishedAt = st.FinishedAt
 			rows[i].StateSource = SourceScreen
+			if blocked {
+				// A rule 1 drop with the dialog still on screen: the report
+				// goes and the badge does not, because the grammar has just
+				// matched this same capture positively. Both rules require a
+				// connected client, so there is no case where the drop happens
+				// and the grammar is not there to catch it.
+				rows[i].AgentState = StateBlocked
+				rows[i].Question = ExtractQuestion(agent, checked)
+			}
 			continue
 		}
 		if !connected {

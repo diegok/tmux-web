@@ -48,6 +48,20 @@ const workingTTL = 60 * time.Second
 // are different claims. Widening N trades one failure for another.
 const NIdle = settleAfter + 2
 
+// NBlocked is how many consecutive settled polls with no registered form on
+// screen drop a reported blocked.
+//
+// A DIFFERENT number from NIdle, and nobody should carry 4 across. Rule 1 drops
+// anything that moves before rule 2 sees it, so rule 2 never has to absorb a
+// repaint and needs no R: its floor is settleAfter + 1.
+//
+// The value is a guess of the same standing as workingTTL -- open question 3 in
+// the design -- and measuring it needs the dialog screens question 10 is also
+// waiting on. Too small and a true blocked is dropped on a slow-repainting
+// screen; too large and the overnight case takes longer to correct itself.
+// Expressed against settleAfter, in one place, so that changing it is one line.
+const NBlocked = settleAfter + 1
+
 // Reports decides, per pane, whether the standing @wterm_agent value is the
 // authority for that pane's state.
 //
@@ -70,6 +84,16 @@ type reportState struct {
 	// report is accepted: a new report is a new claim and earns its own window.
 	windowPolls int  // captures spent inside the window
 	verified    bool // the classifier agreed at some poll inside it
+	// settledPolls is rule 2's counter for a reported blocked: consecutive
+	// polls whose capture did not move and showed no registered form. Reset by
+	// a form on screen, and reset with the window whenever a newer report is
+	// accepted.
+	//
+	// Its own field rather than windowPolls reused. A report is idle or
+	// blocked, never both, so one counter would work -- and would make the two
+	// constants that count it look like one number, which is the mistake this
+	// whole task exists to keep from being made again.
+	settledPolls int
 	// rejected is the timestamp of the newest report the evidence overturned.
 	//
 	// It is what stops a dropped report coming straight back: the standing
@@ -122,7 +146,7 @@ func (r *Reports) Observe(paneID, raw, command string, now time.Time) (Report, b
 		// A newer report is a new claim about the screen, so it is checked
 		// afresh. Inheriting the previous report's verdict would let one
 		// verified turn end vouch for every turn end after it.
-		st.windowPolls, st.verified = 0, false
+		st.windowPolls, st.verified, st.settledPolls = 0, false, 0
 	}
 	if st.accepted.Timestamp <= st.rejected {
 		// The evidence overturned this report and the option still holds it.
@@ -140,20 +164,34 @@ func (r *Reports) Observe(paneID, raw, command string, now time.Time) (Report, b
 }
 
 // NeedsScreen reports whether this pane must be captured despite a report being
-// in force: only for a resting idle whose window is still open.
+// in force. Only the two RESTING states ask for one, and they ask over
+// different spans.
 //
-// Every other report skips the capture entirely, which is the win of the
-// feature. A working report is re-asserted by its own writer and expires on a
-// clock; blocked is evidence rules 1 and 2, which are Task 8's.
+// A working report skips the capture entirely, which is the win of the feature:
+// it is re-asserted by its own writer and expires on a clock, so a capture has
+// nothing to add.
 func (r *Reports) NeedsScreen(paneID string) bool {
 	st := r.panes[paneID]
-	if st == nil || st.accepted.State != StateIdle {
+	if st == nil {
 		return false
 	}
-	// Open until the classifier agrees. It cannot still be open past NIdle
-	// polls: the poll that reaches the count rejects the report, and a rejected
-	// report is not in force, so this is never asked about one.
-	return !st.verified
+	switch st.accepted.State {
+	case StateIdle:
+		// Rule 3's window, open until the classifier agrees. It cannot still be
+		// open past NIdle polls: the poll that reaches the count rejects the
+		// report, and a rejected report is not in force, so this is never asked
+		// about one.
+		return !st.verified
+	case StateBlocked:
+		// Rules 1 and 2, for as long as the report stands. There is no verdict
+		// that closes this one: rule 1's evidence is a capture that moved and
+		// can arrive at any poll, and the dialog can be answered at the
+		// terminal at any poll, which is the poll rule 2 starts counting from.
+		// So a blocked report costs a fork per poll -- the case the app exists
+		// for is exactly the one where the report is wrong.
+		return true
+	}
+	return false
 }
 
 // Corroborate feeds one classifier verdict into the open window and reports
@@ -178,6 +216,56 @@ func (r *Reports) Corroborate(paneID string, idle bool) bool {
 		return true
 	}
 	if st.windowPolls >= NIdle {
+		r.reject(paneID, st.accepted.Timestamp)
+		return false
+	}
+	return true
+}
+
+// CorroborateBlocked feeds one poll's evidence about a reported blocked into
+// rules 1 and 2, and reports whether the report survives.
+//
+// changed is Status.Changed -- whether THIS capture differed from the previous
+// one -- and not the classifier's verdict: the verdict is working on a first
+// sight and on every poll before settleAfter, so a rule keyed on it would drop
+// a true blocked on an ordinary settle.
+//
+// formOnScreen is IsBlocked's answer for this agent, which asks every
+// registered form. "Not the one grammar this agent has": the day a second
+// claude form is promoted, a standing permission report on a screen showing an
+// elicitation form must not be dropped.
+//
+// Rule 1 first, and it returns: a screen that moved is positive evidence the
+// agent is running, and a poll that moved is not a settled poll, so rule 2's
+// counter must not advance on it. That ordering is invisible from outside
+// today -- rule 1 drops the report there and then, so the counter's value never
+// gets to matter -- and it is written this way so it stays true if rule 1 ever
+// becomes something softer than a drop.
+func (r *Reports) CorroborateBlocked(paneID string, changed, formOnScreen bool) bool {
+	st := r.panes[paneID]
+	if st == nil {
+		return false
+	}
+	if changed {
+		// Rule 1. The integration died at a dialog the user then answered, and
+		// the pane visibly resumed work. The badge does not necessarily go with
+		// the report: a dropped report hands the pane back to the grammars on
+		// this same capture, and a dialog still on screen is matched there.
+		r.reject(paneID, st.accepted.Timestamp)
+		return false
+	}
+	if formOnScreen {
+		// The agent really is waiting. The run of settled polls rule 2 counts
+		// starts again from the poll the form leaves the screen.
+		st.settledPolls = 0
+		return true
+	}
+	st.settledPolls++
+	if st.settledPolls >= NBlocked {
+		// Rule 2. The user answered at the terminal with no client connected
+		// and the agent finished before anyone reconnected: nothing ever
+		// changes again, so rule 1 never fires and without this the blocked
+		// rests forever on a finished agent.
 		r.reject(paneID, st.accepted.Timestamp)
 		return false
 	}

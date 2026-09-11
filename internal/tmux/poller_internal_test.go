@@ -1062,3 +1062,303 @@ func TestTheFirstWindowPollIsAFirstSight(t *testing.T) {
 		t.Errorf("finishedAt = %d, want the report's own timestamp %d", row.FinishedAt, reportTS)
 	}
 }
+
+// --- evidence rules 1 and 2 --------------------------------------------------
+
+// blockedReportPoller is one claude pane reporting blocked, with a client
+// connected and the screen under the test's control.
+func blockedReportPoller(screen string, screens *map[string]string, captured *[]string) (*Poller, context.Context) {
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	*screens = map[string]string{"%1": screen}
+	reports := map[string]string{"%1": FormatReport(StateBlocked, time.Now().Add(-3*time.Second).UnixMilli(), "")}
+	connected := true
+	return NewPollerWith(Options{
+		SnapshotWithReports: func(context.Context) ([]Row, map[string]string, error) {
+			out := make(map[string]string, len(reports))
+			for id, v := range reports {
+				out[id] = v
+			}
+			return append([]Row{}, rows...), out, nil
+		},
+		Capture: func(_ context.Context, paneID string) (string, error) {
+			*captured = append(*captured, paneID)
+			s, ok := (*screens)[paneID]
+			if !ok {
+				return "", errors.New("no such pane: " + paneID)
+			}
+			return s, nil
+		},
+		Connected: func() bool { return connected },
+	}), context.Background()
+}
+
+// Rule 2 needs a TRUE PREMISE, not a counter.
+//
+// The fixtures are the real captured claude permission screen with the dialog
+// present, and the same screen after the dialog is answered. Revision 2 of the
+// design specified this test as "N settled captures drop, N-1 do not", which
+// tests the counter and cannot see the blocker: its premise -- that a reported
+// blocked has a matchable dialog -- was false for four fifths of that
+// revision's notification whitelist.
+func TestRule2NeedsATruePremise(t *testing.T) {
+	// The relationship, on its own line, first. Every count below is a count of
+	// POLLS, and a poll count written against NBlocked moves with NBlocked:
+	// retarget the constant at 4 and the fixture drives 4 polls, drops at 4 and
+	// not at 3, and the whole test is green on the mutant it exists to kill.
+	// Unlike Task 7 there is no second assertion here to catch it -- nothing in
+	// this test depends on anything but the count -- so the only thing that can
+	// pin the value is a statement of the relationship, in terms of a constant
+	// the mutant does not touch. This kills BOTH `NBlocked = NIdle` (which is
+	// settleAfter+2) and `NBlocked = settleAfter`. The model is
+	// TestSanitizeActivityBounds' `MaxActivity != MaxLabel` line
+	// (internal/tmux/report_test.go:56).
+	if NBlocked != settleAfter+1 {
+		t.Fatalf("NBlocked = %d, want settleAfter+1 = %d: rule 1 drops anything that moves before "+
+			"rule 2 sees it, so rule 2 never has to absorb a repaint and needs no R -- it is NOT "+
+			"NIdle (%d), and 4 must not be carried across", NBlocked, settleAfter+1, NIdle)
+	}
+
+	blocked := readFixture(t, "claude-blocked.txt")
+	answered := readFixture(t, "claude-idle.txt")
+	if IsBlocked("claude", answered) {
+		t.Fatal("the answered fixture still matches the grammar, so rule 2 is never reached here")
+	}
+
+	// A settled screen with the dialog still on it never drops, at any count.
+	// Bound written off settleAfter, like everything else here.
+	var screens map[string]string
+	var captured []string
+	p, ctx := blockedReportPoller(blocked, &screens, &captured)
+	for i := 1; i <= (settleAfter+1)*3; i++ {
+		p.refresh(ctx)
+		row := stateOf(t, p, "%1")
+		if row.AgentState != StateBlocked || row.StateSource != SourceEvent {
+			t.Fatalf("poll %d of (settleAfter+1)*3 = %d: %+v, want the report still standing on a "+
+				"screen that still shows the dialog", i, (settleAfter+1)*3, row)
+		}
+	}
+	if len(captured) != (settleAfter+1)*3 {
+		t.Errorf("took %d captures in %d polls: a standing blocked report is checked every poll, "+
+			"because rule 1's evidence can arrive at any one of them", len(captured), (settleAfter+1)*3)
+	}
+
+	// The same screen answered drops at exactly settleAfter+1 settled polls,
+	// and not at settleAfter. Loop and boundary both built from settleAfter, so
+	// that they stay where they are when NBlocked is retargeted.
+	captured = nil
+	p, ctx = blockedReportPoller(answered, &screens, &captured)
+	for i := 1; i <= settleAfter; i++ {
+		p.refresh(ctx)
+		row := stateOf(t, p, "%1")
+		if row.AgentState != StateBlocked || row.StateSource != SourceEvent {
+			t.Fatalf("poll %d of settleAfter = %d: %+v, want the report still standing -- a window "+
+				"this short drops a true blocked on a slow-repainting screen", i, settleAfter, row)
+		}
+	}
+	p.refresh(ctx)
+	row := stateOf(t, p, "%1")
+	if row.StateSource != SourceScreen {
+		t.Fatalf("after settleAfter+1 = %d settled polls with no registered form on screen: %+v, "+
+			"want the report dropped and the pane back on the classifier", settleAfter+1, row)
+	}
+	if row.AgentState == StateBlocked {
+		t.Errorf("the badge survived the drop on a screen with no dialog on it: %+v", row)
+	}
+	if row.Question != nil {
+		t.Errorf("a dropped report quoted a question: %+v", row.Question)
+	}
+}
+
+// Rule 2 asks "no registered form for this agent", not "not the one grammar
+// this agent has". Same question today; a different question the day a second
+// claude form is registered, and the day it stops being the same question is
+// the day a standing permission report would be wrongly dropped on a screen
+// showing an elicitation form.
+func TestRule2AsksAboutEveryRegisteredForm(t *testing.T) {
+	registerTestAgent(t, "twoform",
+		form{ID: "twoform/permission", dialog: markerDialog{marker: "FIRST FORM"}},
+		form{ID: "twoform/elicitation", dialog: markerDialog{marker: "SECOND FORM"}})
+
+	// The screen shows the SECOND form only, while the standing report is the
+	// one the first form's whitelist entry wrote.
+	screen := "an elicitation form\nSECOND FORM\nwaiting on you"
+	if blockedRules["twoform"][0].dialog.isBlocked(screen) {
+		t.Fatal("the first form matches this screen, so the test proves nothing")
+	}
+
+	rows := []Row{{PaneID: "%1", Command: "twoform"}}
+	screens := map[string]string{"%1": screen}
+	reports := map[string]string{"%1": FormatReport(StateBlocked, time.Now().Add(-3*time.Second).UnixMilli(), "")}
+	var captured []string
+	connected := true
+	p := reportPoller(&rows, reports, screens, &captured, &connected)
+	ctx := context.Background()
+
+	for i := 1; i <= (settleAfter+1)*3; i++ {
+		p.refresh(ctx)
+		row := stateOf(t, p, "%1")
+		if row.AgentState != StateBlocked || row.StateSource != SourceEvent {
+			t.Fatalf("poll %d: %+v, want the report standing -- the agent is waiting, and WHICH "+
+				"form it waits at is not rule 2's business", i, row)
+		}
+	}
+
+	// And the test is not vacuously "never drops": take both forms off the
+	// screen and rule 2 does its job.
+	screens["%1"] = "back at the prompt, nothing to decide"
+	for i := 1; i <= settleAfter+1; i++ {
+		p.refresh(ctx)
+	}
+	if row := stateOf(t, p, "%1"); row.StateSource != SourceScreen {
+		t.Errorf("a screen matching NO registered form = %+v, want the report dropped", row)
+	}
+}
+
+// Rule 1 needs a CHANGED HASH, not a working verdict. state.go reports working
+// on a first sight and on any poll before settleAfter, so a rule keyed on the
+// verdict would fire on an ordinary settle -- which is every blocked report's
+// first poll, since a capture-skipped pane comes back as a first sight.
+func TestRule1DropsOnAChangedHashOnly(t *testing.T) {
+	blocked := readFixture(t, "claude-blocked.txt")
+
+	// The premise, checked against the classifier itself rather than assumed:
+	// on the first settleAfter polls of a static screen the verdict really is
+	// working. Without this the test cannot see the mutant it exists for.
+	probe := NewClassifier()
+	for i := 1; i <= settleAfter; i++ {
+		st := probe.Observe("%probe", blocked, time.Now(), true)
+		if st.State != StateWorking {
+			t.Fatalf("premise: the classifier's verdict at poll %d is %q, want working", i, st.State)
+		}
+		if st.Changed {
+			t.Fatalf("premise: Changed at poll %d of an unchanging screen", i)
+		}
+	}
+
+	var screens map[string]string
+	var captured []string
+	p, ctx := blockedReportPoller(blocked, &screens, &captured)
+	for i := 1; i <= settleAfter; i++ {
+		p.refresh(ctx)
+		row := stateOf(t, p, "%1")
+		if row.AgentState != StateBlocked || row.StateSource != SourceEvent {
+			t.Fatalf("poll %d of settleAfter = %d: %+v, want the report standing. The classifier "+
+				"says working on this poll and nothing moved, so a rule 1 keyed on the verdict "+
+				"drops a true blocked here", i, settleAfter, row)
+		}
+	}
+
+	// One capture that differs, and the report goes on that very poll -- not
+	// NBlocked polls later, which is rule 2's timing. The dialog is gone from
+	// this screen, so rule 2's counter is at zero and cannot be what dropped it.
+	screens["%1"] = "the agent is running again"
+	p.refresh(ctx)
+	row := stateOf(t, p, "%1")
+	if row.StateSource != SourceScreen || row.AgentState != StateWorking {
+		t.Fatalf("the poll after the screen moved = %+v, want the report dropped on the spot and "+
+			"the pane back on the classifier", row)
+	}
+}
+
+// Composed: a late repaint on a pane reporting blocked is a changed hash, so
+// rule 1 drops the report -- and the badge does not go with it, because a
+// dropped report hands the pane to the grammars and the dialog is still on the
+// screen for IsBlocked to match positively. Both rules require a connected
+// client, so there is no case where the drop happens and the grammar is not
+// there to catch it.
+func TestARule1DropKeepsTheBadgeWhenTheDialogIsStillThere(t *testing.T) {
+	blocked := readFixture(t, "claude-blocked.txt")
+	var screens map[string]string
+	var captured []string
+	p, ctx := blockedReportPoller(blocked, &screens, &captured)
+
+	p.refresh(ctx)
+	if row := stateOf(t, p, "%1"); row.AgentState != StateBlocked || row.StateSource != SourceEvent {
+		t.Fatalf("setup: %+v, want the blocked report in force", row)
+	}
+
+	// The repaint: a spinner still turning under a box the user has not
+	// answered. TestRefreshBlockedOverridesChurn shows this is a real shape.
+	screens["%1"] = blocked + "\nthe spinner turned"
+	p.refresh(ctx)
+	row := stateOf(t, p, "%1")
+	if row.StateSource != SourceScreen {
+		t.Fatalf("a changed capture left the report standing: %+v", row)
+	}
+	if row.AgentState != StateBlocked {
+		t.Fatalf("the badge went with the report: %+v, want blocked from the screen -- the dialog "+
+			"is still there for the grammar to match", row)
+	}
+	if row.Question == nil || row.Question.Text == "" {
+		t.Errorf("the pane went back to the grammars with no question read: %+v", row.Question)
+	}
+	if row.FinishedAt != 0 {
+		t.Errorf("a pane held at a dialog stamped a finish edge at %d", row.FinishedAt)
+	}
+}
+
+// A pane held at a dialog must stamp no finish edge, and the report standing
+// over it does not excuse the poller from saying so.
+//
+// Not in the plan's mutant table, and it survived every mutant that is:
+// `IsBlocked`'s answer is fed to the classifier on this path as well as to rule
+// 2, and a poller that passed `false` there looks correct from every other test
+// in this file. The classifier's `blocked` argument exists precisely because a
+// held permission box is byte-identical poll after poll, which is the shape
+// stillness has -- so without it the box settles into a working->idle edge for a
+// run that never finished.
+//
+// What hides it here is that while a blocked report stands the row's FinishedAt
+// is never read from the classifier, so the bad stamp is invisible at the poll
+// it happens. It surfaces later, on the poll rule 1 hands the pane back, as a
+// done badge on an agent that is mid-run: the same badge-integrity failure v2
+// spent most of its complexity avoiding, arriving through the new authority.
+func TestAPaneHeldAtADialogUnderAReportStampsNoFinishEdge(t *testing.T) {
+	dialog := readFixture(t, "claude-blocked.txt")
+	first := time.Now().Add(-10 * time.Second)
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	screens := map[string]string{"%1": dialog}
+	reports := map[string]string{"%1": FormatReport(StateBlocked, first.UnixMilli(), "")}
+	var captured []string
+	connected := true
+	p := reportPoller(&rows, reports, screens, &captured, &connected)
+	ctx := context.Background()
+
+	// A capture that really moves, so that everChanged is set. Without it no
+	// poll can stamp at all and the test proves nothing -- which is also rule
+	// 1's drop, with the badge kept by the grammar.
+	p.refresh(ctx)
+	screens["%1"] = dialog + "\nthe spinner turned"
+	p.refresh(ctx)
+	if row := stateOf(t, p, "%1"); row.StateSource != SourceScreen || row.AgentState != StateBlocked {
+		t.Fatalf("setup: %+v, want rule 1's drop with the badge kept", row)
+	}
+
+	// The integration re-asserts over the same, still-held dialog, and the
+	// newer report is back in force. settleAfter identical captures follow,
+	// which is the classifier's one chance to stamp: `still` passes through
+	// settleAfter exactly once per edge.
+	reports["%1"] = FormatReport(StateBlocked, first.Add(5*time.Second).UnixMilli(), "")
+	for i := 1; i <= settleAfter; i++ {
+		p.refresh(ctx)
+		if row := stateOf(t, p, "%1"); row.StateSource != SourceEvent || row.AgentState != StateBlocked {
+			t.Fatalf("poll %d of settleAfter = %d: %+v, want the newer report in force over the "+
+				"dialog", i, settleAfter, row)
+		}
+	}
+
+	// The probe: one more capture that moves, which hands the pane back to the
+	// classifier and with it whatever finishedAt the classifier has been
+	// keeping.
+	screens["%1"] = dialog + "\nthe spinner turned again"
+	p.refresh(ctx)
+	row := stateOf(t, p, "%1")
+	if row.StateSource != SourceScreen || row.AgentState != StateBlocked {
+		t.Fatalf("%+v, want rule 1's drop with the badge kept", row)
+	}
+	if row.FinishedAt != 0 {
+		t.Errorf("finishedAt = %d on a pane that has been held at a dialog throughout: the poller "+
+			"must pass IsBlocked's answer to the classifier on the report path too, or a run "+
+			"interrupted by a question earns a done badge it never finished for", row.FinishedAt)
+	}
+}

@@ -29,6 +29,19 @@ const settleAfter = 2
 type Status struct {
 	State      string // StateWorking or StateIdle; blocked is decided elsewhere
 	FinishedAt int64  // unix ms of the last working->idle edge, 0 if there was none
+	// Changed reports whether THIS capture differed from the previous one.
+	//
+	// Separate from State because they answer different questions: State says
+	// working on a single changed hash and on every poll before settleAfter,
+	// which is precisely what settleAfter exists to declare is noise. Evidence
+	// rule 1 wants the raw fact -- a changed hash is positive evidence the
+	// agent is running -- and a rule keyed on the verdict would fire on an
+	// ordinary settle.
+	//
+	// False on a first sight, which has nothing to compare against. That is the
+	// first poll of every blocked report's evidence, and calling it a change
+	// would drop every one of them on arrival.
+	Changed bool
 }
 
 // paneState is what the classifier remembers between polls for one pane.
@@ -97,6 +110,7 @@ func (c *Classifier) Observe(paneID, capture string, now time.Time, blocked bool
 	h.Write([]byte(capture))
 	sum := h.Sum64()
 
+	var changed bool
 	p, known := c.panes[paneID]
 	switch {
 	case !known:
@@ -109,12 +123,13 @@ func (c *Classifier) Observe(paneID, capture string, now time.Time, blocked bool
 		p.hash = sum
 		p.still = 0
 		p.everChanged = true
+		changed = true
 	default:
 		p.still++
 	}
 
 	if p.still < settleAfter {
-		return Status{State: StateWorking, FinishedAt: p.finishedAt}
+		return Status{State: StateWorking, FinishedAt: p.finishedAt, Changed: changed}
 	}
 	// Stamp on the transition, not for as long as the pane is idle. `still`
 	// passes through settleAfter exactly once per working->idle edge: guarding
@@ -129,7 +144,11 @@ func (c *Classifier) Observe(paneID, capture string, now time.Time, blocked bool
 	if p.still == settleAfter && p.everChanged && !blocked {
 		p.finishedAt = now.UnixMilli()
 	}
-	return Status{State: StateIdle, FinishedAt: p.finishedAt}
+	// Changed is always false on this path -- a differing capture resets `still`
+	// to 0, which is below settleAfter -- and it is carried anyway rather than
+	// left to the zero value, so that the field means the same thing at every
+	// return and nobody has to prove that again when settleAfter moves.
+	return Status{State: StateIdle, FinishedAt: p.finishedAt, Changed: changed}
 }
 
 // Retain forgets every pane that is not in keep.

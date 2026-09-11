@@ -25,12 +25,19 @@ import (
 )
 
 // The CLI is the half of the auth chain that runs as a person. Everything but
-// `serve` is a client of the admin socket, and the socket is the whole
-// authorization argument: a remote browser carries no OS identity, a local unix
-// socket does, and SO_PEERCRED turns "can you run this command as me on this
-// box" into the proof that mints a credential. So these subcommands take no
-// password, no key, and no --user: being able to open the socket *is* the
-// credential.
+// `serve` and `report` is a client of the admin socket, and the socket is the
+// whole authorization argument: a remote browser carries no OS identity, a
+// local unix socket does, and SO_PEERCRED turns "can you run this command as me
+// on this box" into the proof that mints a credential. So these subcommands
+// take no password, no key, and no --user: being able to open the socket *is*
+// the credential.
+//
+// `report` is the exception, and deliberately so. It talks to tmux and never to
+// the daemon: the state it writes lives in a pane option, which is why it
+// survives a daemon restart and why an agent reporting into a machine with no
+// tmux-web running costs nothing. Its authorization is the same one tmux itself
+// uses -- whoever can drive the tmux socket can already set the option by hand.
+// It also breaks the exit-code convention below; see cmdReport for why.
 //
 // Stream discipline, uniform across subcommands: stdout carries the answer and
 // nothing else, stderr carries commentary. `enroll` therefore prints the bare
@@ -50,9 +57,15 @@ Usage:
   wterm-web enroll  --name <device>
   wterm-web devices
   wterm-web revoke  <device-id>
+  wterm-web report  --state working|blocked|idle [--text TEXT]
 
-serve runs the daemon. The other three talk to its admin socket, which only
-the user the daemon runs as can open -- that is the whole authorization.
+serve runs the daemon. enroll, devices and revoke talk to its admin socket,
+which only the user the daemon runs as can open -- that is the whole
+authorization.
+
+report is different: an agent's integration runs it inside its own tmux pane to
+say what it is doing, and it writes one tmux pane option. It needs no daemon,
+and it always exits 0 so that a reporting failure can never stop an agent.
 
 Run "wterm-web <command> -h" for a command's flags.
 `
@@ -79,6 +92,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdDevices(rest, stdout, stderr)
 	case "revoke":
 		return cmdRevoke(rest, stdout, stderr)
+	case "report":
+		return cmdReport(rest, stdout, stderr)
 	case "help", "-h", "-help", "--help":
 		printUsage(stdout)
 		return 0

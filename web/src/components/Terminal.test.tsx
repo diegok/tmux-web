@@ -225,6 +225,10 @@ function row(over: Partial<SnapshotRow> & Pick<SnapshotRow, 'sessionName'>): Sna
     // A shell: the daemon computes no state for it, and "" is not a state.
     agentState: '',
     finishedAt: 0,
+    // Nothing reported for this pane and nothing decided its state: "" in
+    // both, which is where every pane that is not an agent sits.
+    activity: '',
+    stateSource: '',
     // Present as a key and undefined as a value: `question` is omitempty on the
     // Go side and the wire contract compares keys.
     question: undefined,

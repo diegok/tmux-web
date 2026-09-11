@@ -42,6 +42,10 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     title: 'devbox',
     agentState: '',
     finishedAt: 0,
+    // Nothing reported for this pane and nothing decided its state: "" in
+    // both, which is where every pane that is not an agent sits.
+    activity: '',
+    stateSource: '',
     question: undefined,
     ...over,
   }

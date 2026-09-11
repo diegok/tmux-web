@@ -14,6 +14,12 @@ const (
 	StateBlocked = "blocked"
 )
 
+// Which authority decided a pane's AgentState. "" means nothing did.
+const (
+	SourceEvent  = "event"  // the agent's own report, from @wterm_agent
+	SourceScreen = "screen" // the churn classifier and the blocked grammars
+)
+
 // settleAfter is how many consecutive identical captures mean idle. Two, so
 // ~3s at the 1.5s poll: long enough that a redraw landing between polls does
 // not flicker, short enough to feel live.

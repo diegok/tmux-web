@@ -71,6 +71,24 @@ type Row struct {
 	PaneActive  bool   `json:"paneActive"`
 	Command     string `json:"command"`
 	Title       string `json:"title"` // tmux-sanitised, truncated
+	// Activity is what the agent's own integration says it is doing. "" when no
+	// integration is installed, when its report is stale, and for every pane
+	// that is not an agent. Sanitised and capped on write and again on read.
+	Activity string `json:"activity"`
+	// StateSource is which authority decided AgentState: "event", "screen", or
+	// "" when nothing did.
+	//
+	// It is on the wire mainly so that tests can see it. A report and the
+	// classifier agreeing on "working" is indistinguishable from the precedence
+	// being backwards, and a test that cannot distinguish them is a test that
+	// will stay green through the rewrite that breaks it -- exactly as v2's
+	// blocked override hid finishedAt.
+	//
+	// The UI may use it for a tooltip and must NOT branch the row's appearance
+	// on it: two visibly different kinds of state dot teach the user to trust
+	// one and ignore the other. That prohibition has a test of its own; see
+	// Task 11.
+	StateSource string `json:"stateSource"`
 	// AgentState is "working", "idle" or "blocked", and "" for anything the
 	// daemon did not compute a state for: a pane that is not a known agent, a
 	// poll taken with no browser connected, and a capture that failed. The

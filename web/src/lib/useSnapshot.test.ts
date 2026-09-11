@@ -50,6 +50,11 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     // A shell: the daemon computes no state for it.
     agentState: '',
     finishedAt: 0,
+    // No integration reported anything for this pane, and nothing decided its
+    // state -- which is what "" means in both fields, and the case every pane
+    // that is not an agent is in.
+    activity: '',
+    stateSource: '',
     // Present as a key and undefined as a value: `question` is omitempty on the
     // Go side, and the contract check below compares KEYS, so a fixture that
     // simply left it out would report the field as missing from TypeScript.
@@ -106,7 +111,10 @@ describe('contract with the daemon', () => {
     // and a pattern that stopped at the quote would simply not see it -- which
     // reads as "TypeScript is missing a field" rather than as a broken check.
     const tags = [...struct[1].matchAll(/json:"([^"]+)"/g)].map((m) => m[1].split(',')[0])
-    expect(tags).toHaveLength(16)
+    // A literal, never `Object.keys(row()).length`: the count is here to make a
+    // field added on one side only fail, and a count derived from the
+    // TypeScript side would agree with itself forever.
+    expect(tags).toHaveLength(18)
     expect(Object.keys(row()).sort()).toEqual(tags.sort())
   })
 })
@@ -365,6 +373,18 @@ describe('groupRows', () => {
     // which is why `rowMenu` leaves them out when this is "".
     const [session] = groupRows([row({ windowId: '@7', windowIndex: 2 })])
     expect(session.windows[0].id).toBe('@7')
+  })
+
+  it('carries the agent report and the state is source onto the pane node', () => {
+    // The tree is what the sidebar renders, so a field the wire carries and
+    // `groupRows` drops is a field nothing can ever show. Asserted on the node,
+    // from a row that differs from the default in both fields.
+    const [session] = groupRows([
+      row({ command: 'claude', agentState: 'working', activity: 'edit report.go', stateSource: 'event' }),
+    ])
+    const pane = session.windows[0].panes[0]
+    expect(pane.activity).toBe('edit report.go')
+    expect(pane.stateSource).toBe('event')
   })
 
   it('keys a window on its id, so renumbering it does not replace its row', () => {
@@ -775,6 +795,36 @@ describe('SnapshotPoller', () => {
       await h.tick()
       expect(h.last.groups, `a change to ${key} was swallowed`).not.toBe(first)
     }
+  })
+
+  // The two fields v3 added get this spelled out rather than left to the loop
+  // above, because they are the case that loop exists for and the one where
+  // being wrong is invisible: an agent's activity line is the field that moves
+  // most often with nothing else about the pane moving at all, so a `rowsEqual`
+  // that does not compare it keeps the previous tree object, React reconciles
+  // nothing, and a stale line sits on screen while every other test stays
+  // green. Each field is moved on its own, from a payload identical in every
+  // other field, and the identical-payload leg below it is what keeps a
+  // `rowsEqual` that simply always returns false from passing this.
+  it.each([
+    ['activity', { activity: 'edit report.go' }],
+    ['stateSource', { stateSource: 'event' }],
+  ])('rebuilds the tree when only %s changed', async (_name, moved) => {
+    const base = row({ paneId: '%1', command: 'claude', agentState: 'working' })
+
+    const h = harness()
+    h.answerWith(() => ok({ panes: [{ ...base }] }))
+    h.poller.start()
+    await h.tick(0)
+    const first = h.last.groups
+
+    h.answerWith(() => ok({ panes: [{ ...base }] }))
+    await h.tick()
+    expect(h.last.groups, 'an identical payload rebuilt the tree').toBe(first)
+
+    h.answerWith(() => ok({ panes: [{ ...base, ...moved }] }))
+    await h.tick()
+    expect(h.last.groups).not.toBe(first)
   })
 
   // `question` is the only field on the wire that is not a scalar, so it is the

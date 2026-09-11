@@ -127,6 +127,26 @@ export interface SnapshotRow {
    */
   title: string
   /**
+   * What the agent's own integration says it is doing, or "".
+   *
+   * "" covers every pane no integration reports for -- not an agent, no
+   * integration installed, a report gone stale -- so it is far more often empty
+   * than not. The daemon sanitises and caps it on the way in and again on the
+   * way out; like `label`, it is a value something other than the daemon wrote.
+   */
+  activity: string
+  /**
+   * Which authority decided `agentState`: `"event"` (the agent's own report),
+   * `"screen"` (the churn classifier), or `""` when nothing did.
+   *
+   * On the wire mainly so that tests can see it: a report and the classifier
+   * agreeing on `working` is indistinguishable from the precedence being
+   * backwards. The UI may put it in a tooltip and must **not** branch a row's
+   * appearance on it -- two visibly different kinds of state dot teach the user
+   * to trust one and ignore the other.
+   */
+  stateSource: string
+  /**
    * `""`, `"working"`, `"idle"` or `"blocked"`.
    *
    * `""` means the daemon computed no state -- the pane is not a known agent,
@@ -282,6 +302,10 @@ export interface PaneNode {
   /** tmux's active pane within this window. */
   active: boolean
   appOwned: boolean
+  /** `SnapshotRow.activity`: what the agent says it is doing, or "". */
+  activity: string
+  /** `SnapshotRow.stateSource`: "event", "screen" or "". Never styles the row. */
+  stateSource: string
   /** `SnapshotRow.agentState`, carried through unchanged. "" is not a state. */
   agentState: string
   /** `SnapshotRow.finishedAt`: unix ms of the last working -> idle edge, or 0. */
@@ -424,6 +448,8 @@ export function groupRows(rows: readonly SnapshotRow[]): SessionNode[] {
       label: row.label,
       active: row.paneActive,
       appOwned: row.appOwned,
+      activity: row.activity,
+      stateSource: row.stateSource,
       agentState: row.agentState,
       finishedAt: row.finishedAt,
       question: row.question,
@@ -794,6 +820,12 @@ function rowsEqual(a: readonly SnapshotRow[], b: readonly SnapshotRow[]): boolea
       x.paneActive === y.paneActive &&
       x.appOwned === y.appOwned &&
       x.agentState === y.agentState &&
+      // The activity line is the field that moves on its own most often: an
+      // agent reports a new one on every tool call while its title, command
+      // and state all stand still. Left out here, it would change in tmux and
+      // never reach the DOM.
+      x.activity === y.activity &&
+      x.stateSource === y.stateSource &&
       x.finishedAt === y.finishedAt &&
       questionsEqual(x.question, y.question)
     )

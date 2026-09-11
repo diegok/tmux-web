@@ -249,14 +249,23 @@ That keeps the *current window* independent, so a tab and your local terminal ca
 look at different things. Three properties belong to the window rather than the
 session and are therefore shared with anyone else attached:
 
-- **Size** — tmux sizes a window for whichever client acted most recently, so
-  viewing the same window in the browser and locally makes them fight over it.
+- **Size** — tmux sizes a window for whichever client acted most recently, and
+  both typing and resizing count. The other client is then *clipped*: it draws
+  the top-left corner of the window and the rest simply is not there, which is
+  what makes vim look broken in a browser narrower than the terminal beside it.
 - **Copy mode** — scrolling back in the browser scrolls the local view too.
 - **Active pane** — clicking a pane in the sidebar moves it for every client.
 
 None of these bite unless you are watching the same window from two places at
 once. There is no way to scope them per client in tmux; the design document has
 the details.
+
+If you do co-view often, `set -wg window-size smallest` in your own tmux config
+fits every shared window to the smallest client watching it — the browser is
+then always whole and the wider terminal carries dead margin instead. tmux-web
+does not set this for you and should not: `window-size` is a *window* option and
+grouped sessions share their windows, so a value the daemon set for its own
+throwaway session would land on yours as well.
 
 ## Requirements
 

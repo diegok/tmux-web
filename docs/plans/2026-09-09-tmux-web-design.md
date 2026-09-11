@@ -125,13 +125,37 @@ are a property of the window, shared across every client viewing it, and
 `window-size latest` gives them to whichever client was most recently active.
 
 So when the local terminal and a browser tab view the **same** window, the last
-one to type sets the size for both, and the local terminal gets yanked to the
+one to *act* sets the size for both, and the local terminal gets yanked to the
 laptop's dimensions. Debouncing resize to ~150ms reduces the frequency of this;
 it does not prevent it. There is no per-client sizing in the grouped-session
 model.
 
 This is accepted for v1. It only bites when co-viewing one window, which is not
 the normal remote workflow. It must not be described as solved.
+
+#### Measured, against tmux 3.7b, two PTY clients on one grouped session
+
+- **A resize counts as acting.** "Most recently active" is not keyboard
+  activity: a bare `SIGWINCH` makes a client the latest one, and the shared
+  window follows it in *both* directions. A client sitting at 80x24 beside a
+  120x40 one took the window to 100x29 by being resized and nothing else, and
+  `aggressive-resize on` changed none of it -- as this document already says,
+  that option is defined in terms of `largest`/`smallest` and does nothing under
+  `latest`. So "the browser grows on full-screen and never shrinks back" is not
+  this limitation. It was ours; see `e2e/sizing.spec.ts`.
+- **The smaller client is clipped, not overflowed.** With the window at 160
+  columns and the client at 80, every row tmux wrote to that client was exactly
+  80 columns wide. Nothing wraps and nothing is corrupted -- the right-hand part
+  of the window is simply not sent, which is why a full-width redraw (vim
+  opening) looks truncated rather than scrambled.
+- **`window-size` cannot be scoped to our own session.** It is a window option,
+  and grouped sessions share the window *object*: `set-option -t <our throwaway
+  session> -w window-size smallest` was immediately readable as `smallest` from
+  the user's own session on the same window. There is no value the daemon can
+  set that does not change the user's tmux, and it would have to be re-set on
+  every new window besides. This stays a README suggestion -- `set -wg
+  window-size smallest` in the user's own config -- and never a thing the app
+  does.
 
 ### Scrollback, copy-mode, and the mouse
 

@@ -56,6 +56,18 @@ make test          # test-go (go test ./... -count=1 -race) then test-web (pnpm 
 
 Per-package during a task: `go test ./internal/tmux/ -run TestName -v`, and `cd web && pnpm test <file>`.
 
+**Typechecking is a third check, and neither of the other two performs it.** vitest does not typecheck, so the
+suite stays green over TypeScript that will not build. Run `pnpm typecheck` **from the repo root** after any
+change to a `.ts`/`.tsx` file -- it runs `tsc -b` inside `web/`, exits 2 on a type error and 0 when clean
+(both verified).
+
+**Do not run `npx tsc -b` from the repo root.** The root package has no TypeScript dependency, so npx resolves
+a decoy package that prints *"This is not the tsc command you are looking for"* and **exits 0**. It compiles
+nothing and reports success. Task 4's file list was missing two test files that build a complete `SnapshotRow`;
+the suite passed because vitest does not typecheck, and the typecheck "passed" because it was not running --
+two green checks and nothing looking. `cd web && npx tsc -b` is correct; `pnpm typecheck` from the root is
+shorter and harder to get wrong.
+
 ### Six things here are counter-intuitive. Do not "simplify" them back
 
 1. **The report is not a fourteenth snapshot field.** `Format`'s last slot belongs to `@wterm_label`, and the last slot is the only position layer 2 of the label hardening protects. A second unsanitized field in the middle of the record fails *worse* than the label ever did: a surplus separator shifts every field after it and the row parses successfully **with another pane's values in it**. The report gets its own `list-panes` command inside the same fork.

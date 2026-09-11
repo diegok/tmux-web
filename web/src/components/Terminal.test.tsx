@@ -701,6 +701,21 @@ describe('session presence probe', () => {
     expect(snapshotHasSession(rows, '_web-abcd')).toBe(true)
   })
 
+  it('answers about the session id the socket now carries', () => {
+    // `?session=` carries the session *id*, because the group key is frozen at
+    // the pre-rename name and 404s. The probe has to ask the same question the
+    // daemon asks in `ServeHTTP` -- which now resolves an id as an id and a
+    // name as an exact name -- or a live session reads as gone and the tab
+    // parks on "pick another in the sidebar" with nothing wrong.
+    const rows = [row({ sessionName: 'api', groupKey: 'work3', sessionId: '$4' })]
+    expect(snapshotHasSession(rows, '$4')).toBe(true)
+    expect(snapshotHasSession(rows, 'api')).toBe(true) // a hand-typed ?session=
+    expect(snapshotHasSession(rows, 'work3')).toBe(false) // the group key is not an address
+    // Ids are matched whole: "$4" must not answer for "$40", the way a prefix
+    // would.
+    expect(snapshotHasSession(rows, '$40')).toBe(false)
+  })
+
   it('finds the session among other groups', () => {
     const rows = [row({ sessionName: '0' }), row({ sessionName: 'work' })]
     expect(snapshotHasSession(rows, 'work')).toBe(true)

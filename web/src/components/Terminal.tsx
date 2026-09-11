@@ -156,18 +156,22 @@ export type SessionPresence = 'present' | 'gone' | 'unknown'
 /**
  * Whether the snapshot still contains the session the socket targets.
  *
- * Matched on `sessionName`, not `groupKey`, because that is the exact question
- * the daemon asks: `ServeHTTP` in `internal/front/ws.go` runs
- * `has-session -t =<session>` before it upgrades, and that matches a session's
- * *live name*. `groupKey` is `session_group`, which tmux freezes at the group's
- * pre-rename name and keeps long after the namesake session has died -- so a
- * group can still be full of panes (the app's own throwaway members, or a
- * renamed survivor) while `?session=<key>` 404s. Matching on the group key
- * would call that session present and leave the tab retrying forever, which is
- * the whole bug this is here to fix.
+ * Matched on `sessionId` or `sessionName`, and never on `groupKey`, because
+ * those two are exactly the question the daemon asks: `ServeHTTP` in
+ * `internal/front/ws.go` resolves a `$N` as an id and anything else as an exact
+ * name. The app sends the id (`attachTarget`), a person typing `?session=` by
+ * hand sends a name, and both must read as present here or a live terminal is
+ * condemned by its own probe.
+ *
+ * `groupKey` is `session_group`, which tmux freezes at the group's pre-rename
+ * name and keeps long after the namesake session has died -- so a group can
+ * still be full of panes (the app's own throwaway members, or a renamed
+ * survivor) while `?session=<key>` 404s. Matching on the group key would call
+ * that session present and leave the tab retrying forever, which is the whole
+ * bug this is here to fix.
  */
 export function snapshotHasSession(panes: readonly SnapshotRow[], session: string): boolean {
-  return panes.some((pane) => pane.sessionName === session)
+  return panes.some((pane) => pane.sessionId === session || pane.sessionName === session)
 }
 
 /**
@@ -658,8 +662,21 @@ export interface TerminalHandle {
 }
 
 export interface TerminalProps {
-  /** Base tmux session this tab groups onto. */
+  /**
+   * The tmux session this tab groups onto, as an *address*: a `$N` id, or a
+   * name when `?session=` was typed by hand. It is what `/ws?session=` carries,
+   * what the presence probe asks about, and what the remembered pane is filed
+   * under -- never a `session_group` key, which tmux freezes at the group's
+   * pre-rename name and which addresses nothing after a rename.
+   */
   session: string
+  /**
+   * What to call that session when telling the user it is gone. Defaults to
+   * `session`, which is right while the two coincide and wrong once the address
+   * is an id: `Session "$4" is gone` names nothing a person can find in the
+   * sidebar.
+   */
+  label?: string
   /** Overrides the derived WebSocket url; for stories and tests. */
   url?: string
   className?: string
@@ -676,7 +693,7 @@ const INITIAL_STATUS: TerminalStatus = {
   inputDropped: false,
 }
 
-export function Terminal({ session, url, className, onStatusChange, ref }: TerminalProps) {
+export function Terminal({ session, label, url, className, onStatusChange, ref }: TerminalProps) {
   const { ref: termRef, write, focus } = useTerminal()
   const [status, setStatus] = useState<TerminalStatus>(INITIAL_STATUS)
 
@@ -782,7 +799,7 @@ export function Terminal({ session, url, className, onStatusChange, ref }: Termi
       />
       <ConnectionPill
         status={status}
-        session={session}
+        session={label ?? session}
         onRetry={() => sessionRef.current?.retryNow()}
       />
     </div>
@@ -810,6 +827,7 @@ export function ConnectionPill({
   onRetry,
 }: {
   status: TerminalStatus
+  /** What to call the session in the "gone" copy: a name, not an address. */
   session: string
   onRetry: () => void
 }) {

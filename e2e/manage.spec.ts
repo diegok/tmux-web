@@ -103,6 +103,55 @@ test('renaming a session from the browser renames it in tmux and in the sidebar'
     .toContain('still-attached')
 })
 
+test('a renamed session is still reachable after a reload', async ({ page, tmuxWeb }) => {
+  // The bug the owner hit in real use, end to end: rename a session, click a
+  // pane, and every one of them answers `Session "e2e" is gone` -- with the
+  // session sitting right there in the sidebar, and a reload no help at all.
+  //
+  // The cause is one value doing two jobs. `session_group` is the tree's
+  // identity and its React key, and it was also what `?session=` carried; tmux
+  // freezes it at the name the group was created under, so once this app has
+  // attached once -- which is what creates the group -- a rename leaves the key
+  // naming nothing. `has-session -t =e2e` fails and the handshake 404s.
+  //
+  // Only a browser can prove this: it needs the socket, the query parameter,
+  // sessionStorage surviving a reload, and a real tmux that froze the group.
+  await enroll(page, tmuxWeb, 'laptop')
+
+  // The precondition, asserted: the tab's throwaway session has put a group on
+  // `e2e`. Rename an *ungrouped* session and the group refills under the new
+  // name, which is why this never showed up in a quick manual test.
+  await expect
+    .poll(() => tmuxWeb.tmux('list-sessions', '-F', '#{session_name} #{session_group}'))
+    .toMatch(/^_web-\w+ e2e$/m)
+
+  // Renamed in tmux rather than through the dialog -- the browser rename is the
+  // test above's subject, and this one is about what happens *afterwards*, from
+  // whichever side the rename came.
+  tmuxWeb.tmux('rename-session', '-t', BASE_SESSION, 'renamed')
+  await expect(sessionLabel(page, 'renamed')).toBeVisible()
+  expect(tmuxWeb.tmux('list-sessions', '-F', '#{session_name} #{session_group}')).toContain(
+    `renamed ${BASE_SESSION}`,
+  )
+
+  // The reload is what makes the socket be built again, from the session this
+  // tab remembers. Against the old code this comes back as
+  // `Session "e2e" is gone — pick another in the sidebar`, for good.
+  await page.reload()
+  await expect(page.locator('.term-row').first()).toBeVisible()
+  await expect(pill(page)).toHaveCount(0)
+  await expect(breadcrumb(page)).toContainText('renamed')
+
+  // And it is a live terminal on the renamed session, not merely a page with no
+  // error on it.
+  await windowRow(page, BASE_WINDOW).click()
+  await focusTerminal(page)
+  await page.keyboard.type("printf 'renamed-%s\\n' reachable\n")
+  await expect
+    .poll(() => tmuxWeb.tmux('capture-pane', '-p', '-t', `renamed:${BASE_WINDOW}`))
+    .toContain('renamed-reachable')
+})
+
 test('a new window from the +, a split from the palette, a zoom from the menu', async ({
   page,
   tmuxWeb,

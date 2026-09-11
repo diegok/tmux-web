@@ -356,11 +356,14 @@ export interface WindowNode {
 /** A tmux session (really a session *group*) in the tree. */
 export interface SessionNode {
   /**
-   * The session *group*: identity, the React key, and what `?session=` carries.
+   * The session *group*: the identity and the React key, and what a sidebar
+   * click carries.
    *
-   * Not what the sidebar prints. tmux freezes `session_group` at the name the
-   * group was created under, so after a rename this is the *old* name forever
-   * -- see `name`.
+   * Neither what the sidebar prints nor an address. tmux freezes
+   * `session_group` at the name the group was created under, so after a rename
+   * this is the *old* name forever -- see `name` for what to show and
+   * `sessionId` for what to send. `?session=` carries the id; `attachTarget`
+   * is where the two part company.
    */
   key: string
   /**
@@ -768,9 +771,13 @@ export function viewedSeen(
  * `preferred` (the `?session=` query, or the one this tab used last) wins if it
  * is still in the snapshot. Otherwise the first group that still has a session
  * of its own: a group whose only surviving members are app-created sessions
- * still shows its panes -- those are running agents -- but `?session=work`
- * would 404 on the socket, because the daemon checks `has-session -t =work`
- * and the namesake is what died.
+ * still shows its panes -- those are running agents -- but the session the user
+ * made is what died, and the throwaway that outlived it is not a thing to
+ * attach a tab to: it is `destroy-unattached on` and goes the moment its own
+ * client does.
+ *
+ * The answer is a group key, which is an identity and not an address;
+ * `attachTarget` turns it into the one the socket uses.
  */
 export function chooseSession(
   groups: readonly SessionNode[],
@@ -791,7 +798,12 @@ export interface SessionChoice {
 }
 
 /**
- * The base session for the socket: `/ws?session=`.
+ * Which session this tab is attached to, as a group key.
+ *
+ * An identity, not an address: `attachTarget` turns the answer into what
+ * `/ws?session=` carries. Everything else in the app -- the sidebar highlight,
+ * the click handler, what the tab remembers across a reload -- compares against
+ * the key, so this stays in that vocabulary.
  *
  * Resolved from the snapshot rather than guessed, and resolved during render
  * rather than in an effect, so no frame is drawn against a session that has
@@ -809,6 +821,38 @@ export function resolveSession(
   if (forced) return forced
   if (picked && (!loaded || groups.some((g) => g.key === picked))) return picked
   return chooseSession(groups, picked)
+}
+
+/**
+ * The address to put in `?session=` for a resolved session.
+ *
+ * This is the seam between identity and address, and the two are not the same
+ * value. The group key is the identity -- the React key, what a sidebar click
+ * carries, what the tab remembers across a reload -- and it is `session_group`,
+ * which tmux freezes at the name the group was created under. This app creates
+ * that group itself on the first attach, so from then on a rename leaves the
+ * key naming a session that no longer answers to it: `has-session -t =work3`
+ * says "can't find session: work3" while the session is alive as `api`, the
+ * handshake 404s, and the tab reports `Session "work3" is gone` for every pane
+ * the user clicks. A reload does not help, because the key it remembers is the
+ * stale one. `$N` is what tmux will answer to, for as long as the session
+ * lives, whatever it is called.
+ *
+ * A session the snapshot does not know is passed through unchanged, and that is
+ * the point rather than a fallback: `?session=` is also typed by hand, where a
+ * name is the only thing a person could write, and a tab pinned that way must
+ * still attach while the poll is failing. The daemon accepts both and tells
+ * them apart by the `$` -- see `wsSessionTarget` in `internal/front/ws.go`.
+ */
+export function attachTarget(
+  groups: readonly SessionNode[],
+  session: string | null,
+): string | null {
+  if (!session) return null
+  // `||` and not `??`: a group built from rows carrying no `sessionId` -- a
+  // daemon too old to send the field -- has "" here, and "" addresses whatever
+  // tmux considers current.
+  return groups.find((g) => g.key === session)?.sessionId || session
 }
 
 /**

@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"runtime"
 	"strings"
 	"sync"
@@ -344,6 +345,66 @@ func TestWebSocketRejectsAnUnusableSessionParameter(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The attach path after a rename, which is the shape the owner hit: a session
+// renamed while it already had a group.
+//
+// tmux freezes `session_group` at the name the group was created under, and the
+// group is created by this app's own throwaway session on the first attach --
+// so from the first browser tab onwards, every rename leaves the group key
+// naming a session that no longer answers to it. `has-session -t =<group key>`
+// then fails, the handshake 404s, and the tab says the session is gone while it
+// is sitting right there in the sidebar. Renaming an *ungrouped* session does
+// not reproduce it: the group is empty and refills under the new name.
+//
+// What this pins is the contract the frontend now relies on -- an id is
+// addressed as an id, the live name is addressed exactly, and the frozen group
+// key is addressed as neither.
+func TestWebSocketAttachesToARenamedSessionByIDOrLiveName(t *testing.T) {
+	f := defaultWSFixture(t)
+	// The precondition: a grouped member, exactly as the first tab leaves behind.
+	f.srv.Run(t, "new-session", "-d", "-t", "work", "-s", "_web-old")
+	f.srv.Run(t, "rename-session", "-t", "work", "api")
+
+	// The freeze itself, asserted rather than assumed. If a future tmux renames
+	// the group with the session, this test would otherwise keep passing while
+	// testing nothing, and the whole design decision behind Row.SessionID would
+	// be up for revisiting.
+	if got := f.srv.Run(t, "list-sessions", "-F", "#{session_name} #{session_group}"); !strings.Contains(got, "api work") {
+		t.Fatalf("the group key did not freeze at the pre-rename name: %q", got)
+	}
+	sid := f.srv.Run(t, "display-message", "-p", "-t", "api:", "#{session_id}")
+	if !strings.HasPrefix(sid, "$") {
+		t.Fatalf("session id = %q, want $N", sid)
+	}
+
+	// The group key is not an address and must not become one by accident: it
+	// names no session, and a handler that fell back to a prefix or to the
+	// group would attach the tab to whatever matched.
+	c, resp, err := f.tryDial(t, wsCanonical, "?session="+url.QueryEscape("work"), nil)
+	if err == nil {
+		_ = c.CloseNow()
+		t.Fatal("the frozen group key was accepted as a session address")
+	}
+	wsWantStatus(t, resp, err, http.StatusNotFound)
+
+	// The id, which is what the frontend sends.
+	byID := f.dial(t, wsCanonical, "?session="+url.QueryEscape(sid))
+	tab := f.tabSession(t)
+	// Grouped onto the renamed session, not merely connected to something: a
+	// tab in the wrong group cannot select the panes the sidebar is showing.
+	if got := f.srv.Run(t, "display-message", "-p", "-t", "="+tab+":", "#{session_group}"); got != "work" {
+		t.Errorf("the tab joined group %q, want the renamed session's group work", got)
+	}
+	wsWrite(t, byID, ptybridge.EncodeData([]byte("echo by-id-ok\r")))
+	wsReadUntil(t, byID, "by-id-ok", 10*time.Second)
+	_ = byID.CloseNow()
+
+	// And the live name, which is what a person types into the query string.
+	byName := f.dial(t, wsCanonical, "?session="+url.QueryEscape("api"))
+	wsWrite(t, byName, ptybridge.EncodeData([]byte("echo by-name-ok\r")))
+	wsReadUntil(t, byName, "by-name-ok", 10*time.Second)
 }
 
 // --- round trip ------------------------------------------------------------

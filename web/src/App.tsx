@@ -46,7 +46,7 @@ import { Toaster } from '@/components/ui/sonner'
 import { newSessionPrompt, runManage } from '@/lib/manage'
 import type { ManageAction, MenuIntent } from '@/lib/manage'
 import { useTabBadge } from '@/lib/tabBadge'
-import { findPane, resolveSession, useSeenPanes, useSnapshot } from '@/lib/useSnapshot'
+import { attachTarget, findPane, resolveSession, useSeenPanes, useSnapshot } from '@/lib/useSnapshot'
 
 /** Where this tab remembers its base session, so a reload lands where it was. */
 const SESSION_KEY = 'tmux-web:session'
@@ -103,7 +103,26 @@ export default function App() {
   // Task 20's placeholder guessed "main", which the daemon answers with a 404
   // on the socket -- surfacing as a terminal that reconnects forever. The rules
   // behind this live in the lib, where they can be tested.
+  //
+  // `session` is the group key: an identity, and the vocabulary everything in
+  // this component speaks -- the sidebar highlight, the click handler, what the
+  // tab remembers across a reload. It is not an address, and handing it to the
+  // socket is what made a renamed session unreachable: tmux freezes
+  // `session_group` at the name the group was created under, and this app
+  // creates the group itself on its first attach.
   const session = resolveSession(groups, { picked, forced, loaded })
+
+  // What `/ws?session=` carries: the session id, or a hand-typed name passed
+  // through. Derived here and nowhere else, so there is exactly one place where
+  // identity becomes an address.
+  const target = attachTarget(groups, session)
+
+  // And the third thing the key is not: a display name. The header has to say
+  // what the sidebar says, and both read the live `session_name` off the group
+  // -- a breadcrumb printing the key would go on naming a renamed session by
+  // the name it no longer has. The raw value is the fallback for a `?session=`
+  // the snapshot has never heard of, where it is all there is to print.
+  const sessionName = groups.find((g) => g.key === session)?.name ?? session
 
   useEffect(() => {
     if (session) storeSession(session)
@@ -266,7 +285,12 @@ export default function App() {
           <header className="flex h-11 shrink-0 items-center gap-2 border-b px-2">
             <SidebarTrigger />
             <Separator orientation="vertical" className="mr-1 !h-4" />
-            <Breadcrumb session={session} located={located} activePane={activePane} loaded={loaded} />
+            <Breadcrumb
+              session={sessionName}
+              located={located}
+              activePane={activePane}
+              loaded={loaded}
+            />
             <div className="ml-auto flex items-center gap-2">
               <button
                 type="button"
@@ -293,8 +317,13 @@ export default function App() {
             </div>
           </header>
           <div className="min-h-0 flex-1">
-            {session ? (
-              <Terminal session={session} onStatusChange={setStatus} ref={term} />
+            {target ? (
+              <Terminal
+                session={target}
+                label={sessionName ?? target}
+                onStatusChange={setStatus}
+                ref={term}
+              />
             ) : (
               <NoSession
                 loaded={loaded}

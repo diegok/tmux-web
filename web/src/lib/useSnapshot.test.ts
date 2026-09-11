@@ -7,6 +7,7 @@ import {
   SnapshotFetchError,
   SnapshotPoller,
   SEEN_STORAGE_KEY,
+  attachTarget,
   chooseSession,
   fetchSnapshot,
   findPane,
@@ -516,6 +517,56 @@ describe('resolveSession', () => {
   it('picks the first attachable group when the tab has no preference', () => {
     expect(resolveSession(groups, choice)).toBe('work')
     expect(resolveSession([], choice)).toBeNull()
+  })
+})
+
+describe('attachTarget', () => {
+  // The shape the bug needs: a session renamed *after* its group existed, which
+  // is every session this app has ever attached to. tmux froze `session_group`
+  // at "work3" while the session lives on as "api" under id "$4".
+  const renamed = groupRows([row({ groupKey: 'work3', sessionName: 'api', sessionId: '$4' })])
+
+  it('addresses a renamed session by its id, never by the frozen group key', () => {
+    // Identity and address are two different answers, and this is the seam
+    // between them: the tab still *thinks* in group keys -- that is the React
+    // key and what a sidebar click carries -- but what goes on the wire is the
+    // id. `has-session -t =work3` answers "can't find session: work3", which
+    // reached the owner as `Session "work3" is gone` on every pane he clicked.
+    const session = resolveSession(renamed, { picked: 'work3', forced: null, loaded: true })
+    expect(session).toBe('work3')
+    expect(attachTarget(renamed, session)).toBe('$4')
+  })
+
+  it('passes a hand-typed ?session= through, because a person types a name', () => {
+    // `?session=` is a user-facing parameter; the daemon accepts a name as well
+    // as an id, and a name it has never heard of is the documented escape hatch
+    // for a tab attaching while the poll is failing.
+    expect(attachTarget(renamed, 'api')).toBe('api')
+    expect(attachTarget(renamed, 'ghost')).toBe('ghost')
+  })
+
+  it('falls back to the key when the rows carry no id', () => {
+    // A daemon too old to send `sessionId`. The group key is the wrong address
+    // only after a rename, so it is a better last resort than attaching to
+    // nothing at all.
+    expect(attachTarget(groupRows([row({ groupKey: 'work', sessionId: '' })]), 'work')).toBe('work')
+  })
+
+  it('has nothing to address when no session resolved', () => {
+    expect(attachTarget(renamed, null)).toBeNull()
+  })
+
+  it('reaches an orphaned group through the member it has left', () => {
+    // The user's own session died and only this app's throwaway is holding the
+    // group's windows open. `chooseSession` still refuses to land a fresh tab
+    // there and the sidebar still marks the row orphaned -- but a tab that asks
+    // for it by name gets the id of what is actually there, which is a group
+    // full of running agents rather than a 404. The id is a real session in the
+    // right group, which is all an attach needs.
+    const orphan = groupRows([
+      row({ groupKey: 'work', sessionName: '_web-abcd', sessionId: '$9', appOwned: true }),
+    ])
+    expect(attachTarget(orphan, 'work')).toBe('$9')
   })
 })
 

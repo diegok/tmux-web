@@ -138,16 +138,19 @@ func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// One value, resolved once, used for both the existence check and the
+	// attach -- so the session this handler said yes to cannot be a different
+	// session from the one it grouped the tab onto.
+	target := wsSessionTarget(base)
+
 	// Checked before the upgrade so that "there is no such session" arrives as
 	// an HTTP status the browser can act on, rather than as a socket that opens
-	// and dies a moment later with the reason painted into the terminal. "="
-	// pins an exact match: tmux target matching otherwise falls back to a
-	// prefix, so ?session=wor would attach to "work".
+	// and dies a moment later with the reason painted into the terminal.
 	ctx, cancel := context.WithTimeout(r.Context(), wsTmuxTimeout)
-	_, err := h.tm.Run(ctx, "has-session", "-t", "="+base)
+	_, err := h.tm.Run(ctx, "has-session", "-t", target)
 	cancel()
 	if err != nil {
-		slog.Info("terminal refused: no such tmux session", "session", base, "err", err)
+		slog.Info("terminal refused: no such tmux session", "session", base, "target", target, "err", err)
 		http.Error(w, "no such session", http.StatusNotFound)
 		return
 	}
@@ -168,7 +171,44 @@ func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return // Accept has already written the response
 	}
-	h.serve(r.Context(), conn, base)
+	h.serve(r.Context(), conn, target)
+}
+
+// wsSessionTarget turns the ?session= value into a tmux target.
+//
+// The parameter carries two different things, and tmux has to be told which.
+//
+//   - A session id, "$4", which is what the app sends. It has to, because the
+//     alternative it used to send was the session *group* key, and tmux freezes
+//     `session_group` at the name the group was created under. This app creates
+//     that group itself on the first attach, so from the first browser tab
+//     onwards a rename leaves the key naming nothing: `has-session -t =work3`
+//     answers "can't find session: work3" while the session is alive as `api`,
+//     the handshake 404s, and the tab tells the user their session is gone
+//     while its panes are listed in the sidebar beside the message. An id
+//     answers for the session's whole life, whatever it is renamed to.
+//   - A name, which is the only thing a person typing `?session=work` by hand
+//     could write. That is a documented escape hatch -- a tab pinned this way
+//     is never moved by the resolver -- so it stays supported.
+//
+// A name gets the "=" exact-match prefix and an id does not. The "=" is
+// load-bearing for a name: tmux target matching otherwise falls back to a
+// prefix, so ?session=wor would attach to "work". It is not merely unnecessary
+// on an id but meaningless -- tmux resolves "$4" as an id before it considers
+// names, with or without the prefix (probed on 3.7b: with a session actually
+// named "$0" beside a session whose id is $0, both "$0" and "=$0" resolved to
+// the id). Leaving it on would have worked by that accident; saying which kind
+// of thing arrived is what makes the two cases visible and testable.
+//
+// tmux.ValidateSessionID is the discriminator rather than a local "$" test:
+// that rule already exists once in internal/tmux, and it is strict about what
+// follows the sigil, so a session someone named "$x" is still addressed as the
+// name it is.
+func wsSessionTarget(s string) string {
+	if tmux.ValidateSessionID(s) == nil {
+		return s
+	}
+	return "=" + s
 }
 
 // allowsOrigin reports whether the request came from the one configured origin.
@@ -224,7 +264,13 @@ type wsExit struct {
 
 // serve runs the connection until one of its three loops ends, then tears the
 // other two, the tmux client and the socket down together.
-func (h *TerminalHandler) serve(ctx context.Context, conn *websocket.Conn, base string) {
+//
+// target is a tmux target -- wsSessionTarget's output, an id or an exactly
+// matched name -- and not the raw query parameter. The attach is addressed with
+// the same string the existence check passed, so `new-session -t` cannot
+// prefix-match its way onto a different session than the one this handler
+// approved.
+func (h *TerminalHandler) serve(ctx context.Context, conn *websocket.Conn, target string) {
 	conn.SetReadLimit(wsReadLimit)
 
 	// context.Background, not the request context, and deliberately so. The
@@ -233,12 +279,12 @@ func (h *TerminalHandler) serve(ctx context.Context, conn *websocket.Conn, base 
 	// cancelled when this handler returns would invite exactly that bug back.
 	sess, err := ptybridge.Open(context.Background(), ptybridge.Config{
 		TmuxArgs: h.cfg.TmuxArgs,
-		Base:     base,
+		Base:     target,
 		Cols:     wsInitialCols,
 		Rows:     wsInitialRows,
 	})
 	if err != nil {
-		slog.Error("terminal: cannot start tmux client", "session", base, "err", err)
+		slog.Error("terminal: cannot start tmux client", "session", target, "err", err)
 		_ = conn.Close(websocket.StatusInternalError, "cannot start tmux client")
 		return
 	}

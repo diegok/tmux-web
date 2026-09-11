@@ -4,7 +4,7 @@
 // Two decisions in this file are load-bearing and the rest of the app depends
 // on them holding.
 //
-// The device cookie is named __Host-wterm_device. The prefix is not decoration.
+// The device cookie is named __Host-tmux_web_device. The prefix is not decoration.
 // A host-only cookie is already unreadable by a service later published on a
 // sibling subdomain such as test.example.com; the prefix additionally stops
 // that sibling from *setting* a Domain=.example.com cookie of the same name
@@ -41,7 +41,7 @@ import (
 
 // DeviceCookieName is the wire name of the device cookie. Changing it signs out
 // every enrolled browser, which is why the tests pin the literal string.
-const DeviceCookieName = "__Host-wterm_device"
+const DeviceCookieName = "__Host-tmux_web_device"
 
 // deviceCookieMaxAge is how long the browser keeps the cookie. Device sessions
 // themselves never expire -- revocation is the control -- so the cookie only
@@ -195,7 +195,7 @@ func (a *Auth) protect(next http.Handler, originRequired bool) http.Handler {
 		}
 
 		// The first cookie of that name is the only one considered, and there
-		// is deliberately no scan for duplicates: a second __Host-wterm_device
+		// is deliberately no scan for duplicates: a second __Host-tmux_web_device
 		// would have to be set by a page on this exact host, and HttpOnly stops
 		// script there overwriting it. The shadowing attack a sibling could
 		// otherwise mount is refused by the browser, not sorted out here.
@@ -398,8 +398,8 @@ func writeUnauthorized(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusUnauthorized)
 	_, _ = io.WriteString(w, "This browser is not enrolled.\n\n"+
-		"Run this on the machine wterm-web is running on, then open the link it prints:\n\n"+
-		"    wterm-web enroll --name \"this browser\"\n")
+		"Run this on the machine tmux-web is running on, then open the link it prints:\n\n"+
+		"    tmux-web enroll --name \"this browser\"\n")
 }
 
 // isSocketUpgrade reports whether this is a WebSocket handshake, which wants a

@@ -17,7 +17,7 @@
 // what types there are below are JSDoc, which is a comment.
 //
 // WHAT IT IS FOR. A burst of tool calls must not become a queue of forks. At
-// most one `wterm-web report` runs per pane at a time; a state that arrives
+// most one `tmux-web report` runs per pane at a time; a state that arrives
 // while one is running replaces whatever was waiting, because only the newest
 // state is worth writing. Both pi and opencode are long-lived runtimes and can
 // hold the slot in module scope. Claude Code gets no queue -- each hook is a
@@ -46,7 +46,7 @@ import { spawn as spawnChildProcess } from 'node:child_process'
 
 /**
  * @typedef {{ event: string, payload?: unknown }} ReportItem
- *   Exactly what `wterm-web report` needs: the event name for its command line
+ *   Exactly what `tmux-web report` needs: the event name for its command line
  *   and the hook's own JSON for its stdin. No timestamp; see above.
  */
 
@@ -121,7 +121,7 @@ export function spawnReport(agent, spawnProcess = spawnChildProcess) {
     return new Promise((resolve) => {
       let child
       try {
-        child = spawnProcess('wterm-web', ['report', '--agent', agent, '--event', item.event], {
+        child = spawnProcess('tmux-web', ['report', '--agent', agent, '--event', item.event], {
           // stdin carries the hook's own payload. The child's output goes
           // nowhere: `report` writes its diagnostics to stderr, and the stderr
           // of a pi or opencode plugin is the pane the user is looking at.
@@ -132,7 +132,7 @@ export function spawnReport(agent, spawnProcess = spawnChildProcess) {
         return
       }
       // Settle exactly once, and only when the child is gone. 'error' is the
-      // asynchronous half of a failed exec -- an ENOENT for a wterm-web that
+      // asynchronous half of a failed exec -- an ENOENT for a tmux-web that
       // is not on PATH arrives there, and no 'close' need follow it, so a
       // promise waiting only for 'close' would never settle and the slot would
       // never be released.
@@ -162,7 +162,7 @@ export function spawnReport(agent, spawnProcess = spawnChildProcess) {
 // so both copies load, in one process, and both register handlers.
 //
 // The damage is not the pane option: both copies write the same value, so the
-// row looks right. It is that every event becomes TWO `wterm-web report` forks,
+// row looks right. It is that every event becomes TWO `tmux-web report` forks,
 // and that two single-slot queues then race for one pane -- which is the one
 // ordering guarantee makeQueue above exists to give, and the thing this whole
 // module is built around.
@@ -172,7 +172,7 @@ export function spawnReport(agent, spawnProcess = spawnChildProcess) {
 // project first -- so a first-wins guard picks a different copy in each. After a
 // partial upgrade (a new global install over an old project one, or the other
 // way round) that means the OLDER copy wins in one of the two runtimes, silently
-// and for as long as the mismatch lasts. Comparing WTERM_SCHEMA makes the answer
+// and for as long as the mismatch lasts. Comparing TMUX_WEB_SCHEMA makes the answer
 // the same in both: the newer copy reports.
 //
 // The claim is made when the copy LOADS and the answer is read when it REPORTS,
@@ -182,24 +182,24 @@ export function spawnReport(agent, spawnProcess = spawnChildProcess) {
 // saying nothing.
 
 /**
- * WTERM_SCHEMA is the schema number of THIS copy, and it is the same number as
- * the one in the `managed by tmux-web (wterm-schema: N)` header of every file
- * the installer writes. cmd/wterm-web/install.go holds its own `wtermSchema`
+ * TMUX_WEB_SCHEMA is the schema number of THIS copy, and it is the same number as
+ * the one in the `managed by tmux-web (tmux-web-schema: N)` header of every file
+ * the installer writes. cmd/tmux-web/install.go holds its own `tmuxWebSchema`
  * against this constant on every run of the Go suite, because two numbers that
  * must agree and are written down twice are two numbers that drift.
  */
-export const WTERM_SCHEMA = 1
+export const TMUX_WEB_SCHEMA = 1
 
 /** The key on globalThis the two copies meet at. Namespaced, because it is a
  *  key in somebody else's process. */
-const CLAIM_SLOT = '__wterm_web_reporter__'
+const CLAIM_SLOT = '__tmux_web_reporter__'
 
 /**
  * claimReporter claims the right to report for this process, and returns the
  * predicate that says whether this copy still holds it.
  *
  * `>=` rather than `>`: two copies of the SAME schema is the ordinary case -- a
- * global install and a project install made by the same wterm-web -- and one of
+ * global install and a project install made by the same tmux-web -- and one of
  * them has to win. The later loader takes it, which is arbitrary and is meant
  * to be: the two files are byte-identical, so there is nothing to choose
  * between them beyond leaving exactly one.
@@ -208,7 +208,7 @@ const CLAIM_SLOT = '__wterm_web_reporter__'
  *   test, and nothing that ships passes it.
  * @returns {() => boolean} whether this copy is the one that should report
  */
-export function claimReporter(schema = WTERM_SCHEMA) {
+export function claimReporter(schema = TMUX_WEB_SCHEMA) {
   // Identity, not a name or a number: it is the only thing two copies of this
   // same code cannot accidentally share.
   const me = {}

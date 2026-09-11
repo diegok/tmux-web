@@ -27,7 +27,7 @@
  * derives its from the first message and never revises it, and pi's is
  * `π - <cwd basename>`, which never mentions the task at all. What an agent is
  * doing *now* can only come from the agent, and does: `SnapshotRow.activity`,
- * written to `@wterm_agent` by its own integration. It sits above the title for
+ * written to `@tmux_web_agent` by its own integration. It sits above the title for
  * exactly that reason.
  *
  * One row can say two things at once. A labelled pane with an activity puts the
@@ -639,7 +639,7 @@ function SidebarStatus({
         <p className="text-sidebar-foreground font-medium">This device is no longer enrolled</p>
         <p className="text-sidebar-foreground/70 mt-1">
           Its access was revoked, or the cookie expired. Enroll again from the host with{' '}
-          <code className="font-mono">wterm-web enroll</code>.
+          <code className="font-mono">tmux-web enroll</code>.
         </p>
       </div>
     )
@@ -883,7 +883,7 @@ interface PaneText {
  * The label is a name the user gave this pane and wins outright, including over
  * a title a program is rewriting underneath it and over the activity an agent
  * is reporting -- that is the whole point of having one. (Nothing sets a label
- * from the browser until the rename task; `tmux set -p @wterm_label` already
+ * from the browser until the rename task; `tmux set -p @tmux_web_label` already
  * does, and the field is already on the wire, so the order is honoured now
  * rather than left as a field that is read and ignored.) But winning the
  * precedence is not the same as taking the second line: where there is an

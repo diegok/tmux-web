@@ -434,7 +434,7 @@ describe('rowMenu', () => {
   })
 
   it('offers nothing at all on a group that is only this app is own sessions', () => {
-    // The daemon refuses to rename or kill an @wterm_web session -- killing one
+    // The daemon refuses to rename or kill an @tmux_web_owned session -- killing one
     // would drop a live tab's socket for no reason the owner could understand
     // -- so every entry would be a refusal waiting to happen.
     const { session } = tree([row({ appOwned: true, groupKey: 'dead' })])

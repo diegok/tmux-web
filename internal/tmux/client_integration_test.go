@@ -18,12 +18,12 @@ func TestSnapshotAgainstRealTmux(t *testing.T) {
 	srv.Run(t, "new-window", "-t", "work")
 
 	// A user session whose name starts with the app's prefix. It must never be
-	// hidden or swept: only the @wterm_web option marks an app session.
+	// hidden or swept: only the @tmux_web_owned option marks an app session.
 	srv.Run(t, "new-session", "-d", "-s", "_web-notes")
 
 	// Simulate an open browser tab: a grouped, app-marked session.
 	srv.Run(t, "new-session", "-d", "-t", "work", "-s", "_web-sim")
-	srv.Run(t, "set", "-t", "_web-sim", "@wterm_web", "1")
+	srv.Run(t, "set", "-t", "_web-sim", "@tmux_web_owned", "1")
 
 	c := tmux.NewClient(srv.Args())
 	panes, err := c.Snapshot(context.Background())
@@ -60,7 +60,7 @@ func TestSnapshotAgainstRealTmux(t *testing.T) {
 // `kill-session -t '=work3'` fails while the session lives on as api.
 //
 // It also pins the two other new fields against tmux's real format vocabulary:
-// a mistyped #{@wterm_label} or #{pane_title} expands to empty rather than
+// a mistyped #{@tmux_web_label} or #{pane_title} expands to empty rather than
 // erroring, so the field count -- and every unit test -- stays happy.
 func TestSnapshotCarriesLiveSessionIdentityAfterRename(t *testing.T) {
 	srv := testutil.NewServer(t)
@@ -68,9 +68,9 @@ func TestSnapshotCarriesLiveSessionIdentityAfterRename(t *testing.T) {
 	// A grouped, app-marked member: what an open browser tab creates, and what
 	// puts a session_group on the base session in the first place.
 	srv.Run(t, "new-session", "-d", "-t", "work3", "-s", "_web-sim")
-	srv.Run(t, "set", "-t", "_web-sim", "@wterm_web", "1")
+	srv.Run(t, "set", "-t", "_web-sim", "@tmux_web_owned", "1")
 	srv.Run(t, "rename-session", "-t", "work3", "api")
-	srv.Run(t, "set", "-p", "-t", "api:0.0", "@wterm_label", "reviewer")
+	srv.Run(t, "set", "-p", "-t", "api:0.0", "@tmux_web_label", "reviewer")
 
 	panes, err := tmux.NewClient(srv.Args()).Snapshot(context.Background())
 	if err != nil {
@@ -101,7 +101,7 @@ func TestSnapshotCarriesLiveSessionIdentityAfterRename(t *testing.T) {
 		t.Errorf("the session id did not address the session: %q, %v", out, err)
 	}
 	if r.Label != "reviewer" {
-		t.Errorf("Label = %q, want reviewer from @wterm_label", r.Label)
+		t.Errorf("Label = %q, want reviewer from @tmux_web_label", r.Label)
 	}
 	// tmux defaults a pane title to the hostname, so a working #{pane_title} is
 	// never empty -- which is what makes an empty one evidence of a typo.
@@ -207,7 +207,7 @@ func TestSnapshotSurvivesBaseSessionKill(t *testing.T) {
 	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
 	srv.Run(t, "new-window", "-t", "work")
 	srv.Run(t, "new-session", "-d", "-t", "work", "-s", "_web-sim")
-	srv.Run(t, "set", "-t", "_web-sim", "@wterm_web", "1")
+	srv.Run(t, "set", "-t", "_web-sim", "@tmux_web_owned", "1")
 
 	srv.Run(t, "kill-session", "-t", "work")
 

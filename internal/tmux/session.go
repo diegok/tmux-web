@@ -11,7 +11,7 @@ import (
 // AppOption is the tmux user option marking a session as app-created.
 // Sessions are identified by this, never by name: a user may legitimately have
 // a session called "_web-notes", and it must be neither hidden nor swept.
-const AppOption = "@wterm_web"
+const AppOption = "@tmux_web_owned"
 
 // NewSessionName returns a unique name for a throwaway session.
 func NewSessionName() string {
@@ -79,7 +79,7 @@ func (c *Client) Sweep(ctx context.Context) error {
 		// matching falls back to a prefix, and `kill-session -t _web-` will
 		// silently kill _web-abcd and exit 0. Pinning exactness here means a
 		// future caller passing a partial name gets an error instead of
-		// destroying a user's session, which is the failure @wterm_web exists
+		// destroying a user's session, which is the failure @tmux_web_owned exists
 		// to prevent. No test pins this: Sweep never passes a partial name, and
 		// tmux prefers an exact match over a longer prefix, so "=" and a bare
 		// name behave identically for every input reachable today.
@@ -105,7 +105,7 @@ func (c *Client) Sweep(ctx context.Context) error {
 // matched by TERM name against a *server-wide* option -- so sharing a TERM with
 // the user's own local clients would turn hyperlinks on for their terminal too.
 // A name only this client uses keeps the change scoped to the browser.
-const TermName = "wterm-256color"
+const TermName = "tmux-web-256color"
 
 // hyperlinkFeature is the terminal-features entry that lets OSC 8 through.
 const hyperlinkFeature = TermName + ":hyperlinks"

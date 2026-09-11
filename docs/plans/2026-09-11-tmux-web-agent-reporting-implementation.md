@@ -4,7 +4,7 @@
 
 **Goal:** An agent tells tmux-web what it is doing, instead of tmux-web guessing from pixels. Each supported agent runs a small integration that writes one tmux pane option; the daemon reads it in the poll it already makes, and prefers it over the screen classifier when it is fresh.
 
-**Architecture:** Integrations write `@wterm_agent = "1;<state>;<unix-ms>[;<activity text>]"` on their own pane via a new `wterm-web report` subcommand — one Go binary so the sanitizer exists once. The snapshot poller's single `list-panes` fork gains a second `list-panes` command in the same invocation, tagged, reading that option through its own format string. A fresh report outranks `internal/tmux/state.go`'s churn classifier and suppresses the pane's `capture-pane` entirely; three evidence rules buy some of that capture back to check the two *resting* states against the screen while a client is connected.
+**Architecture:** Integrations write `@tmux_web_agent = "1;<state>;<unix-ms>[;<activity text>]"` on their own pane via a new `tmux-web report` subcommand — one Go binary so the sanitizer exists once. The snapshot poller's single `list-panes` fork gains a second `list-panes` command in the same invocation, tagged, reading that option through its own format string. A fresh report outranks `internal/tmux/state.go`'s churn classifier and suppresses the pane's `capture-pane` entirely; three evidence rules buy some of that capture back to check the two *resting* states against the screen while a client is connected.
 
 **Tech Stack:** Go 1.26 (stdlib only), React 19 + shadcn/ui, vitest, Playwright. Integrations: one TypeScript file (pi), one JavaScript file (opencode), one `settings.json` block plus one shell line (Claude Code).
 
@@ -70,11 +70,11 @@ shorter and harder to get wrong.
 
 ### Six things here are counter-intuitive. Do not "simplify" them back
 
-1. **The report is not a fourteenth snapshot field.** `Format`'s last slot belongs to `@wterm_label`, and the last slot is the only position layer 2 of the label hardening protects. A second unsanitized field in the middle of the record fails *worse* than the label ever did: a surplus separator shifts every field after it and the row parses successfully **with another pane's values in it**. The report gets its own `list-panes` command inside the same fork.
+1. **The report is not a fourteenth snapshot field.** `Format`'s last slot belongs to `@tmux_web_label`, and the last slot is the only position layer 2 of the label hardening protects. A second unsanitized field in the middle of the record fails *worse* than the label ever did: a surplus separator shifts every field after it and the row parses successfully **with another pane's values in it**. The report gets its own `list-panes` command inside the same fork.
 2. **A trailing `;` does not survive `set-option`, and `--` does not help.** tmux's own command parser eats it. So a state-only report is written `1;idle;<ts>` with three fields, and **the reader accepts three parts or four**. A reader demanding four rejects every Claude report.
 3. **The bracket set in the format string must be copied from source, not from prose.** `labelField` at `internal/tmux/snapshot.go:108` holds a *literal* newline byte and a *literal* `0x1f` byte. Written as a two-character `\n`, it leaves real newlines alive **and** puts a literal `n` in the set, so every lowercase `n` in a benign value becomes a space (`SECOnD` → `SECO D`). `[[:cntrl:]]` is worse: the `:` terminates the modifier's pattern and the whole expression expands to `""` for *every* value, good ones included.
 4. **`N_idle` and `N_blocked` are different numbers, and neither is ever written as a literal.** Both are expressed against `settleAfter` in code. A test hard-coding `3` or `4` passes straight through the next change to `settleAfter` — which is exactly how revision 3 shipped an off-by-one. **But writing a test entirely against the constant is the opposite failure and is just as silent:** if a test's fixtures *and* its assertions are both written against the constant a mutant retargets, retargeting moves both sides at once and the mutant survives — a test that cannot fail is not caution, it is a false kill waiting to be recorded. The rule that satisfies both: **build the fixture from the constant the mutant does not touch (`settleAfter`), assert against the one it does (`NIdle`, `NBlocked`, `workingTTL`, `lateRepaintDwell`), and where a constant has a stated *relationship* rather than a measured value, assert that relationship on its own line.** `internal/tmux/report_test.go:56` is the model — one line, `MaxActivity != MaxLabel`, doing what none of the cap assertions around it can do. Where there is no relationship to assert, only a budget (`MaxReportBytes`, `reportFutureSkew`), literal fixtures either side of the boundary are the pattern, and Task 2 says so where they live.
-5. **Every write is fire-and-forget, and `wterm-web report` exits 0 unconditionally.** All three agents block on the hook: pi and opencode await handlers with no timeout at all, and Claude adds the full hook duration to the turn. A reporting integration that can stop an agent from working is worse than no reporting integration.
+5. **Every write is fire-and-forget, and `tmux-web report` exits 0 unconditionally.** All three agents block on the hook: pi and opencode await handlers with no timeout at all, and Claude adds the full hook duration to the turn. A reporting integration that can stop an agent from working is worse than no reporting integration.
 6. **`asyncRewake` is never set on any hook this project installs.** An `"async": true` command hook has its exit code ignored *including exit 2* — unless `asyncRewake` is also set, which is documented as the thing that adds "exit code 2 wakes Claude". Setting it would re-arm the one sharp edge the exit-0 rule exists to blunt.
 
 ### The turn-start invariant
@@ -100,7 +100,7 @@ Each is carried into the task that would hit it, and repeated here so you meet t
 | **A self-referential assertion**: fixture and assertion both written against the constant the mutant retargets, so changing it moves both sides and the mutant survives | Tasks 5, 7, 8, 21 |
 | A boundary mutant (`>` against `>=`) asserted at a fixture that is not on the boundary — the two operators agree everywhere else | Tasks 5, 21 |
 | A **presence** assertion (`if _, ok := m[k]; !ok`) where the mutant changes the **value**, on a map every key is already in | Task 6 |
-| A one-pane tmux fixture against an option-scope mutant — tmux resolves `#{@wterm_agent}` pane → window → session → global, so a session-level `set` reads back through the *pane* format on every pane of the session | Task 6 |
+| A one-pane tmux fixture against an option-scope mutant — tmux resolves `#{@tmux_web_agent}` pane → window → session → global, so a session-level `set` reads back through the *pane* format on every pane of the session | Task 6 |
 
 ---
 
@@ -109,10 +109,10 @@ Each is carried into the task that would hit it, and repeated here so you meet t
 Twenty-one tasks in seven phases. The ordering is driven by one constraint above all: **the reader must be able to defend itself before any writer exists.**
 
 - **Phase A (1–3) builds the value and the transport.** Pure sanitizing and parsing first, then the format string and the batched read against a real tmux server. Nothing else can be tested honestly until a report can survive the round trip.
-- **Phase B (4–6) makes the daemon read one.** Wire fields, then minimal precedence, then a `wterm-web report` skeleton that takes flags rather than payloads. **Task 6 is the first end-to-end demonstration**: one command in a tmux pane, and the row changes. Everything after it refines something that already works.
+- **Phase B (4–6) makes the daemon read one.** Wire fields, then minimal precedence, then a `tmux-web report` skeleton that takes flags rather than payloads. **Task 6 is the first end-to-end demonstration**: one command in a tmux pane, and the row changes. Everything after it refines something that already works.
 - **Phase C (7–10) is the evidence machinery** — the three rules, the rejection slot, and `finishedAt` derivation. It lands **before any integration is installable**, which is the whole reason for the ordering: between Task 6 and Task 10 a reported `idle` is believed without being checked, and the failure that would cause — a false `done` badge — is the one v2 spent most of its complexity avoiding. Task 6's writer is a manual command nobody leaves running; Phase F's writers report on every turn. The gap closes before the risk arrives.
 - **Phase D (11) is the row in the browser**, so that everything built so far is visible to a person and not only to a test.
-- **Phase E (12–15) gives the writer its brains** — recorded payloads first, then the event tables, the whitelist, the edge/re-assertion split and the subagent filters. All of it in Go, in `wterm-web report`, so that it is one table with one test rather than three integrations that drift.
+- **Phase E (12–15) gives the writer its brains** — recorded payloads first, then the event tables, the whitelist, the edge/re-assertion split and the subagent filters. All of it in Go, in `tmux-web report`, so that it is one table with one test rather than three integrations that drift.
 - **Phase F (16–20) ships the three integrations and the installer.** The shared single-slot queue is tested first, as a pure TypeScript module, because today that logic has no test story at all.
 - **Phase G (21) is the late-repaint dwell in `state.go`.** The design hands this to the plan as a task rather than an open question, and it is deliberately last: it is a v2 classifier defect this design *inherits*, it touches a file nothing else here touches, it gates nothing, and its constant is a number nobody has measured.
 
@@ -127,7 +127,7 @@ Every task is independently committable and reviewable. Where a task changes the
 | 3 | The report format string and the batched read | `reportField` built from `labelField`'s own constants, two tagged blocks in one tmux fork, stdout parsed on its own terms and not gated on exit status |
 | 4 | `activity` and `stateSource` on the wire | Two `Row` fields plus their TypeScript mirror and `rowsEqual` |
 | 5 | Precedence and freshness | A fresh report wins and suppresses the capture; `working` expires against an injected clock; `blocked` and `idle` do not; the command check; the ordering filter |
-| 6 | `wterm-web report`, skeleton | `--state`/`--text`, `$TMUX`/`$TMUX_PANE`, one `set-option`, exit 0 always. **First end-to-end demo** |
+| 6 | `tmux-web report`, skeleton | `--state`/`--text`, `$TMUX`/`$TMUX_PANE`, one `set-option`, exit 0 always. **First end-to-end demo** |
 | 7 | Evidence rule 3, the idle verification window | `NIdle = settleAfter + 2`, the window closes at the verdict, and a capture-skipped pane is a first sight |
 | 8 | Evidence rules 1 and 2, and the form registry | `blockedRules` holds several named forms per agent; rule 2 drops only when **no** registered form matches; `NBlocked = settleAfter + 1` |
 | 9 | The rejection slot | One semantic for all three rules; a classifier `idle` does not clear one; only a strictly newer report does, and a delayed older write clears nothing |
@@ -141,7 +141,7 @@ Every task is independently committable and reviewable. Where a task changes the
 | 17 | The pi extension | `session_start`, `input`, `tool_execution_start`, `ui_prompt_start`, `agent_settled` |
 | 18 | The opencode plugin | `chat.message`, `session.status`, tool events, `permission.asked`, `todo.updated`, `session.idle` |
 | 19 | The Claude hooks | Four hooks, `"async": true`, never `asyncRewake`, and a shell line that spawns and does not wait |
-| 20 | `wterm-web install-integration` | Managed header with a schema line, a JSON merge that refuses what it does not recognise, and the `.gitignore` warning |
+| 20 | `tmux-web install-integration` | Managed header with a schema line, a JSON merge that refuses what it does not recognise, and the `.gitignore` warning |
 | 21 | The late-repaint dwell | `lateRepaintDwell` in `Observe`, against the constant, with the short-turn sibling test that keeps the wrong fix out |
 
 ### Which tasks depend on an unresolved open question
@@ -187,9 +187,9 @@ directories, never against the developer's own:
   `opencode.jsonc`'s `plugin` array does work, but a directory drop achieves the
   same with a one-file uninstall. Neither file is edited.
 - **Duplicate loads.** Neither runtime dedupes by filename, so global + project
-  loads the same file twice in one process: two `wterm-web report` spawns per
+  loads the same file twice in one process: two `tmux-web report` spawns per
   event and two single-slot queues racing. A `globalThis` claim in `queue.ts`
-  deduplicates it. It compares `WTERM_SCHEMA` and lets the **newer** copy win
+  deduplicates it. It compares `TMUX_WEB_SCHEMA` and lets the **newer** copy win
   rather than the first to load, because opencode loads global first and pi
   loads project first — a first-wins guard would pick the older copy in one of
   the two after a partial upgrade.
@@ -421,7 +421,7 @@ git commit -m "feat: sanitize an agent's activity line once, in Go"
 - Modify: `internal/tmux/report.go`, `internal/tmux/report_test.go`
 
 ```
-@wterm_agent = "1;working;1789075200000;running go test ./internal/tmux"
+@tmux_web_agent = "1;working;1789075200000;running go test ./internal/tmux"
                 | |       |             '- activity text, may contain ";"
                 | |       '- unix ms when the agent produced this
                 | '- working | blocked | idle
@@ -579,7 +579,7 @@ func TestFormatReport(t *testing.T) {
 ```go
 // AgentOption is the per-pane tmux option an agent's integration writes.
 //
-// Deliberately NOT @wterm_label. That option is the *user's* field: PATCH
+// Deliberately NOT @tmux_web_label. That option is the *user's* field: PATCH
 // /api/panes/{id} writes it, and AppSidebar.tsx's own comment on paneText says
 // a label "wins outright, including over a title a program is rewriting
 // underneath it -- that is the whole point of having one". An integration
@@ -587,7 +587,7 @@ func TestFormatReport(t *testing.T) {
 // above programs: a rename would survive until the agent's next tool call, the
 // agent's report would survive until the next rename, and both features would
 // look intermittently broken with neither at fault.
-const AgentOption = "@wterm_agent"
+const AgentOption = "@tmux_web_agent"
 
 // ReportVersion is the schema this daemon understands.
 //
@@ -622,9 +622,9 @@ type Report struct {
 	Activity  string // "" for a state-only report
 }
 
-// ParseReport reads an @wterm_agent value. ok is false for anything that is not
+// ParseReport reads an @tmux_web_agent value. ok is false for anything that is not
 // a report this daemon wrote and understands -- including the empty value: an
-// unset option and one set to "" both render as "" through #{@wterm_agent}, so
+// unset option and one set to "" both render as "" through #{@tmux_web_agent}, so
 // the daemon cannot tell them apart and does not try. Both mean no report.
 //
 // Every field before the text has a shape that can be checked, and a value that
@@ -672,7 +672,7 @@ func ParseReport(v string, now time.Time) (Report, bool) {
 	if len(parts) == 4 {
 		// Re-sanitised on read, on the standing assumption that a writer's
 		// promise is not a guarantee. This is the third of the same three
-		// layers @wterm_label has: tmux's substitution takes the two
+		// layers @tmux_web_label has: tmux's substitution takes the two
 		// record-breaking bytes, the field's position as the only variable one
 		// in its own format string bounds what a survivor could do, and this
 		// repairs everything neither of those is a promise about -- C1
@@ -724,7 +724,7 @@ func FormatReport(state string, ms int64, activity string) string {
 
 ```bash
 git add internal/tmux/report.go internal/tmux/report_test.go
-git commit -m "feat: parse and format the @wterm_agent report value"
+git commit -m "feat: parse and format the @tmux_web_agent report value"
 ```
 
 ---
@@ -738,7 +738,7 @@ git commit -m "feat: parse and format the @wterm_agent report value"
 - Create: `internal/tmux/report_integration_test.go` (package `tmux_test`, real tmux)
 - Create: `internal/tmux/report_internal_test.go` (package `tmux`, real tmux — it swaps `batchArgs`, which is unexported; `snapshot_label_internal_test.go` is the precedent for both)
 
-**The report is not a fourteenth snapshot field, and this is the task where somebody will try to make it one.** `Format`'s last slot belongs to `@wterm_label`, and the last slot is the only position layer 2 of the hardening protects. A second unsanitized field in the *middle* of the record fails worse than the label ever did: a surplus separator at index *k* shifts every field after it, the greedy last field absorbs the overflow, and the row **parses successfully with another pane's values in it**. `ParseRows` cannot detect that. So the report is read by a **second `list-panes`, with its own format string, in the same tmux invocation**.
+**The report is not a fourteenth snapshot field, and this is the task where somebody will try to make it one.** `Format`'s last slot belongs to `@tmux_web_label`, and the last slot is the only position layer 2 of the hardening protects. A second unsanitized field in the *middle* of the record fails worse than the label ever did: a surplus separator at index *k* shifts every field after it, the greedy last field absorbs the overflow, and the row **parses successfully with another pane's values in it**. `ParseRows` cannot detect that. So the report is read by a **second `list-panes`, with its own format string, in the same tmux invocation**.
 
 **This does add a field to the snapshot record — but a constant one.** Both blocks arrive on the same stdout, and the design requires them to be told apart "by a literal tag field rather than by counting fields or by trusting the order", because a tag that is a constant in the format string is a tag nothing a writer controls can forge. So `formatFields` gains a literal `"S"` at index 0, `fieldCount` goes 13 → 14, and **every positional index in `ParseRows` shifts by one** (`fields[4]`, `fields[7]`, `fields[11]`, and the `fieldCount-1` rejoin). The existing fixtures do **not** change, because `rec` absorbs it:
 
@@ -757,19 +757,19 @@ func rec(fields ...string) string {
 On your own socket, never the default one:
 
 ```bash
-S=wterm-plan-t3
+S=tmux-web-plan-t3
 tmux -L $S -f /dev/null new-session -d -s probe -x 80 -y 24
-tmux -L $S -f /dev/null set -p -t probe @wterm_agent '1;working;1789075200000;run go'
+tmux -L $S -f /dev/null set -p -t probe @tmux_web_agent '1;working;1789075200000;run go'
 
 # (a) Does a lone ";" argv element separate two commands in one invocation?
 #     The precedent is internal/tmux/session.go:34 (AttachArgs), which already
 #     chains set-option calls this way.
-tmux -L $S -f /dev/null list-panes -a -F 'S#{pane_id}' \; list-panes -a -F 'A#{pane_id}#{@wterm_agent}'
+tmux -L $S -f /dev/null list-panes -a -F 'S#{pane_id}' \; list-panes -a -F 'A#{pane_id}#{@tmux_web_agent}'
 # expect: the S line(s), then the A line(s), in command order
 
 # (b) Does a pane with the option UNSET still get a line?
 tmux -L $S -f /dev/null split-window -t probe
-tmux -L $S -f /dev/null list-panes -a -F 'A|#{pane_id}|#{@wterm_agent}'
+tmux -L $S -f /dev/null list-panes -a -F 'A|#{pane_id}|#{@tmux_web_agent}'
 # expect: a line per pane, the new one ending in "||" -- an unset option renders
 # as the empty string, which is the same thing as no report
 
@@ -778,9 +778,9 @@ tmux -L $S -f /dev/null list-panes -a -F 'S#{pane_id}' \; list-panes -t nosuch -
 # expect: the S block on stdout, the error on stderr, a nonzero exit
 
 # (d) The trailing-semicolon measurement, because everything in Task 2 rests on it
-tmux -L $S -f /dev/null set -p -t probe @wterm_agent 'a;' ; tmux -L $S -f /dev/null show -p -t probe -v @wterm_agent
+tmux -L $S -f /dev/null set -p -t probe @tmux_web_agent 'a;' ; tmux -L $S -f /dev/null show -p -t probe -v @tmux_web_agent
 # expect: a          (the ";" is stripped)
-tmux -L $S -f /dev/null set -p -t probe @wterm_agent ';' ; echo "exit=$?"; tmux -L $S -f /dev/null show -p -t probe -v @wterm_agent
+tmux -L $S -f /dev/null set -p -t probe @tmux_web_agent ';' ; echo "exit=$?"; tmux -L $S -f /dev/null show -p -t probe -v @tmux_web_agent
 # expect: an "empty value" error, a nonzero exit, and the PREVIOUS value still there
 
 tmux -L $S -f /dev/null kill-server
@@ -799,8 +799,8 @@ Pure, in `report_test.go`:
 // that parses successfully with another pane's values in it.
 func TestReportFormat(t *testing.T) {
 	if strings.Contains(Format, AgentOption) {
-		t.Fatal("@wterm_agent must not be in the snapshot format string: the last " +
-			"slot is @wterm_label's, and any other slot shifts the record")
+		t.Fatal("@tmux_web_agent must not be in the snapshot format string: the last " +
+			"slot is @tmux_web_label's, and any other slot shifts the record")
 	}
 	// The option is the last and only variable field of its own format, so it
 	// gets the same three layers the label has.
@@ -944,7 +944,7 @@ func TestReportFormatRoundTripsThroughRealTmux(t *testing.T) {
 }
 
 // Sibling to TestSnapshotHostileLabelCannotRemoveAPane. It should pass
-// trivially, because @wterm_agent is not in Format at all -- and it is worth
+// trivially, because @tmux_web_agent is not in Format at all -- and it is worth
 // having precisely so that the day somebody appends it there, this goes red.
 //
 // Worth recording, because the batched read opens a direction the label
@@ -953,7 +953,7 @@ func TestReportFormatRoundTripsThroughRealTmux(t *testing.T) {
 // whole REPORT-block line -- "...\nA<Sep>%2<Sep>1;idle;<ts>" -- and thereby set
 // another pane's state. It is not worth a code change: the value has to be
 // written through the tmux socket, and anyone holding that socket can
-// `set -p -t %2 @wterm_agent` directly with no forgery at all. It is worth
+// `set -p -t %2 @tmux_web_agent` directly with no forgery at all. It is worth
 // writing down so nobody rediscovers it years from now and reads it as a hole.
 // What bounds it is unchanged and is layer 1 plus layer 3: the substitution
 // turns both record-breaking bytes into spaces, and ParseReport re-sanitises
@@ -1093,7 +1093,7 @@ const fieldCount = 14 // was 13; the block tag is field 0
 In `report.go`:
 
 ```go
-// reportField is #{@wterm_agent} with the two bytes that break this wire format
+// reportField is #{@tmux_web_agent} with the two bytes that break this wire format
 // substituted out by tmux before the value reaches Go.
 //
 // It is labelField's pattern, built from the same two constants -- COPIED FROM
@@ -1120,7 +1120,7 @@ var reportFormatFields = []string{reportTag, "#{pane_id}", reportField}
 // ReportFormat is the -F argument for the report block.
 var ReportFormat = strings.Join(reportFormatFields, Sep)
 
-// ParseReports pulls the raw @wterm_agent value of every pane out of the
+// ParseReports pulls the raw @tmux_web_agent value of every pane out of the
 // batched read, keyed by pane id.
 //
 // Every pane gets a line, including one with no integration, whose value is the
@@ -1199,7 +1199,7 @@ var batchArgs = func() []string {
 }
 
 // SnapshotAndReports returns one row per pane and every pane's raw
-// @wterm_agent value, from a single tmux invocation.
+// @tmux_web_agent value, from a single tmux invocation.
 //
 // The marginal cost of the reports is zero forks: it is one more command inside
 // a fork the poller already makes unconditionally, and against it the feature
@@ -1245,8 +1245,8 @@ The frontend suite must stay green here: no json tag changed, so the contract te
 | Mutant | Killed by |
 | --- | --- |
 | `reportField` rewritten with a two-character `\n` in the bracket set | `TestReportFormat`'s backslash-n check, **and** the real-tmux benign round trip (`running` loses both its `n`s) |
-| `reportField` rewritten as `#{s/[[:cntrl:]]/ /:@wterm_agent}` | the benign round trip — every value comes back `""`. A hostile-only test survives this |
-| `reportField` → bare `#{@wterm_agent}` | the hostile half of the round trip |
+| `reportField` rewritten as `#{s/[[:cntrl:]]/ /:@tmux_web_agent}` | the benign round trip — every value comes back `""`. A hostile-only test survives this |
+| `reportField` → bare `#{@tmux_web_agent}` | the hostile half of the round trip |
 | Append `reportField` to `formatFields` and drop the second command | `TestReportFormat`'s first assertion, and `TestHostileAgentReportCannotRemoveAPane` |
 | Put `reportField` before the label in `formatFields` | `TestFormatFieldCount`'s "label must be last" |
 | `ParseRows` counts report lines as `dropped` | `TestParseReports`'s `dropped != 0` |
@@ -1264,7 +1264,7 @@ The frontend suite must stay green here: no json tag changed, so the contract te
 git add internal/tmux/report.go internal/tmux/report_test.go internal/tmux/report_integration_test.go \
         internal/tmux/report_internal_test.go \
         internal/tmux/snapshot.go internal/tmux/snapshot_test.go internal/tmux/client.go
-git commit -m "feat: read @wterm_agent in the poll's own tmux invocation"
+git commit -m "feat: read @tmux_web_agent in the poll's own tmux invocation"
 ```
 
 ---
@@ -1330,7 +1330,7 @@ and in `state.go`, beside the state constants:
 ```go
 // Which authority decided a pane's AgentState. "" means nothing did.
 const (
-	SourceEvent  = "event"  // the agent's own report, from @wterm_agent
+	SourceEvent  = "event"  // the agent's own report, from @tmux_web_agent
 	SourceScreen = "screen" // the churn classifier and the blocked grammars
 )
 ```
@@ -1383,14 +1383,14 @@ That last row supersedes v2's rule that `AgentState` is empty whenever no browse
 
 1. **`working` expires; `blocked` and `idle` do not.** A short TTL is what you want for `working` — a crashed agent must not show as busy — and it is exactly wrong for a resting state, where the user is away, no client is connected, and "this one needs you" is the only thing the app is for.
 2. **The ordering filter needs the accepted *report*, not just its timestamp.** The standing option holds the same value poll after poll, so "refuse anything not strictly newer" applied to the raw value would drop the pane's own state on the second poll. What the daemon keeps is the report it accepted; a standing value that is *older* than that (a delayed `working` landing after a `blocked` — ordinary scheduling jitter, not a broken integration) is refused and **the accepted one stays in force**.
-3. **An unset or unparseable value clears the memory.** Otherwise `tmux set -p -u @wterm_agent`, the documented escape hatch for a stuck report, does nothing.
+3. **An unset or unparseable value clears the memory.** Otherwise `tmux set -p -u @tmux_web_agent`, the documented escape hatch for a stuck report, does nothing.
 4. **A capture-skipped pane is not passed to `Retain`.** Its classifier entry is dropped, so the first capture whenever one is taken again is a **first sight**. Two reasons, and Task 7 rests on the second: `Observe`'s contract is "changed since the previous poll" at a fixed 1.5s interval, and a baseline from minutes ago answers a different question; and a retained baseline that differs sets `everChanged`, which is the flag licensing a `time.Now()` finish stamp.
 
-**What dropping does NOT mean, and this is a bounded exposure the task accepts rather than a gap to close.** `delete(r.panes, paneID)` forgets the pane; it does not tombstone it. So a pane that goes `claude` → `zsh` → `claude` is a **first sight** for the relaunched agent, and the stale `@wterm_agent` value tmux is still holding — tmux options outlive the process that wrote them — is accepted on the terms every first sight is accepted on. **Do not build a tombstone to prevent that.** Three reasons, and the first is decisive on its own:
+**What dropping does NOT mean, and this is a bounded exposure the task accepts rather than a gap to close.** `delete(r.panes, paneID)` forgets the pane; it does not tombstone it. So a pane that goes `claude` → `zsh` → `claude` is a **first sight** for the relaunched agent, and the stale `@tmux_web_agent` value tmux is still holding — tmux options outlive the process that wrote them — is accepted on the terms every first sight is accepted on. **Do not build a tombstone to prevent that.** Three reasons, and the first is decisive on its own:
 
 - A tombstone in `Reports` cannot deliver the property anyway. `classify` never reaches `Observe` for a non-agent pane (it `continue`s on `agent == ""`), and then calls `p.reports.Retain(agents)` — where the `zsh` pane is absent, so the entry *and* any tombstone beside it are deleted one line later. The unit test would be green and the deployed behaviour unchanged: this plan's own named failure mode.
 - It is the same exposure the design already accepts and documents elsewhere. Task 9's restart case is identical — both slots empty, the standing report a first sight — and the answer there is not a tombstone either.
-- What it costs is bounded and self-clearing: the relaunched agent's row shows the previous agent's resting state, with `finishedAt` derived from the **old** timestamp, until that agent's first turn start writes `working` (the turn-start invariant, which every integration has). With a client connected the `idle` also has to get past the verification window first. A device that had already seen that `finishedAt` does not re-badge, because the browser compares against the value it was shown. The escape hatch is `tmux set -p -u @wterm_agent`, which Task 5 already makes work.
+- What it costs is bounded and self-clearing: the relaunched agent's row shows the previous agent's resting state, with `finishedAt` derived from the **old** timestamp, until that agent's first turn start writes `working` (the turn-start invariant, which every integration has). With a client connected the `idle` also has to get past the verification window first. A device that had already seen that `finishedAt` does not re-badge, because the browser compares against the value it was shown. The escape hatch is `tmux set -p -u @tmux_web_agent`, which Task 5 already makes work.
 
 The only complete fix is a writer-side one — the integration clearing the option as the agent exits — and no agent gives a shutdown event any of them can be trusted to deliver. Record this in the commit message; do not implement half of it.
 
@@ -1492,7 +1492,7 @@ func TestAnUnsetOptionClearsTheMemory(t *testing.T) {
 	if _, ok := r.Observe("%1", FormatReport(StateIdle, now.UnixMilli(), ""), "claude", now); !ok {
 		t.Fatal("setup")
 	}
-	// `tmux set -p -u @wterm_agent` is the documented escape hatch for a stuck
+	// `tmux set -p -u @tmux_web_agent` is the documented escape hatch for a stuck
 	// report. If the daemon kept serving the last value it accepted, the escape
 	// hatch would do nothing.
 	if _, ok := r.Observe("%1", "", "claude", now.Add(time.Second)); ok {
@@ -1562,7 +1562,7 @@ func TestACaptureSkippedPaneIsNotRetained(t *testing.T) { /* ... */ }
 // connected.
 const workingTTL = 60 * time.Second
 
-// Reports decides, per pane, whether the standing @wterm_agent value is the
+// Reports decides, per pane, whether the standing @tmux_web_agent value is the
 // authority for that pane's state.
 //
 // Like Classifier it is pure -- no clock, no I/O, `now` is a parameter -- and
@@ -1584,7 +1584,7 @@ type reportState struct {
 
 func NewReports() *Reports { return &Reports{panes: make(map[string]*reportState)} }
 
-// Observe reads one pane's standing @wterm_agent value and reports which
+// Observe reads one pane's standing @tmux_web_agent value and reports which
 // report, if any, is in force for it.
 //
 // command is pane_current_command: if it is no longer a known agent the agent
@@ -1598,7 +1598,7 @@ func (r *Reports) Observe(paneID, raw, command string, now time.Time) (Report, b
 	parsed, ok := ParseReport(raw, now)
 	if !ok {
 		// Unset, or a value we did not write. Both mean no report, and both
-		// must clear what we accepted -- `tmux set -p -u @wterm_agent` is the
+		// must clear what we accepted -- `tmux set -p -u @tmux_web_agent` is the
 		// documented escape hatch for a stuck report, and a daemon that went on
 		// serving its own memory would make that escape hatch do nothing.
 		delete(r.panes, paneID)
@@ -1640,7 +1640,7 @@ func (r *Reports) Retain(keep []string) { /* same shape as Classifier.Retain */ 
 
 ```go
 	// SnapshotWithReports produces the rows AND, from the same tmux
-	// invocation, every pane's raw @wterm_agent value keyed by pane id. Set
+	// invocation, every pane's raw @tmux_web_agent value keyed by pane id. Set
 	// this INSTEAD of Snapshot to turn agent reporting on.
 	SnapshotWithReports func(context.Context) ([]Row, map[string]string, error)
 ```
@@ -1758,11 +1758,11 @@ git commit -m "feat: a fresh agent report outranks the screen classifier"
 
 ---
 
-### Task 6: `wterm-web report`, the skeleton — and the first end-to-end demonstration
+### Task 6: `tmux-web report`, the skeleton — and the first end-to-end demonstration
 
 **Files:**
-- Create: `cmd/wterm-web/report.go`, `cmd/wterm-web/report_test.go`, `cmd/wterm-web/report_integration_test.go`
-- Modify: `cmd/wterm-web/cli.go` (`usageText`, the dispatch switch, and the header comment)
+- Create: `cmd/tmux-web/report.go`, `cmd/tmux-web/report_test.go`, `cmd/tmux-web/report_integration_test.go`
+- Modify: `cmd/tmux-web/cli.go` (`usageText`, the dispatch switch, and the header comment)
 
 After this task you can type one command into a tmux pane and watch the sidebar row change. Everything after it is refinement of something that already works.
 
@@ -1778,7 +1778,7 @@ After this task you can type one command into a tmux pane and watch the sidebar 
 **Step 1: Write the failing tests**
 
 ```go
-// cmd/wterm-web/report_test.go
+// cmd/tmux-web/report_test.go
 func TestTmuxTarget(t *testing.T) {
 	for _, tc := range []struct {
 		name, tmux, pane, wantSock, wantPane string
@@ -1840,7 +1840,7 @@ func TestReportAlwaysExitsZero(t *testing.T) {
 And the end-to-end one, which is the point of the task:
 
 ```go
-// cmd/wterm-web/report_integration_test.go
+// cmd/tmux-web/report_integration_test.go
 //
 // Writer to tmux to reader, with nothing stubbed between them: the real
 // subcommand writes the real option on a real tmux server, and the real
@@ -1852,12 +1852,12 @@ And the end-to-end one, which is the point of the task:
 // which holds real work and running agents.
 //
 // TWO panes, deliberately, and the second one is load-bearing. `set` without
-// `-p` writes a SESSION option, and tmux resolves #{@wterm_agent} up the
+// `-p` writes a SESSION option, and tmux resolves #{@tmux_web_agent} up the
 // hierarchy -- pane, then window, then session, then global -- so a
 // session-level value shows through the PANE format on every pane of that
 // session. Measured on an isolated socket: after
-// `set -t probe @wterm_agent 'SESSIONLEVEL'`,
-// `list-panes -a -F '#{@wterm_agent}'` printed SESSIONLEVEL for both panes. A
+// `set -t probe @tmux_web_agent 'SESSIONLEVEL'`,
+// `list-panes -a -F '#{@tmux_web_agent}'` printed SESSIONLEVEL for both panes. A
 // one-pane fixture therefore cannot see the missing `-p` at all.
 //
 // And the assertion is on the VALUE, never on the presence of the key. Task 3's
@@ -1903,7 +1903,7 @@ func TestReportReachesTheSnapshot(t *testing.T) {
 	// kills the missing-`-p` mutant: a session option shows through the pane
 	// format on every pane of the session, so the mutant sets this one too.
 	if reports[otherPane] != "" {
-		t.Fatalf("the pane nobody reported on reads %q: the write was not scoped to a pane (`set` without `-p` sets a SESSION option, which tmux resolves through #{@wterm_agent} on every pane of the session)",
+		t.Fatalf("the pane nobody reported on reads %q: the write was not scoped to a pane (`set` without `-p` sets a SESSION option, which tmux resolves through #{@tmux_web_agent} on every pane of the session)",
 			reports[otherPane])
 	}
 	// And through the poller's precedence, which is what the sidebar sees.
@@ -1920,7 +1920,7 @@ func TestReportReachesTheSnapshot(t *testing.T) {
 **Step 3: Implement**
 
 ```go
-// cmd/wterm-web/report.go
+// cmd/tmux-web/report.go
 
 // report is what the three integrations run. It is the only subcommand that
 // does not talk to the admin socket: the state lives in the pane, so a daemon
@@ -1958,7 +1958,7 @@ func dialReal(socket string) tmuxRunner { return tmux.NewClient([]string{"-S", s
 // race every other test in the package and, if $TMUX leaked through, would
 // write into the developer's live tmux session.
 func runReport(args []string, stdout, stderr io.Writer, getenv func(string) string, dial func(socket string) tmuxRunner) int {
-	fset := newFlagSet("report", stderr, "wterm-web report --state working|blocked|idle [--text TEXT]")
+	fset := newFlagSet("report", stderr, "tmux-web report --state working|blocked|idle [--text TEXT]")
 	state := fset.String("state", "", "working, blocked or idle")
 	text := fset.String("text", "", "what the agent is doing; omitted for a state-only report")
 	if _, _, ok := parseFlags(fset, args); !ok {
@@ -1973,7 +1973,7 @@ func runReport(args []string, stdout, stderr io.Writer, getenv func(string) stri
 	switch *state {
 	case tmux.StateWorking, tmux.StateBlocked, tmux.StateIdle:
 	default:
-		fmt.Fprintf(stderr, "wterm-web report: unknown state %q\n", *state)
+		fmt.Fprintf(stderr, "tmux-web report: unknown state %q\n", *state)
 		return 0
 	}
 	socket, pane, ok := tmuxTarget(getenv)
@@ -1987,16 +1987,16 @@ func runReport(args []string, stdout, stderr io.Writer, getenv func(string) stri
 	// value" and the option KEEPS its previous contents, which is the more
 	// dangerous of the two outcomes.
 	if _, ok := tmux.ParseReport(value, time.Now()); !ok {
-		fmt.Fprintf(stderr, "wterm-web report: refusing to write a value it could not read back\n")
+		fmt.Fprintf(stderr, "tmux-web report: refusing to write a value it could not read back\n")
 		return 0
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), reportTimeout)
 	defer cancel()
 	// No "--": an option value is the second positional argument and tmux never
-	// re-scans it for flags -- verified for @wterm_label in SetLabel, and the
+	// re-scans it for flags -- verified for @tmux_web_label in SetLabel, and the
 	// same command.
 	if _, err := dial(socket).Run(ctx, "set", "-p", "-t", pane, tmux.AgentOption, value); err != nil {
-		fmt.Fprintf(stderr, "wterm-web report: %v\n", err)
+		fmt.Fprintf(stderr, "tmux-web report: %v\n", err)
 	}
 	return 0
 }
@@ -2037,7 +2037,7 @@ Not against the developer's tmux server. Build the binary, start a throwaway ser
 
 ```bash
 make build
-S=wterm-demo-t6
+S=tmux-web-demo-t6
 tmux -L $S -f /dev/null new-session -d -s work -x 120 -y 40
 # a pane the daemon will treat as an agent: pane_current_command comes from the
 # kernel's process name, which is the basename of the file that was exec'd
@@ -2045,8 +2045,8 @@ D=$(mktemp -d) && cp "$(command -v cat)" "$D/claude"
 tmux -L $S -f /dev/null respawn-pane -k -t work "$D/claude"
 P=$(tmux -L $S -f /dev/null list-panes -t work -F '#{pane_id}')
 TMUX="$(tmux -L $S -f /dev/null display-message -p '#{socket_path}'),1,0" TMUX_PANE=$P \
-  ./wterm-web report --state working --text "the first report this project ever read"
-tmux -L $S -f /dev/null show -p -t $P -v @wterm_agent
+  ./tmux-web report --state working --text "the first report this project ever read"
+tmux -L $S -f /dev/null show -p -t $P -v @tmux_web_agent
 # expect: 1;working;<13 digits>;the first report this project ever read
 tmux -L $S -f /dev/null kill-server
 ```
@@ -2065,14 +2065,14 @@ Then the same value through the reader, which is what `TestReportReachesTheSnaps
 | Dropping the state switch | needs its own assertion: after `report --state nonsense`, the option must be **unset**, not merely the exit code 0. Add it, or the mutant that writes `1;nonsense;<ts>` survives |
 | Stamping `ms` after the tmux call returns | not observable in a unit test — a **review check**. The comment is the defence; if the `time.Now()` moves below the `Run`, reject it |
 | Writing to stdout | `TestReportAlwaysExitsZero`'s stdout assertion |
-| `set` without `-p` (a session option rather than a pane one) | `TestReportReachesTheSnapshot`, and **only its `reports[otherPane] == ""` half**. Not "the report never appears against the pane" — it does appear: tmux resolves `#{@wterm_agent}` up the hierarchy (pane, window, session, global), so a session-level value reads back through the *pane* format on **every pane of that session**. Measured on an isolated socket. The mutant is visible only as the value leaking onto the pane nobody reported on, which is why the fixture has two panes. A presence check (`if _, ok := reports[paneID]; !ok`) sees nothing either way — Task 3 puts a line on the map for every pane, empty value and all |
+| `set` without `-p` (a session option rather than a pane one) | `TestReportReachesTheSnapshot`, and **only its `reports[otherPane] == ""` half**. Not "the report never appears against the pane" — it does appear: tmux resolves `#{@tmux_web_agent}` up the hierarchy (pane, window, session, global), so a session-level value reads back through the *pane* format on **every pane of that session**. Measured on an isolated socket. The mutant is visible only as the value leaking onto the pane nobody reported on, which is why the fixture has two panes. A presence check (`if _, ok := reports[paneID]; !ok`) sees nothing either way — Task 3 puts a line on the map for every pane, empty value and all |
 
 **Step 7: Commit**
 
 ```bash
-git add cmd/wterm-web/report.go cmd/wterm-web/report_test.go \
-        cmd/wterm-web/report_integration_test.go cmd/wterm-web/cli.go
-git commit -m "feat: wterm-web report writes one pane option and always exits 0"
+git add cmd/tmux-web/report.go cmd/tmux-web/report_test.go \
+        cmd/tmux-web/report_integration_test.go cmd/tmux-web/cli.go
+git commit -m "feat: tmux-web report writes one pane option and always exits 0"
 ```
 
 ---
@@ -2604,7 +2604,7 @@ func TestAfterARestartAStandingIdleEntersTheWindow(t *testing.T) {
 
 Note that this is also what makes the design's own sentence above true — "refusing it must not clear the rejection". Refusing a delayed older write leaves both slots untouched, and the pane stays on the classifier.
 
-**The alternative that must not be built:** writing the rejection back into the option so it survives with the report. Rejected on a rule this design has held since "Not `@wterm_label`" — **the daemon reads that option, it does not write it.** A reader that edits the channel it reads cannot be reasoned about when two of them run, and nothing promises `wterm-web` is a singleton.
+**The alternative that must not be built:** writing the rejection back into the option so it survives with the report. Rejected on a rule this design has held since "Not `@tmux_web_label`" — **the daemon reads that option, it does not write it.** A reader that edits the channel it reads cannot be reasoned about when two of them run, and nothing promises `tmux-web` is a singleton.
 
 **Step 5: Mutation testing**
 
@@ -2638,7 +2638,7 @@ Almost entirely tests, deliberately. The mechanism landed in Tasks 5 and 7; what
 
 **The rules:**
 
-- **From a report, `finishedAt` is *derived*, not stamped.** A pane whose current accepted report is a resting `idle` has `finishedAt` equal to **that report's own timestamp**. No memory of a previous report, no edge, no daemon state. It survives a daemon restart, a poller restart and a `wterm-web` upgrade, because the fact lives in tmux.
+- **From a report, `finishedAt` is *derived*, not stamped.** A pane whose current accepted report is a resting `idle` has `finishedAt` equal to **that report's own timestamp**. No memory of a previous report, no edge, no daemon state. It survives a daemon restart, a poller restart and a `tmux-web` upgrade, because the fact lives in tmux.
 - **From the classifier, unchanged from v2**, `everChanged` and all. That authority has no clock — its only way to date a finish is `time.Now()` at the moment it first noticed — so a first sight must stamp nothing there, or every restart is a badge storm on every pane that happens to be sitting still.
 - **The authority-switch guard stays, on the side that needs it.** Classifier → report needs none: the report is timestamped and can date its own finish. Report → classifier keeps it, because that is the direction where a timestamp-less authority starts from nothing.
 
@@ -2833,13 +2833,13 @@ git commit -m "feat: show what the agent says it is doing, under the pane's name
 
 ## Phase E — the writer's brains
 
-All of it in Go, in `wterm-web report`. The whitelist, the edge/re-assertion classification and the text reduction live in **one table with one test**, not in three integration files and a `settings.json` the user owns. That is the whole point of having one binary: when the list grows it grows in one place.
+All of it in Go, in `tmux-web report`. The whitelist, the edge/re-assertion classification and the text reduction live in **one table with one test**, not in three integration files and a `settings.json` the user owns. That is the whole point of having one binary: when the list grows it grows in one place.
 
 ### Task 12: Recorded hook payloads as fixtures
 
 **Files:**
-- Create: `cmd/wterm-web/testdata/hooks/{claude,opencode,pi}/*.json`
-- Create: `cmd/wterm-web/testdata/hooks/README.md` (how each was captured, and which ones could not be)
+- Create: `cmd/tmux-web/testdata/hooks/{claude,opencode,pi}/*.json`
+- Create: `cmd/tmux-web/testdata/hooks/README.md` (how each was captured, and which ones could not be)
 
 **These do not exist yet and capturing them is implementation, not design.** Everything in Tasks 13–15 is written against what these files actually contain, not against the shapes quoted in the design. Where the two disagree, the fixture wins and the disagreement goes in the commit message.
 
@@ -2885,7 +2885,7 @@ Strip each capture to the JSON payload, one file per event, named for it. The RE
 **Step 4: Commit**
 
 ```bash
-git add cmd/wterm-web/testdata/hooks
+git add cmd/tmux-web/testdata/hooks
 git commit -m "test: record real hook payloads from all three agents"
 ```
 
@@ -2896,8 +2896,8 @@ There is no mutation step here — there is no logic yet. **What replaces it:** 
 ### Task 13: The event tables and the `notification_type` whitelist
 
 **Files:**
-- Create: `cmd/wterm-web/events.go`, `cmd/wterm-web/events_test.go`
-- Modify: `cmd/wterm-web/report.go` (`--agent`, `--event`, payload on stdin)
+- Create: `cmd/tmux-web/events.go`, `cmd/tmux-web/events_test.go`
+- Modify: `cmd/tmux-web/report.go` (`--agent`, `--event`, payload on stdin)
 
 **Two modes, and the rule between them is settled here rather than discovered.** `report` accepts either:
 
@@ -2972,7 +2972,7 @@ func TestEveryBlockedMappingNamesARegisteredForm(t *testing.T) {
 
 // The three agents' turn events, from the recorded fixtures rather than from
 // the design's prose.
-func TestEventMappings(t *testing.T) { /* table over cmd/wterm-web/testdata/hooks */ }
+func TestEventMappings(t *testing.T) { /* table over cmd/tmux-web/testdata/hooks */ }
 ```
 
 **Step 2–4: Run (FAIL), implement, run (PASS)**
@@ -3016,7 +3016,7 @@ type mapping struct {
 **Step 6: Commit**
 
 ```bash
-git add cmd/wterm-web/events.go cmd/wterm-web/events_test.go cmd/wterm-web/report.go
+git add cmd/tmux-web/events.go cmd/tmux-web/events_test.go cmd/tmux-web/report.go
 git commit -m "feat: one table decides what each agent event means"
 ```
 
@@ -3025,7 +3025,7 @@ git commit -m "feat: one table decides what each agent event means"
 ### Task 14: Edge versus re-assertion
 
 **Files:**
-- Modify: `cmd/wterm-web/events.go`, `cmd/wterm-web/events_test.go`, `cmd/wterm-web/report.go`, `cmd/wterm-web/report_test.go`
+- Modify: `cmd/tmux-web/events.go`, `cmd/tmux-web/events_test.go`, `cmd/tmux-web/report.go`, `cmd/tmux-web/report_test.go`
 
 **The criterion first, because this is a safety property and "these are the ones I thought of" is not one:**
 
@@ -3109,7 +3109,7 @@ func TestEveryAgentHasATurnStartWorkingEdge(t *testing.T) {
 }
 ```
 
-**Step 2–4: Run (FAIL), implement, run (PASS).** A re-assertion runs one `tmux show-options -p -t <pane> -v @wterm_agent` before deciding, **through the same `tmuxRunner` Task 6 injected** — no new parameter, no refactor of `runReport`'s signature. `recordingTmux` implements that one-method interface, counting `show-options` calls as `shows` and `set` calls as `sets`, and answering a `show-options` with its `standing` field; `runReportWith(r, args...)` is the test helper that calls `runReport(args, io.Discard, io.Discard, mapEnv(...), func(string) tmuxRunner { return r })` with a `$TMUX`/`$TMUX_PANE` environment that resolves. `ParseReport` is what reads the answer; a standing value that will not parse counts as disagreeing, so the repair still happens.
+**Step 2–4: Run (FAIL), implement, run (PASS).** A re-assertion runs one `tmux show-options -p -t <pane> -v @tmux_web_agent` before deciding, **through the same `tmuxRunner` Task 6 injected** — no new parameter, no refactor of `runReport`'s signature. `recordingTmux` implements that one-method interface, counting `show-options` calls as `shows` and `set` calls as `sets`, and answering a `show-options` with its `standing` field; `runReportWith(r, args...)` is the test helper that calls `runReport(args, io.Discard, io.Discard, mapEnv(...), func(string) tmuxRunner { return r })` with a `$TMUX`/`$TMUX_PANE` environment that resolves. `ParseReport` is what reads the answer; a standing value that will not parse counts as disagreeing, so the repair still happens.
 
 **What it costs, stated rather than discovered:**
 
@@ -3138,7 +3138,7 @@ func TestEveryAgentHasATurnStartWorkingEdge(t *testing.T) {
 **Step 6: Commit**
 
 ```bash
-git add cmd/wterm-web/events.go cmd/wterm-web/events_test.go cmd/wterm-web/report.go cmd/wterm-web/report_test.go
+git add cmd/tmux-web/events.go cmd/tmux-web/events_test.go cmd/tmux-web/report.go cmd/tmux-web/report_test.go
 git commit -m "feat: a re-assertion reads the standing report before writing one"
 ```
 
@@ -3147,8 +3147,8 @@ git commit -m "feat: a re-assertion reads the standing report before writing one
 ### Task 15: The activity text, and the subagent filters
 
 **Files:**
-- Modify: `cmd/wterm-web/events.go`, `cmd/wterm-web/report.go`, and their tests
-- Create: `cmd/wterm-web/activity.go`, `cmd/wterm-web/activity_test.go`
+- Modify: `cmd/tmux-web/events.go`, `cmd/tmux-web/report.go`, and their tests
+- Create: `cmd/tmux-web/activity.go`, `cmd/tmux-web/activity_test.go`
 
 **The ladder.** The label is the first of these that is available, per agent:
 
@@ -3257,7 +3257,7 @@ func TestSubagentFilters(t *testing.T) {
 **Step 6: Commit**
 
 ```bash
-git add cmd/wterm-web/activity.go cmd/wterm-web/activity_test.go cmd/wterm-web/events.go cmd/wterm-web/report.go
+git add cmd/tmux-web/activity.go cmd/tmux-web/activity_test.go cmd/tmux-web/events.go cmd/tmux-web/report.go
 git commit -m "feat: verb plus object, a basename for a path, and never a raw prompt"
 ```
 
@@ -3267,7 +3267,7 @@ git commit -m "feat: verb plus object, a basename for a path, and never a raw pr
 
 **The division of labour is the same for all three, and it is the reason there is one binary.** The security-critical part of this feature is the sanitizer, and the naive shape implements it three times — once in TypeScript, once in JavaScript, once in something for claude. Three implementations of one security boundary, drifting apart, is not a thing to ship.
 
-| | Stays in the integration file | Delegated to `wterm-web report` |
+| | Stays in the integration file | Delegated to `tmux-web report` |
 | --- | --- | --- |
 | **pi** | `ctx.mode !== "tui"`; the root-session flag; the `ctx.isIdle()` re-derivation on `session_start`; the single-slot queue; spawning | which state an event means, the text ladder and its reductions, the sanitizer, edge-versus-re-assertion **including the read of the standing option**, the timestamp, and the tmux write |
 | **opencode** | the child-session map (`properties.info.parentID`) and the root-only gate; the queue; spawning | everything else, as above |
@@ -3275,7 +3275,7 @@ git commit -m "feat: verb plus object, a basename for a path, and never a raw pr
 
 Only what needs a **runtime object** (pi's `ctx`) or **memory across events** (opencode's child-session map) stays outside Go. Each integration is then short enough for a user to read before trusting it — and reviewability is the whole of the trust model here.
 
-**What an integration is permitted to do is one thing: spawn `wterm-web report`.** No network, no filesystem writes, no reading the repository, no dependencies.
+**What an integration is permitted to do is one thing: spawn `tmux-web report`.** No network, no filesystem writes, no reading the repository, no dependencies.
 
 ### Task 16: The single-slot queue
 
@@ -3286,7 +3286,7 @@ Only what needs a **runtime object** (pi's `ctx`) or **memory across events** (o
 **This logic has no test story today, which is how it would ship untested.** It goes in a tiny pure module with the spawn injected. Two exports, and Tasks 17 and 18 both import them rather than reimplementing either:
 
 - `makeQueue(spawn)` — the slot. `spawn(item)` returns a promise; the queue never looks inside an item.
-- `spawnReport(agent)` — the argv, in one place: it returns a `spawn` that runs `wterm-web report --agent <agent> --event <item.event>` with `JSON.stringify(item.payload ?? {})` on stdin. **Its promise settles when the child exits, and it never rejects** -- a failed report is silence, never a thrown error inside an agent's hook. Do not settle it at spawn time: the queue's whole guarantee is that the collapsed spawn starts only after the in-flight one has *finished*, so that the process it starts stamps a strictly later millisecond. Settle early and "finished" degrades to "spawned", two children can stamp out of order, and the daemon's ordering filter silently drops the newer state -- the exact failure this queue exists to prevent, and one no test here can catch, because the queue's own tests inject the spawn. The queue waits; the handlers never do. Neither integration builds a command line of its own.
+- `spawnReport(agent)` — the argv, in one place: it returns a `spawn` that runs `tmux-web report --agent <agent> --event <item.event>` with `JSON.stringify(item.payload ?? {})` on stdin. **Its promise settles when the child exits, and it never rejects** -- a failed report is silence, never a thrown error inside an agent's hook. Do not settle it at spawn time: the queue's whole guarantee is that the collapsed spawn starts only after the in-flight one has *finished*, so that the process it starts stamps a strictly later millisecond. Settle early and "finished" degrades to "spawned", two children can stamp out of order, and the daemon's ordering filter silently drops the newer state -- the exact failure this queue exists to prevent, and one no test here can catch, because the queue's own tests inject the spawn. The queue waits; the handlers never do. Neither integration builds a command line of its own.
 
 **`queue.ts`'s body must be valid JavaScript** -- no type annotations, no TS-only syntax. Both distribution shapes in Task 20 deliver this file into a `.js` context, so TS-only syntax there forces Task 20 to strip types or to reopen a file it has already shipped.
 
@@ -3368,7 +3368,7 @@ git commit -m "feat: one report in flight per pane, collapsing a burst to the ne
 
 **Files:**
 - Create: `internal/integrations/pi.ts`, `internal/integrations/pi.test.ts`
-- Create: `cmd/wterm-web/integration_pi_test.go` (the smoke test, against a recording stub)
+- Create: `cmd/tmux-web/integration_pi_test.go` (the smoke test, against a recording stub)
 
 **Step 1: Verify the extension API by running it. Do not assume it.**
 
@@ -3383,9 +3383,9 @@ What must be confirmed before a line of the real file is written: the module's e
 **Step 2: Write it**
 
 ```ts
-// managed by tmux-web (wterm-schema: 1)
+// managed by tmux-web (tmux-web-schema: 1)
 // Reinstalling or updating the integration overwrites this file.
-// It does one thing: `tmux set-option -p @wterm_agent`. Nothing else.
+// It does one thing: `tmux set-option -p @tmux_web_agent`. Nothing else.
 
 import { makeQueue, spawnReport } from "./queue.ts"
 
@@ -3446,7 +3446,7 @@ Four layers, and none of them is "read it and hope". Layer 0 is `internal/integr
 
 1. **The queue** is Task 16's, already covered.
 2. **The mapping** — which state each event means, what text comes out of `tool_execution_start.args`, whether a payload is refused — is a **Go** table test over Task 12's recorded fixtures. That is where it belongs: it is the same table all three agents share.
-3. **The wiring** — that the extension registers those five events and spawns with the right argv — is a Go smoke test with a **recording stub named `wterm-web` on `PATH`** that appends its argv and stdin to a file. Run pi in a throwaway project with the extension installed, drive one turn, assert the recorded calls. **If pi is not installed on the machine, skip loudly** (`t.Skip` with a message naming what was not run) rather than silently — but do not fake it: a wiring test against a fake runtime tests the fake.
+3. **The wiring** — that the extension registers those five events and spawns with the right argv — is a Go smoke test with a **recording stub named `tmux-web` on `PATH`** that appends its argv and stdin to a file. Run pi in a throwaway project with the extension installed, drive one turn, assert the recorded calls. **If pi is not installed on the machine, skip loudly** (`t.Skip` with a message naming what was not run) rather than silently — but do not fake it: a wiring test against a fake runtime tests the fake.
 
 **What cannot be tested in CI**: that a real agent, running a real integration, produces the events we mapped. That is a manual check per agent per upgrade, and the honest mitigation is that a wrong mapping degrades to no report, which degrades to v2.
 
@@ -3466,7 +3466,7 @@ Every row names a test that runs unconditionally where one exists: layer 3 is al
 **Step 5: Commit**
 
 ```bash
-git add internal/integrations/pi.ts internal/integrations/pi.test.ts cmd/wterm-web/integration_pi_test.go
+git add internal/integrations/pi.ts internal/integrations/pi.test.ts cmd/tmux-web/integration_pi_test.go
 git commit -m "feat: a pi extension that maps events and delegates everything else"
 ```
 
@@ -3476,14 +3476,14 @@ git commit -m "feat: a pi extension that maps events and delegates everything el
 
 **Files:**
 - Create: `internal/integrations/opencode.js`, `internal/integrations/opencode.test.ts`
-- Create: `cmd/wterm-web/integration_opencode_test.go`
+- Create: `cmd/tmux-web/integration_opencode_test.go`
 
 **Step 1: Verify the plugin API by running it. Do not assume it.** What must be confirmed: the export shape (an async factory returning a handler object), that `"chat.message"` and `event` are the hook names, and the event `type` strings — `session.status`, `tool.execute.before`, `permission.asked`, `todo.updated`, `session.idle`. And the one this task turns on: **where `parentID` appears**, and whether `session.idle` carries anything identifying the session.
 
 **Step 2: Write it**
 
 ```js
-// managed by tmux-web (wterm-schema: 1)
+// managed by tmux-web (tmux-web-schema: 1)
 // ...
 
 // Child sessions arrive in every hook and TMUX_PANE is the same for all of
@@ -3529,7 +3529,7 @@ export default async function () {
 }
 ```
 
-Handlers: `"chat.message"` and `event` → `session.status` (busy is the **turn-start `working` edge**; the invariant), tool events, `permission.asked`, `todo.updated`, `session.idle`. Each one root-only, each one pushed through the queue, each one delegating to `wterm-web report --agent opencode --event <type>` with the payload on stdin.
+Handlers: `"chat.message"` and `event` → `session.status` (busy is the **turn-start `working` edge**; the invariant), tool events, `permission.asked`, `todo.updated`, `session.idle`. Each one root-only, each one pushed through the queue, each one delegating to `tmux-web report --agent opencode --event <type>` with the payload on stdin.
 
 **Step 3: The test story** — the same four layers as pi, and layer 0 here is the bigger half. The **child-session map is pure and gets its own vitest test** in `internal/integrations/opencode.test.ts`, driving the exported `sessionTree()` directly: a `session.created` with a `parentID` registers a child, `isRoot` is false for that child and true for the root, a chain of nested children resolves to the root, and an id never seen reads as root (the fail-open direction, asserted deliberately so that inverting it goes red). That is the half of the filter that has real logic in it. As with pi, every item the handlers push is `{ event, payload? }` and nothing else.
 
@@ -3549,7 +3549,7 @@ Handlers: `"chat.message"` and `event` → `session.status` (busy is the **turn-
 **Step 5: Commit**
 
 ```bash
-git add internal/integrations/opencode.js internal/integrations/opencode.test.ts cmd/wterm-web/integration_opencode_test.go
+git add internal/integrations/opencode.js internal/integrations/opencode.test.ts cmd/tmux-web/integration_opencode_test.go
 git commit -m "feat: an opencode plugin whose only state is which sessions are children"
 ```
 
@@ -3576,14 +3576,14 @@ git commit -m "feat: an opencode plugin whose only state is which sessions are c
 **Files:**
 - Create: `internal/integrations/claude-report.sh`, `internal/integrations/claude_hooks.go` (the settings block as data), and their tests
 
-**`claude_hooks.go` is also this directory's `//go:embed` host, and that is not an aside — Task 20 cannot work without it.** `//go:embed` reads only from the directory of the file that declares it and its subtree: `cmd/wterm-web` **cannot** embed `../../internal/integrations`, and a path with `..` in it is a compile error, not a lookup that fails at run time. Until this task there is no `.go` file in `internal/integrations` at all — Tasks 16, 17 and 18 put only `.ts` and `.js` there — so this file is where `package integrations` begins. Give it the directives and the exported accessors the installer will use:
+**`claude_hooks.go` is also this directory's `//go:embed` host, and that is not an aside — Task 20 cannot work without it.** `//go:embed` reads only from the directory of the file that declares it and its subtree: `cmd/tmux-web` **cannot** embed `../../internal/integrations`, and a path with `..` in it is a compile error, not a lookup that fails at run time. Until this task there is no `.go` file in `internal/integrations` at all — Tasks 16, 17 and 18 put only `.ts` and `.js` there — so this file is where `package integrations` begins. Give it the directives and the exported accessors the installer will use:
 
 ```go
 package integrations
 
 // The files the installer writes, embedded here because this is the only
 // package that can embed them: //go:embed cannot climb out of its own
-// directory, so cmd/wterm-web has no way to reach these bytes. Task 20 is the
+// directory, so cmd/tmux-web has no way to reach these bytes. Task 20 is the
 // only consumer.
 //
 //go:embed pi.ts opencode.js queue.ts claude-report.sh
@@ -3611,9 +3611,9 @@ The wrapper, and it is three lines because everything else is in Go:
 
 ```sh
 #!/bin/sh
-# managed by tmux-web (wterm-schema: 1)
+# managed by tmux-web (tmux-web-schema: 1)
 # Reinstalling or updating the integration overwrites this file.
-# It does one thing: `tmux set-option -p @wterm_agent`. Nothing else.
+# It does one thing: `tmux set-option -p @tmux_web_agent`. Nothing else.
 BIN=<resolved at install time>
 [ -x "$BIN" ] || exit 0     # moved, uninstalled, or never built: say nothing
 exec "$BIN" report --agent claude --event "$1"
@@ -3627,7 +3627,7 @@ exec "$BIN" report --agent claude --event "$1"
 
 ```go
 func TestGeneratedClaudeHooks(t *testing.T) {
-	block := claudeHookBlock("/opt/wterm/report.sh")
+	block := claudeHookBlock("/opt/tmux-web/report.sh")
 	// A string search over the marshalled JSON, deliberately: a struct-field
 	// assertion cannot see a key somebody adds to a map later.
 	if strings.Contains(string(block), "asyncRewake") {
@@ -3721,32 +3721,32 @@ git commit -m "feat: four Claude hooks, async, and never asyncRewake"
 > is `cli` for a TUI root and `sdk-cli` for the nested process -- but it separates *print mode*, not
 > nesting, so it would also refuse a legitimately headless root.
 
-### Task 20: `wterm-web install-integration`
+### Task 20: `tmux-web install-integration`
 
 **Files:**
-- Create: `cmd/wterm-web/install.go`, `cmd/wterm-web/install_test.go`
-- Modify: `cmd/wterm-web/cli.go` (dispatch and usage)
+- Create: `cmd/tmux-web/install.go`, `cmd/tmux-web/install_test.go`
+- Modify: `cmd/tmux-web/cli.go` (dispatch and usage)
 - Modify: `internal/front/server.go` (a comment at the mux, and nothing else — see the prohibition test below)
 
 **Installation is a CLI act, and it is never a button in the web UI.** Not a "we detected claude, shall we…" prompt either. The web UI is reachable over the network from a phone, and "write executable code into a repo" is not a thing a network request should be able to do however well authenticated it is. The Origin middleware is the boundary for tmux operations; **this is not a tmux operation.**
 
 ```
-wterm-web install-integration --agent claude|opencode|pi [dir] [--global] [--yes] [--remove]
+tmux-web install-integration --agent claude|opencode|pi [dir] [--global] [--yes] [--remove]
 ```
 
 It prints the exact paths it will write and requires confirmation unless `--yes`.
 
 | Agent | Path | Kind |
 | --- | --- | --- |
-| pi | `<proj>/.pi/extensions/wterm.ts` | A file we own. TypeScript via jiti, no build step. Needs project trust |
-| opencode | `<proj>/.opencode/plugin/wterm.js` | A file we own. Auto-loaded, no config entry needed |
+| pi | `<proj>/.pi/extensions/tmux-web.ts` | A file we own. TypeScript via jiti, no build step. Needs project trust |
+| opencode | `<proj>/.opencode/plugin/tmux-web.js` | A file we own. Auto-loaded, no config entry needed |
 | claude | `<proj>/.claude/settings.json` | **A file the user owns**, merged into |
 
-**Where the bytes come from.** `cmd/wterm-web` imports `internal/integrations` and reads them out of the `embed.FS` Task 19 declares there. It does **not** embed them itself: `//go:embed` cannot reach outside its own directory, so a directive in `cmd/wterm-web` naming `../../internal/integrations/pi.ts` does not compile. If that package or its directives are missing, the task to fix is Task 19, not this one.
+**Where the bytes come from.** `cmd/tmux-web` imports `internal/integrations` and reads them out of the `embed.FS` Task 19 declares there. It does **not** embed them itself: `//go:embed` cannot reach outside its own directory, so a directive in `cmd/tmux-web` naming `../../internal/integrations/pi.ts` does not compile. If that package or its directives are missing, the task to fix is Task 19, not this one.
 
 **One thing this task has to settle and must not settle by guessing: how the queue module gets to the destination.** `pi.ts` and `opencode.js` both `import { makeQueue, spawnReport } from "./queue.ts"` (Task 16), so writing one file per agent leaves a dangling import. Two shapes, and the choice is a measurement, not a preference:
 
-- **Write `queue.ts` beside the integration** — `.pi/extensions/wterm-queue.ts`, `.opencode/plugin/wterm-queue.js` — with its own managed header, subject to the same ownership rules, and removed by `--remove` along with its sibling. Requires the import specifier in the written file to match the written name, and requires each runtime to accept it.
+- **Write `queue.ts` beside the integration** — `.pi/extensions/tmux-web-queue.ts`, `.opencode/plugin/tmux-web-queue.js` — with its own managed header, subject to the same ownership rules, and removed by `--remove` along with its sibling. Requires the import specifier in the written file to match the written name, and requires each runtime to accept it.
 - **Inline it at install time**, so each agent gets exactly one self-contained file. One source of truth is preserved (the concatenation happens in Go from the embedded bytes), and there is no import to resolve at all.
 
 **Verify before choosing**, because the deciding fact is whether opencode's runtime will load a `.js` plugin that imports a `.ts` sibling — bun will, node will not, and which one opencode uses under the user's install is not something to assume. Both runtimes are on this machine. Record what you ran and what it printed in the commit message, exactly as Task 3 does for tmux. Whichever shape wins, `--remove` must leave nothing of ours behind, and the "not ours, refuse" rule applies to every file written.
@@ -3756,9 +3756,9 @@ It prints the exact paths it will write and requires confirmation unless `--yes`
 **Every file we own carries a managed header, and the schema line is what makes `install` safe:**
 
 ```
-// managed by tmux-web (wterm-schema: 1)
+// managed by tmux-web (tmux-web-schema: 1)
 // Reinstalling or updating the integration overwrites this file.
-// It does one thing: `tmux set-option -p @wterm_agent`. Nothing else.
+// It does one thing: `tmux set-option -p @tmux_web_agent`. Nothing else.
 ```
 
 Three cases it lets `install` tell apart: **ours and current** (overwrite silently), **ours and outdated** (overwrite, say so), **not ours** (refuse, and name the file). The last case is what the header exists for.
@@ -3781,7 +3781,7 @@ Three cases it lets `install` tell apart: **ours and current** (overwrite silent
 
 ```go
 func TestInstallRefusesAFileItDoesNotOwn(t *testing.T) {
-	// A hand-written .pi/extensions/wterm.ts with no managed header.
+	// A hand-written .pi/extensions/tmux-web.ts with no managed header.
 	// Refused, the file untouched, and the error NAMES the file.
 }
 
@@ -3836,7 +3836,7 @@ func TestInstallIsNeverReachableFromHTTP(t *testing.T) {
 	//  2. This test covers the other half: a REIMPLEMENTATION inside
 	//     internal/front. It is a grep -- it reads internal/front/*.go and
 	//     fails if the install symbols (install-integration, claudeHookBlock,
-	//     wterm-schema, the .pi/.opencode/.claude paths) appear there at all.
+	//     tmux-web-schema, the .pi/.opencode/.claude paths) appear there at all.
 	//     A grep is a blunt instrument and this comment says so plainly rather
 	//     than dressing it up: what it really buys is that somebody adding an
 	//     install route has to delete a test with this comment in it.
@@ -3872,7 +3872,7 @@ func TestNoGlobalForOpencode(t *testing.T) {
 **Step 6: Commit**
 
 ```bash
-git add cmd/wterm-web/install.go cmd/wterm-web/install_test.go cmd/wterm-web/cli.go internal/front/server.go
+git add cmd/tmux-web/install.go cmd/tmux-web/install_test.go cmd/tmux-web/cli.go internal/front/server.go
 git commit -m "feat: install and remove the three integrations, from the CLI only"
 ```
 
@@ -4052,7 +4052,7 @@ git commit -m "fix: a repaint seconds after a finish does not re-light a cleared
 - A pane running a real agent with its integration installed shows **what it is doing**, not what it was first asked, observed by hand on all three agents.
 - With the browser closed and reopened, a finished agent still badges — the report survives a daemon restart, because the fact lives in tmux.
 - A pane with **no** integration behaves exactly as it did under v2: the classifier, the grammars, the same badge.
-- `wterm-web install-integration --remove` leaves a user's own `settings.json` hooks untouched, and `rm` works for the other two.
+- `tmux-web install-integration --remove` leaves a user's own `settings.json` hooks untouched, and `rm` works for the other two.
 - No integration file contains a sanitizer, a state table, or a whitelist.
 - Every task's mutation step has been run and its survivors are recorded in that task's commit message.
 

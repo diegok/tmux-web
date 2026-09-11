@@ -452,7 +452,7 @@ func TestWriteFailureLeavesTheStoreUnchanged(t *testing.T) {
 func TestStateFileIsNotWorldReadable(t *testing.T) {
 	// A nested path so the directory under test is one OpenStore created, not
 	// one the test harness made.
-	path := filepath.Join(t.TempDir(), "wterm-web", "devices.json")
+	path := filepath.Join(t.TempDir(), "tmux-web", "devices.json")
 	s, err := auth.OpenStore(path)
 	if err != nil {
 		t.Fatal(err)
@@ -505,7 +505,7 @@ func TestDefaultPath(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if want := "/xdg/state/wterm-web/devices.json"; got != want {
+		if want := "/xdg/state/tmux-web/devices.json"; got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
@@ -517,7 +517,7 @@ func TestDefaultPath(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if want := "/home/someone/.local/state/wterm-web/devices.json"; got != want {
+		if want := "/home/someone/.local/state/tmux-web/devices.json"; got != want {
 			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
@@ -529,7 +529,7 @@ func TestDefaultPath(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if want := "/home/someone/.local/state/wterm-web/devices.json"; got != want {
+		if want := "/home/someone/.local/state/tmux-web/devices.json"; got != want {
 			t.Fatalf("the basedir spec says a relative XDG_STATE_HOME is ignored; got %q", got)
 		}
 	})

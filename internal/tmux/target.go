@@ -84,14 +84,14 @@ func validateID(kind string, sigil byte, s string) error {
 // check is byte-oriented -- below 0x20, plus 0x7f -- so a C1 control such as
 // U+009F is accepted and stored, and would ride the poll into the DOM. A 0x1f
 // in particular is the snapshot field separator, which forges a record and
-// makes a pane vanish from the sidebar; that is the same hole @wterm_label is
+// makes a pane vanish from the sidebar; that is the same hole @tmux_web_label is
 // validated against on write (validateLabel) and repaired against on read
 // (snapshot.go's sanitizeLabel), the two sharing one notion of a safe value.
 //
 // Deliberately allowed: inner, leading and trailing spaces (arguments reach
 // tmux through exec, never a shell, and such a name is still addressable);
 // non-ASCII (tmux stores it fine); and the "_web-" prefix, since app sessions
-// are identified by the @wterm_web option and never by name -- a user may
+// are identified by the @tmux_web_owned option and never by name -- a user may
 // legitimately want that name, and taking it from them is the bug session.go
 // already warns about.
 func ValidateSessionName(name string) error { return validateName("session", name) }

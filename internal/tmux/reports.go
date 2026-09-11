@@ -62,7 +62,7 @@ const NIdle = settleAfter + 2
 // Expressed against settleAfter, in one place, so that changing it is one line.
 const NBlocked = settleAfter + 1
 
-// Reports decides, per pane, whether the standing @wterm_agent value is the
+// Reports decides, per pane, whether the standing @tmux_web_agent value is the
 // authority for that pane's state.
 //
 // Like Classifier it is pure -- no clock, no I/O, `now` is a parameter -- and
@@ -133,9 +133,9 @@ type reportState struct {
 	// anything: the next turn's start writes working, which is an edge, which
 	// is a newer value, which clears the slot.
 	//
-	// It lives here and not in @wterm_agent. The daemon READS that option, it
+	// It lives here and not in @tmux_web_agent. The daemon READS that option, it
 	// does not write it; a reader that edits the channel it reads cannot be
-	// reasoned about when two of them run, and nothing promises wterm-web is a
+	// reasoned about when two of them run, and nothing promises tmux-web is a
 	// singleton. The price is that the slot does not survive a restart -- see
 	// Observe's first sight, and Poller.refresh, which empties both slots on a
 	// tmux-server generation change for the same reason.
@@ -157,7 +157,7 @@ func (st *reportState) reject() { st.rejected = st.accepted.Timestamp }
 // NewReports returns a report memory that has seen nothing.
 func NewReports() *Reports { return &Reports{panes: make(map[string]*reportState)} }
 
-// Observe reads one pane's standing @wterm_agent value and reports which
+// Observe reads one pane's standing @tmux_web_agent value and reports which
 // report, if any, is in force for it.
 //
 // command is pane_current_command: if it is no longer a known agent the agent
@@ -171,7 +171,7 @@ func (r *Reports) Observe(paneID, raw, command string, now time.Time) (Report, b
 	parsed, ok := ParseReport(raw, now)
 	if !ok {
 		// Unset, or a value we did not write. Both mean no report, and both
-		// must clear what we accepted -- `tmux set -p -u @wterm_agent` is the
+		// must clear what we accepted -- `tmux set -p -u @tmux_web_agent` is the
 		// documented escape hatch for a stuck report, and a daemon that went on
 		// serving its own memory would make that escape hatch do nothing.
 		delete(r.panes, paneID)

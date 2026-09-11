@@ -84,7 +84,7 @@ func SanitizeActivity(s string) string {
 
 // AgentOption is the per-pane tmux option an agent's integration writes.
 //
-// Deliberately NOT @wterm_label. That option is the *user's* field: PATCH
+// Deliberately NOT @tmux_web_label. That option is the *user's* field: PATCH
 // /api/panes/{id} writes it, and AppSidebar.tsx's own comment on paneText says
 // a label "wins outright, including over a title a program is rewriting
 // underneath it -- that is the whole point of having one". An integration
@@ -92,7 +92,7 @@ func SanitizeActivity(s string) string {
 // above programs: a rename would survive until the agent's next tool call, the
 // agent's report would survive until the next rename, and both features would
 // look intermittently broken with neither at fault.
-const AgentOption = "@wterm_agent"
+const AgentOption = "@tmux_web_agent"
 
 // ReportVersion is the schema this daemon understands.
 //
@@ -127,9 +127,9 @@ type Report struct {
 	Activity  string // "" for a state-only report
 }
 
-// ParseReport reads an @wterm_agent value. ok is false for anything that is not
+// ParseReport reads an @tmux_web_agent value. ok is false for anything that is not
 // a report this daemon wrote and understands -- including the empty value: an
-// unset option and one set to "" both render as "" through #{@wterm_agent}, so
+// unset option and one set to "" both render as "" through #{@tmux_web_agent}, so
 // the daemon cannot tell them apart and does not try. Both mean no report.
 //
 // Every field before the text has a shape that can be checked, and a value that
@@ -178,7 +178,7 @@ func ParseReport(v string, now time.Time) (Report, bool) {
 	if len(parts) == 4 {
 		// Re-sanitised on read, on the standing assumption that a writer's
 		// promise is not a guarantee. This is the third of the same three
-		// layers @wterm_label has: tmux's substitution takes the two
+		// layers @tmux_web_label has: tmux's substitution takes the two
 		// record-breaking bytes, the field's position as the only variable one
 		// in its own format string bounds what a survivor could do, and this
 		// repairs everything neither of those is a promise about -- C1
@@ -205,7 +205,7 @@ func FormatReport(state string, ms int64, activity string) string {
 	return v
 }
 
-// reportField is #{@wterm_agent} with the two bytes that break this wire format
+// reportField is #{@tmux_web_agent} with the two bytes that break this wire format
 // substituted out by tmux before the value reaches Go.
 //
 // It is labelField's pattern, built from the same two constants -- COPIED FROM
@@ -232,7 +232,7 @@ var reportFormatFields = []string{reportTag, "#{pane_id}", reportField}
 // ReportFormat is the -F argument for the report block.
 var ReportFormat = strings.Join(reportFormatFields, Sep)
 
-// ParseReports pulls the raw @wterm_agent value of every pane out of the
+// ParseReports pulls the raw @tmux_web_agent value of every pane out of the
 // batched read, keyed by pane id.
 //
 // Every pane gets a line, including one with no integration, whose value is the

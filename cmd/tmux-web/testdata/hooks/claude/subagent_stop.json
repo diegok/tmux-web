@@ -1,0 +1,27 @@
+{
+  "session_id": "1f498509-8cf5-4b81-9c9b-dd638b5746b1",
+  "transcript_path": "/home/user/.claude/projects/-tmp-tmux-web-capture-cc-proj/1f498509-8cf5-4b81-9c9b-dd638b5746b1.jsonl",
+  "cwd": "/tmp/tmux-web-capture/cc/proj",
+  "scratchpad_dir": "/tmp/tmux-web-capture/-tmp-tmux-web-capture-cc-proj/1f498509-8cf5-4b81-9c9b-dd638b5746b1/scratchpad",
+  "prompt_id": "5292dbf5-f932-48cc-81df-1b864339395b",
+  "permission_mode": "auto",
+  "agent_id": "a9004f2faabee84ce",
+  "agent_type": "Explore",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "SubagentStop",
+  "stop_hook_active": false,
+  "agent_transcript_path": "/home/user/.claude/projects/-tmp-tmux-web-capture-cc-proj/1f498509-8cf5-4b81-9c9b-dd638b5746b1/subagents/agent-a9004f2faabee84ce.jsonl",
+  "last_assistant_message": "Two glowing rectangles, stacked like quiet windows in a wall,\nwhere every keystroke asks the dark a question, and it answers all.",
+  "background_tasks": [
+    {
+      "id": "a9004f2faabee84ce",
+      "type": "subagent",
+      "status": "running",
+      "description": "Write two-line poem",
+      "agent_type": "Explore"
+    }
+  ],
+  "session_crons": []
+}

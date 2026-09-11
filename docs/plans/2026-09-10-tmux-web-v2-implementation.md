@@ -21,7 +21,7 @@
 1. **State comes from the screen, not the pane title.** The title is a *label*. Claude Code rewrites it when the task summary changes and leaves it byte-identical through minutes of work — verified twice on a live machine. opencode's title is a static `OpenCode`. Inferring work from title changes was the design's first version and it is wrong.
 2. **`capture-pane -S -8` does not mean "the last 8 lines".** On a 6-row pane it returns 14: the visible screen *plus* 8 lines of scrollback, which is where a just-answered approval box lives. Use `capture-pane -p -J` and slice in Go.
 3. **Sessions have `$N` ids, and `session_group` keeps the pre-rename name.** Addressing sessions by name means rename appears to do nothing, because the sidebar keys on the group.
-4. **tmux sanitises pane *titles* but not user *option values*.** `@wterm_label` can contain a `0x1f` or a newline and make a pane vanish from the sidebar.
+4. **tmux sanitises pane *titles* but not user *option values*.** `@tmux_web_label` can contain a `0x1f` or a newline and make a pane vanish from the sidebar.
 5. **Blocked is checked on every capture, with no idle gate.** An agent can raise an approval box while background work continues.
 
 **Run both suites after every task.** `go test ./...` alone is not enough: the
@@ -153,18 +153,18 @@ if you find yourself reconciling versions, you are reading a stale copy.
 | 3 | `#{session_name}` | `SessionName` |
 | 4 | `#{pane_id}` | `PaneID` |
 | 5 | `#{pane_index}` | `PaneIndex` |
-| 6 | `#{@wterm_web}` | `AppOwned` |
+| 6 | `#{@tmux_web_owned}` | `AppOwned` |
 | 7 | `#{window_id}` | `WindowID` |
 | 8 | `#{window_index}` | `WindowIndex` |
 | 9 | `#{window_name}` | `WindowName` |
 | 10 | `#{pane_active}` | `PaneActive` |
 | 11 | `#{pane_current_command}` | `Command` |
 | 12 | `#{pane_title}` | `Title` |
-| 13 | `#{s/[\n\x1f]/ /:@wterm_label}` | `Label` |
+| 13 | `#{s/[\n\x1f]/ /:@tmux_web_label}` | `Label` |
 
 **Field 13 changed shape and position in the label-hardening task; this table is
 the current one.** The label used to sit at field 7 as a bare
-`#{@wterm_label}`, which is how a hostile or buggy writer of that option could
+`#{@tmux_web_label}`, which is how a hostile or buggy writer of that option could
 remove a pane from the sidebar. It is now (a) stripped of the two bytes that
 break the record by tmux's own `s///` substitution — the pattern is a bracket
 set of the literal `0x1f` and newline, and `[[:cntrl:]]` cannot be used because
@@ -267,7 +267,7 @@ Set `fieldCount = 13`, write `Format` from the table above, add to `Row`:
 SessionID   string `json:"sessionId"`   // $N; what management operations target
 SessionName string `json:"sessionName"` // live name, for display
 WindowID    string `json:"windowId"`    // @N; what window operations target
-Label       string `json:"label"`       // @wterm_label; user-set, may be ""
+Label       string `json:"label"`       // @tmux_web_label; user-set, may be ""
 Title       string `json:"title"`       // tmux-sanitised, truncated
 ```
 
@@ -828,7 +828,7 @@ Requirements each needing its own test against real tmux:
 - **`SetLabel` rejects control bytes and caps length.** A label with a `0x1f` or a newline used to make the pane vanish from the snapshot; tmux does not sanitise option values. Since the label-hardening task the snapshot no longer depends on this validator holding — see Task 2's field table — but it still keeps the app's own writes honest and gives the browser an error instead of a label that changes shape on the way back.
 - **`SplitPane` and `NewWindow` resolve the working directory server-side** from `#{pane_current_path}` and pass `-c`. The path never comes from the browser.
 - **A path that no longer exists is reported, not silently ignored.** `tmux split-window -c /gone` exits 0 and lands in `$HOME`. Stat first.
-- **Kill refuses an `@wterm_web` session** on the direct session path.
+- **Kill refuses an `@tmux_web_owned` session** on the direct session path.
 - **Rename is visible in a subsequent snapshot** — the test that revision 1's design would have failed. **Rename twice.** A single rename against a grouped session is vacuous, measured: an implementation that addresses the session by its group key still renames the right session the first time, because the group key and the live name are equal until the first rename lands. Mutation-tested — rename-by-group-name survives the one-rename version and dies on the two-rename one.
 
 **Decided in implementation, since the plan left it open:** window names get a

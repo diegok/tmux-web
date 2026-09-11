@@ -8,7 +8,7 @@
  * lets `//go:embed all:dist` compile on a fresh clone -- running the suite must
  * not leave the repository in a state where `go build` fails.
  *
- * Set WTERM_E2E_SKIP_BUILD=1 to iterate on the tests without rebuilding.
+ * Set TMUX_WEB_E2E_SKIP_BUILD=1 to iterate on the tests without rebuilding.
  */
 
 import { execFileSync } from 'node:child_process'
@@ -17,9 +17,9 @@ import * as fs from 'node:fs'
 import { binary, repoRoot } from './harness'
 
 export default function globalSetup(): void {
-  if (process.env.WTERM_E2E_SKIP_BUILD === '1') {
+  if (process.env.TMUX_WEB_E2E_SKIP_BUILD === '1') {
     if (!fs.existsSync(binary)) {
-      throw new Error(`WTERM_E2E_SKIP_BUILD=1 but ${binary} does not exist`)
+      throw new Error(`TMUX_WEB_E2E_SKIP_BUILD=1 but ${binary} does not exist`)
     }
     return
   }

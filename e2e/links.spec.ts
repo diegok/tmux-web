@@ -37,10 +37,10 @@ async function clickInside(
   await row.click({ position: { x, y: box.height / 2 }, modifiers })
 }
 
-test('an OSC 8 hyperlink becomes a real anchor', async ({ page, wterm }) => {
-  await enroll(page, wterm, 'laptop')
+test('an OSC 8 hyperlink becomes a real anchor', async ({ page, tmuxWeb }) => {
+  await enroll(page, tmuxWeb, 'laptop')
   const sh = emitter(`printf '\\033]8;id=x;${PR}\\033\\\\#13914\\033]8;;\\033\\\\\\n'`)
-  wterm.tmux('send-keys', '-t', BASE_SESSION, sh, 'Enter')
+  tmuxWeb.tmux('send-keys', '-t', BASE_SESSION, sh, 'Enter')
 
   const link = page.locator('a.term-link').first()
   await expect(link).toBeVisible({ timeout: 8000 })
@@ -51,10 +51,10 @@ test('an OSC 8 hyperlink becomes a real anchor', async ({ page, wterm }) => {
   await expect(link).toHaveText('#13914')
 })
 
-test('shift+click opens an OSC 8 link', async ({ page, wterm }) => {
-  await enroll(page, wterm, 'laptop')
+test('shift+click opens an OSC 8 link', async ({ page, tmuxWeb }) => {
+  await enroll(page, tmuxWeb, 'laptop')
   const sh = emitter(`printf '\\033]8;id=x;${PR}\\033\\\\#13914\\033]8;;\\033\\\\\\n'`)
-  wterm.tmux('send-keys', '-t', BASE_SESSION, sh, 'Enter')
+  tmuxWeb.tmux('send-keys', '-t', BASE_SESSION, sh, 'Enter')
   await expect(page.locator('a.term-link').first()).toBeVisible({ timeout: 8000 })
 
   const [popup] = await Promise.all([
@@ -64,11 +64,11 @@ test('shift+click opens an OSC 8 link', async ({ page, wterm }) => {
   expect(popup.url()).toBe(PR)
 })
 
-test('shift+click opens a plain-text URL that is not a hyperlink', async ({ page, wterm }) => {
-  await enroll(page, wterm, 'laptop')
+test('shift+click opens a plain-text URL that is not a hyperlink', async ({ page, tmuxWeb }) => {
+  await enroll(page, tmuxWeb, 'laptop')
   // No OSC 8 at all -- the case tools that do not emit hyperlinks produce.
   const sh = emitter(`printf 'see ${PR} for details\\n'`)
-  wterm.tmux('send-keys', '-t', BASE_SESSION, sh, 'Enter')
+  tmuxWeb.tmux('send-keys', '-t', BASE_SESSION, sh, 'Enter')
 
   const cell = page.getByText('for details', { exact: false }).first()
   await expect(cell).toBeVisible({ timeout: 8000 })
@@ -81,10 +81,10 @@ test('shift+click opens a plain-text URL that is not a hyperlink', async ({ page
   expect(popup.url()).toBe(PR)
 })
 
-test('a plain click still belongs to tmux, not the link opener', async ({ page, wterm }) => {
-  await enroll(page, wterm, 'laptop')
+test('a plain click still belongs to tmux, not the link opener', async ({ page, tmuxWeb }) => {
+  await enroll(page, tmuxWeb, 'laptop')
   const sh = emitter(`printf 'see ${PR} for details\\n'`)
-  wterm.tmux('send-keys', '-t', BASE_SESSION, sh, 'Enter')
+  tmuxWeb.tmux('send-keys', '-t', BASE_SESSION, sh, 'Enter')
   await expect(page.getByText('for details', { exact: false }).first()).toBeVisible({
     timeout: 8000,
   })

@@ -300,7 +300,7 @@ func DefaultPath() (string, error) {
 		}
 		base = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(base, "wterm-web", "devices.json"), nil
+	return filepath.Join(base, "tmux-web", "devices.json"), nil
 }
 
 // randomToken mints a 32-byte device token, base64url without padding, so it

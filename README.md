@@ -32,14 +32,14 @@ Build it, then run it on the machine whose tmux you want to reach:
 
 ```sh
 make build
-./wterm-web serve --host tmux.example.com
+./tmux-web serve --host tmux.example.com
 ```
 
 It gets a TLS certificate for that hostname over ACME, so ports 80 and 443 need
 to reach it. To try it locally instead, skip the certificate:
 
 ```sh
-./wterm-web serve --host localhost --dev     # plain HTTP on 127.0.0.1:8080
+./tmux-web serve --host localhost --dev     # plain HTTP on 127.0.0.1:8080
 ```
 
 ### On a private network
@@ -49,7 +49,7 @@ like `devbox.ss`, or anything that only resolves on your VPN. The daemon issues
 its own certificate instead:
 
 ```sh
-./wterm-web serve --host devbox.ss --self-signed --tls-port 8443
+./tmux-web serve --host devbox.ss --self-signed --tls-port 8443
 ```
 
 `--dev` is not an alternative here: it binds loopback only, and the session
@@ -68,7 +68,7 @@ machine. `--tls-port` avoids needing root.
 Then enrol a browser. There are no passwords and no login form:
 
 ```sh
-./wterm-web enroll --name laptop
+./tmux-web enroll --name laptop
 # https://tmux.example.com/enroll#Ck9tR2p…   single use, expires in 10m
 ```
 
@@ -78,8 +78,8 @@ mint further links (with a QR code, for a phone) so you never need to come back
 to the shell for the next device.
 
 ```sh
-./wterm-web devices        # what is enrolled
-./wterm-web revoke <id>    # cut a device off, including any terminal it has open
+./tmux-web devices        # what is enrolled
+./tmux-web revoke <id>    # cut a device off, including any terminal it has open
 ```
 
 Lost every device? SSH in and run `enroll` again.
@@ -89,7 +89,7 @@ Lost every device? SSH in and run `enroll` again.
 A browser arriving over the network carries no identity worth trusting, so
 nothing about it is used to decide access. A process connecting to a unix socket
 does: the kernel reports its uid, and it cannot be forged. So the daemon listens
-on a socket only its own user can open, and *being able to run `wterm-web enroll`
+on a socket only its own user can open, and *being able to run `tmux-web enroll`
 on the box* is the entire authorization proof.
 
 An enrolment link projects that one-time proof onto a remote browser, which
@@ -135,15 +135,15 @@ The integrations fix both. They are small files, shipped inside the binary, that
 an agent runs to report what it is doing onto its own tmux pane:
 
 ```sh
-./wterm-web install-integration --agent claude
-./wterm-web install-integration --agent opencode
-./wterm-web install-integration --agent pi
+./tmux-web install-integration --agent claude
+./tmux-web install-integration --agent opencode
+./tmux-web install-integration --agent pi
 ```
 
-claude gets `.claude/wterm-report.sh` and four hooks merged into
+claude gets `.claude/tmux-web-report.sh` and four hooks merged into
 `.claude/settings.json`, which is a file you own and is merged rather than
-rewritten; opencode gets `.opencode/plugin/wterm.js`; pi gets
-`.pi/extensions/wterm.ts`.
+rewritten; opencode gets `.opencode/plugin/tmux-web.js`; pi gets
+`.pi/extensions/tmux-web.ts`.
 
 It writes into the current directory, or into a directory you name after the
 flags. It prints every path it is going to touch and asks before writing
@@ -167,15 +167,15 @@ than no reporting at all.
 all three support it. Each one is a **directory drop** and no file you own is
 edited:
 
-- claude: `~/.claude/wterm-report.sh`, with the four hooks merged into
+- claude: `~/.claude/tmux-web-report.sh`, with the four hooks merged into
   `~/.claude/settings.json`.
-- opencode: `$XDG_CONFIG_HOME/opencode/plugin/wterm.js` (`~/.config` when that is
+- opencode: `$XDG_CONFIG_HOME/opencode/plugin/tmux-web.js` (`~/.config` when that is
   unset). Nothing is added to `opencode.jsonc` — an absolute path in its `plugin`
   array does work, but a dropped file uninstalls with one `rm` and leaves your
   config alone. opencode's own bootstrap (`package.json`, `node_modules/`, a
   `.gitignore`) lands beside the plugin in opencode's config directory, **not in
   any repository**.
-- pi: `$PI_CODING_AGENT_DIR/extensions/wterm.ts` (`~/.pi/agent` when that is
+- pi: `$PI_CODING_AGENT_DIR/extensions/tmux-web.ts` (`~/.pi/agent` when that is
   unset), which pi auto-loads with no settings entry and no trust prompt.
   `~/.pi/agent/settings.json` is not edited and `pi install` is not run:
   measured on pi 0.85.1, `pi install` and `pi remove` keep every value and the

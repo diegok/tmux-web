@@ -84,7 +84,7 @@ var batchArgs = func() []string {
 }
 
 // SnapshotAndReports returns one row per pane and every pane's raw
-// @wterm_agent value, from a single tmux invocation.
+// @tmux_web_agent value, from a single tmux invocation.
 //
 // The marginal cost of the reports is zero forks: it is one more command inside
 // a fork the poller already makes unconditionally, and against it the feature

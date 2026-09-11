@@ -251,7 +251,7 @@ describe('groupRows', () => {
     const [session] = groupRows([
       row({
         groupKey: 'work3',
-        sessionName: 'wterm-web-1',
+        sessionName: 'tmux-web-1',
         paneId: '%0',
         appOwned: true,
       }),
@@ -263,7 +263,7 @@ describe('groupRows', () => {
       }),
       row({
         groupKey: 'work3',
-        sessionName: 'wterm-web-2',
+        sessionName: 'tmux-web-2',
         paneId: '%2',
         appOwned: true,
       }),
@@ -274,13 +274,13 @@ describe('groupRows', () => {
   it('carries the id of the session the user made, from the row that named it', () => {
     // Every session-level management call targets this: rename, kill, and the
     // session a new window goes in. It has to be the *user's* session -- the
-    // daemon refuses to rename or kill an @wterm_web one -- and it has to come
+    // daemon refuses to rename or kill an @tmux_web_owned one -- and it has to come
     // from the same row as the name, or a rename dialog titled "api" sends the
     // id of a throwaway.
     const [session] = groupRows([
-      row({ groupKey: 'work3', sessionId: '$9', sessionName: 'wterm-web-1', paneId: '%0', appOwned: true }),
+      row({ groupKey: 'work3', sessionId: '$9', sessionName: 'tmux-web-1', paneId: '%0', appOwned: true }),
       row({ groupKey: 'work3', sessionId: '$3', sessionName: 'api', paneId: '%1', appOwned: false }),
-      row({ groupKey: 'work3', sessionId: '$8', sessionName: 'wterm-web-2', paneId: '%2', appOwned: true }),
+      row({ groupKey: 'work3', sessionId: '$8', sessionName: 'tmux-web-2', paneId: '%2', appOwned: true }),
     ])
     expect(session.sessionId).toBe('$3')
     expect(session.name).toBe('api')
@@ -301,7 +301,7 @@ describe('groupRows', () => {
 
   it('falls back to the first row is id when every session is app-owned', () => {
     const [session] = groupRows([
-      row({ groupKey: 'work3', sessionId: '$9', sessionName: 'wterm-web-1', appOwned: true }),
+      row({ groupKey: 'work3', sessionId: '$9', sessionName: 'tmux-web-1', appOwned: true }),
     ])
     // Nothing here is addressable -- the daemon refuses app sessions -- but an
     // id is better than "", which tmux resolves to "whatever is current".
@@ -312,9 +312,9 @@ describe('groupRows', () => {
     // The user killed the namesake under an attached tab. The group key is the
     // dead session's name; the throwaway's own name is at least a live one.
     const [session] = groupRows([
-      row({ groupKey: 'work3', sessionName: 'wterm-web-1', appOwned: true }),
+      row({ groupKey: 'work3', sessionName: 'tmux-web-1', appOwned: true }),
     ])
-    expect(session.name).toBe('wterm-web-1')
+    expect(session.name).toBe('tmux-web-1')
   })
 
   it('falls back to the group key when a row carries no name at all', () => {

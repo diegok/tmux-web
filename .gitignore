@@ -1,4 +1,4 @@
-/wterm-web
+/tmux-web
 /web/node_modules
 /web/dist
 # dist is Vite's output and stays out of git -- except for .gitkeep, which is

@@ -29,7 +29,7 @@ var errWriteFailed = errors.New("write failed")
 // wireCookieName is spelled out rather than read from front.DeviceCookieName so
 // that renaming the constant fails a test instead of silently changing the wire
 // format every enrolled browser depends on.
-const wireCookieName = "__Host-wterm_device"
+const wireCookieName = "__Host-tmux_web_device"
 
 // spy is the protected handler. It records whether it ran, which is the only
 // way to tell a rejection from a handler that happened to write the same code.
@@ -308,7 +308,7 @@ func TestOnlyThePrefixedCookieNameAuthenticates(t *testing.T) {
 	h := newAuth(t, store).Protect((&spy{}).handler())
 
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.AddCookie(&http.Cookie{Name: "wterm_device", Value: token})
+	r.AddCookie(&http.Cookie{Name: "tmux_web_device", Value: token})
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, r)

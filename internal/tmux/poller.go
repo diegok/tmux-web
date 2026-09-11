@@ -18,7 +18,7 @@ import (
 type Poller struct {
 	interval time.Duration
 	// fn produces the rows and, when reporting is on, every pane's raw
-	// @wterm_agent value from the same tmux invocation. A poller built from a
+	// @tmux_web_agent value from the same tmux invocation. A poller built from a
 	// bare Snapshot has that half wrapped away: a nil map is no report for
 	// every pane, which is what the v1 path means anyway.
 	fn func(context.Context) ([]Row, map[string]string, error)
@@ -73,7 +73,7 @@ type Options struct {
 	// SnapshotWithReports is required.
 	Snapshot func(context.Context) ([]Row, error)
 	// SnapshotWithReports produces the rows AND, from the same tmux
-	// invocation, every pane's raw @wterm_agent value keyed by pane id. Set
+	// invocation, every pane's raw @tmux_web_agent value keyed by pane id. Set
 	// this INSTEAD of Snapshot to turn agent reporting on.
 	SnapshotWithReports func(context.Context) ([]Row, map[string]string, error)
 	// ServerStart reads the tmux server's generation, once per poll. Optional:

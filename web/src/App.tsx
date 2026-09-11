@@ -49,7 +49,7 @@ import { useTabBadge } from '@/lib/tabBadge'
 import { findPane, resolveSession, useSeenPanes, useSnapshot } from '@/lib/useSnapshot'
 
 /** Where this tab remembers its base session, so a reload lands where it was. */
-const SESSION_KEY = 'wterm-web:session'
+const SESSION_KEY = 'tmux-web:session'
 
 function readStoredSession(): string | null {
   try {

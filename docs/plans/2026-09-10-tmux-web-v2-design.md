@@ -221,7 +221,7 @@ SessionID  string `json:"sessionId"`  // $N, stable; what operations target
 SessionName string `json:"sessionName"` // live name for display, not the group's
 WindowID   string `json:"windowId"`   // @N, stable; what window operations target
 Title      string `json:"title"`      // sanitised by tmux, truncated to 256B
-Label      string `json:"label"`      // @wterm_label, user-set; "" if unset
+Label      string `json:"label"`      // @tmux_web_label, user-set; "" if unset
 AgentState string `json:"agentState"` // "" | working | blocked | idle
 FinishedAt int64  `json:"finishedAt"` // unix ms of the last working→idle edge
 ```
@@ -344,7 +344,7 @@ be used at all it carries tmux's `=` exact-match prefix: v1 established why,
 `kill-session -t _web-` silently kills `_web-abcd` and exits 0.
 
 **The daemon refuses to touch its own sessions** — both verbs that take one,
-kill *and rename*. Anything carrying `@wterm_web` is the app's, not the user's;
+kill *and rename*. Anything carrying `@tmux_web_owned` is the app's, not the user's;
 killing one would drop a live tab's socket for no reason the user could
 understand, and renaming one is worse, because the bridge tears its session down
 **by name** when the tab closes: a renamed session is never found and the
@@ -362,7 +362,7 @@ Origin middleware is the boundary.
 
 **The refusal to touch app sessions does not stop the cascade, and the dialog
 must say so.** Verified: killing the only window of a base session destroys the
-whole group, `@wterm_web` member included, which drops every attached tab's
+whole group, `@tmux_web_owned` member included, which drops every attached tab's
 socket. Refusing `DELETE /api/sessions` on an app session guards only the direct
 path; the sanctioned window and pane paths reach the same end. This is not a
 reason to block the action — the owner asked for it — but the dialog must say
@@ -393,7 +393,7 @@ failed kill that silently succeeded on retry is worse than one that failed.
 
 A renamed pane cannot use the tmux pane title: both a zsh prompt and Claude
 overwrite it constantly. Labels are stored as a per-pane tmux user option,
-`@wterm_label`, which is durable, readable from the same format string, dies
+`@tmux_web_label`, which is durable, readable from the same format string, dies
 with the pane, and needs no new server state. Verified: it survives the title
 being clobbered, clears with `set -pu`, and its value is not re-expanded.
 
@@ -415,7 +415,7 @@ a row disappearing is the worst failure this app has. The snapshot now defends
 itself, in three layers:
 
 1. **tmux strips the two bytes itself.** The format reads
-   `#{s/[<0x1f><newline>]/ /:@wterm_label}`. tmux's `s///` pattern can carry
+   `#{s/[<0x1f><newline>]/ /:@tmux_web_label}`. tmux's `s///` pattern can carry
    those bytes literally; `[[:cntrl:]]` cannot be used, because the `:` inside
    the class ends the modifier's pattern and the whole expression then expands
    to empty for every label.
@@ -496,7 +496,7 @@ resets the toggle.
 Following v1:
 
 - **Integration against real tmux** for every management verb, including that a
-  kill refuses an `@wterm_web` session and that `=` prevents prefix matching.
+  kill refuses an `@tmux_web_owned` session and that `=` prevents prefix matching.
 - **Table tests for classification**, driven by recorded capture
   sequences -- a working pane's successive screens and an idle pane's identical
   ones -- so a rule change is a data change.

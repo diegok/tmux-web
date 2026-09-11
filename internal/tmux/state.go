@@ -16,7 +16,7 @@ const (
 
 // Which authority decided a pane's AgentState. "" means nothing did.
 const (
-	SourceEvent  = "event"  // the agent's own report, from @wterm_agent
+	SourceEvent  = "event"  // the agent's own report, from @tmux_web_agent
 	SourceScreen = "screen" // the churn classifier and the blocked grammars
 )
 

@@ -151,7 +151,7 @@ export interface SignOutOptions {
  *
  * The reload is what turns a revoked cookie into something a user can see: the
  * daemon answers `/` for an unenrolled browser with a page explaining that the
- * fix is `wterm-web enroll` on the host. Staying on a dead SPA would show a
+ * fix is `tmux-web enroll` on the host. Staying on a dead SPA would show a
  * terminal reconnecting forever instead.
  */
 export async function performSignOut(

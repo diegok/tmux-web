@@ -73,7 +73,7 @@ func TestReportFormatRoundTripsThroughRealTmux(t *testing.T) {
 }
 
 // Sibling to TestSnapshotHostileLabelCannotRemoveAPane. It should pass
-// trivially, because @wterm_agent is not in Format at all -- and it is worth
+// trivially, because @tmux_web_agent is not in Format at all -- and it is worth
 // having precisely so that the day somebody appends it there, this goes red.
 //
 // Worth recording, because the batched read opens a direction the label
@@ -82,7 +82,7 @@ func TestReportFormatRoundTripsThroughRealTmux(t *testing.T) {
 // whole REPORT-block line -- "...\nA<Sep>%2<Sep>1;idle;<ts>" -- and thereby set
 // another pane's state. It is not worth a code change: the value has to be
 // written through the tmux socket, and anyone holding that socket can
-// `set -p -t %2 @wterm_agent` directly with no forgery at all. It is worth
+// `set -p -t %2 @tmux_web_agent` directly with no forgery at all. It is worth
 // writing down so nobody rediscovers it years from now and reads it as a hole.
 // What bounds it is unchanged and is layer 1 plus layer 3: the substitution
 // turns both record-breaking bytes into spaces, and ParseReport re-sanitises

@@ -14,7 +14,7 @@ classifier agree with an idle report before the turn has ended. See "Revision 5"
 the four revision sections below it are the rounds they answer.
 Follows: `2026-09-10-tmux-web-v2-design.md` (v2), which it partly supersedes.
 Depends on: the hardening of `internal/tmux/snapshot.go` against hostile
-`@wterm_label` values, **committed as `f25e066`** — in history, not pending, and
+`@tmux_web_label` values, **committed as `f25e066`** — in history, not pending, and
 not a thing this design is waiting on. It is a prerequisite, it answers one of
 the questions this document opened with, and it constrains the transport more
 than expected — see "The hazard" and "Why the report is not a fourteenth field".
@@ -22,7 +22,7 @@ than expected — see "The hazard" and "Why the report is not a fourteenth field
 ## Revision 6
 
 Every round from 1 to 5 carried one argument nobody checked, and the owner
-checked it. The claim: `@wterm_agent` is readable by anything that can talk to
+checked it. The claim: `@tmux_web_agent` is readable by anything that can talk to
 the tmux server and the label is rendered in a web UI, therefore the user's words
 and the agent's tool arguments must be kept out of it — with `pi-subagents`
 quoted approvingly for the same rule, *"raw prompts never enter pane metadata."*
@@ -32,7 +32,7 @@ quoted approvingly for the same rule, *"raw prompts never enter pane metadata."*
 - **A pane option is not a boundary.** Anything that can talk to the tmux server
   can already `capture-pane` the whole screen — the prompt, the code, the diff,
   everything the label would have contained and far more. A value in
-  `@wterm_agent` is visible to processes running as the same uid that could have
+  `@tmux_web_agent` is visible to processes running as the same uid that could have
   read it off the screen a second earlier. The rule protected nothing.
 - **There is no second actor on the web side.** HTTPS, device enrolment, and one
   user: the machine's owner. "Rendered in a web UI" named a risk that has no
@@ -395,7 +395,7 @@ reason this feature exists.
   connected.** That rule was right about hashes and wrong about facts; see
   "State: precedence".
 - **The transport sentence that started this design** — that an integration can
-  simply write `@wterm_label`. It cannot. See "Not `@wterm_label`".
+  simply write `@tmux_web_label`. It cannot. See "Not `@tmux_web_label`".
 
 Everything else in v2 stands. In particular the churn classifier
 (`internal/tmux/state.go`), the blocked grammars (`internal/tmux/blocked.go`),
@@ -447,13 +447,13 @@ state-only report. See "Sanitization and bounds" and "Turn end is a report".
 
 ## What is being transported
 
-### Not `@wterm_label`
+### Not `@tmux_web_label`
 
-The obvious transport is the option that already exists. `@wterm_label` is read
+The obvious transport is the option that already exists. `@tmux_web_label` is read
 by every poll, is already in `Format`, and already outranks the title in
 `paneText`. An integration would need one line.
 
-**It is the wrong option, and the reason is in v2.** `@wterm_label` is *the
+**It is the wrong option, and the reason is in v2.** `@tmux_web_label` is *the
 user's* field: `PATCH /api/panes/{id}` writes it, and v2's "Rows" section is
 explicit that "an agent pane shows its label if set, otherwise its title". The
 sharpest statement of *why* is not in v2 at all — it is the comment on
@@ -467,8 +467,8 @@ pane `deploy box` would survive until the agent's next tool call, and the agent'
 report would survive until the next rename. Both features would appear
 intermittently broken and neither would be at fault.
 
-So integrations write a **new** per-pane option, `@wterm_agent`, and never touch
-`@wterm_label`. The naming follows `@wterm_web` and `@wterm_label`.
+So integrations write a **new** per-pane option, `@tmux_web_agent`, and never touch
+`@tmux_web_label`. The naming follows `@tmux_web_owned` and `@tmux_web_label`.
 
 ### The value
 
@@ -479,7 +479,7 @@ write happens inside a hook the agent is waiting on (see "Writes must never
 block") and three forks is three times the exposure.
 
 ```
-@wterm_agent = "1;working;1789075200000;running go test ./internal/tmux"
+@tmux_web_agent = "1;working;1789075200000;running go test ./internal/tmux"
                 │ │       │             └ activity text, may contain ";"
                 │ │       └ unix ms when the agent produced this
                 │ └ working | blocked | idle
@@ -520,7 +520,7 @@ that may be newer or older. A daemon that does not understand version `2` ignore
 the report and falls back to the screen, which is the correct degradation and
 costs nothing.
 
-**Unset and empty are the same thing.** `#{@wterm_agent}` renders both an unset
+**Unset and empty are the same thing.** `#{@tmux_web_agent}` renders both an unset
 option and one set to `""` as the empty string, so the daemon cannot tell them
 apart and does not try: an empty *value* means no report. Note the scope of that
 sentence — it is about the whole option value, not about the text field inside
@@ -541,7 +541,7 @@ disappear from the sidebar, which the code's own comments call the worst failure
 this project has.
 
 The hardening is committed — `f25e066`, "a hostile pane label can no longer
-delete a pane from the sidebar" — and it gives `@wterm_label` three layers,
+delete a pane from the sidebar" — and it gives `@tmux_web_label` three layers,
 verified against a real 3.7b server rather than assumed. They are worth
 restating because the report needs the same treatment and cannot have all of it:
 
@@ -549,7 +549,7 @@ restating because the report needs the same treatment and cannot have all of it:
    `labelField` at `internal/tmux/snapshot.go:108`, and **that source line is the
    thing to copy — not the rendering in this document.** It is a bracket set
    holding a literal newline byte and a literal `0x1f` byte, which prose has to
-   render as `#{s/[\n\x1f]/ /:@wterm_label}` and which a reader who copies that
+   render as `#{s/[\n\x1f]/ /:@tmux_web_label}` and which a reader who copies that
    rendering gets wrong twice: a two-character `\n` leaves a real newline alive,
    *and* it puts a literal `n` in the set, so every lowercase `n` in a perfectly
    good label becomes a space (`SECOnD` → `SECO D`). Measured in revision 3. The
@@ -604,10 +604,10 @@ New in revision 2, measured on 3.7b against an isolated socket, because the
 report's own separator is `;` and this lands squarely on it:
 
 ```
-set -p @wterm_agent "a;"    → show-options: a          (stripped)
-set -p @wterm_agent "a;;"   → show-options: "a;"       (one of the two stripped)
-set -p @wterm_agent "a\;"   → show-options: "a;"       (escaping works)
-set -p @wterm_agent ";"     → error "empty value", and the option keeps its
+set -p @tmux_web_agent "a;"    → show-options: a          (stripped)
+set -p @tmux_web_agent "a;;"   → show-options: "a;"       (one of the two stripped)
+set -p @tmux_web_agent "a\;"   → show-options: "a;"       (escaping works)
+set -p @tmux_web_agent ";"     → error "empty value", and the option keeps its
                               PREVIOUS value
 ```
 
@@ -637,10 +637,10 @@ it.
 
 ### Why the report is not a fourteenth field
 
-The obvious way to read `@wterm_agent` is to append it to `formatFields` and get
+The obvious way to read `@tmux_web_agent` is to append it to `formatFields` and get
 it in the same `list-panes` the sidebar already runs. That was this design's
 assumption until the hardening landed, and it is wrong for a specific reason:
-**the last slot has exactly one occupant, and `@wterm_label` has the better claim
+**the last slot has exactly one occupant, and `@tmux_web_label` has the better claim
 to it.**
 
 Layer 2 protects whichever unsanitized field is last. A second unsanitized field
@@ -668,7 +668,7 @@ Verified on 3.7b:
 
 ```
 tmux list-panes -a -F "S<Sep>#{pane_id}<Sep>…twelve more…<Sep>#{label}" \
-   \; list-panes -a -F "A<Sep>#{pane_id}<Sep>#{s/<two-byte set>/ /:@wterm_agent}"
+   \; list-panes -a -F "A<Sep>#{pane_id}<Sep>#{s/<two-byte set>/ /:@tmux_web_agent}"
 ```
 
 `<two-byte set>` is deliberately not spelled out here. It is `labelField`'s
@@ -757,7 +757,7 @@ opencode's `chat.message`, claude's `UserPromptSubmit.prompt` (a string — *not
   truncating a tool call produces a tool call.
 
 **Revisions 1–5 gave a third reason, and revision 6 withdraws it.** The argument
-was that a prompt in `@wterm_agent` is readable by anything able to talk to the
+was that a prompt in `@tmux_web_agent` is readable by anything able to talk to the
 tmux server and is then rendered in a web UI, with `pi-subagents` cited
 approvingly for the same rule — *"raw prompts never enter pane metadata."* **It
 is not a boundary.** Anything that can talk to the tmux server can already run
@@ -972,7 +972,7 @@ revision 2 never put on the page at all:
   activity line. That makes open question 1 a design question and not only a
   fork count.
 
-The whitelist lives in `wterm-web report`, in Go, not in the hook configuration —
+The whitelist lives in `tmux-web report`, in Go, not in the hook configuration —
 which is the point of having one binary. It is a table, it is testable, and when
 the list grows it grows in one file rather than in three integrations and a
 `settings.json` the user owns.
@@ -1084,13 +1084,13 @@ never spelled out: a missed `Stop` leaves the pane on `working` until the
 classifier with no screen to read, so the pane shows nothing at all until the
 user next types. That is the overnight case, which is the case the app is for.
 
-The edge/re-assertion classification lives in `wterm-web report`, in Go, in the
+The edge/re-assertion classification lives in `tmux-web report`, in Go, in the
 same table as the whitelist — not in the three integration files. One table, one
 test.
 
 **What it costs:**
 
-- **One extra `tmux show-options -p -v @wterm_agent` fork**, on re-assertion
+- **One extra `tmux show-options -p -v @tmux_web_agent` fork**, on re-assertion
   writes only. Today that is two `Notification` types on claude, at most once per
   turn each, plus pi's `session_start` idle branch, which fires on an extension
   reload rather than on a turn. `PreToolUse` — the hot hook, and the whole
@@ -1252,7 +1252,7 @@ stopgap waiting on a measurement.
 ## State: precedence, and what happens when only one authority exists
 
 Two authorities now exist for the same field: the event report in
-`@wterm_agent`, and the churn classifier plus blocked grammars in
+`@tmux_web_agent`, and the churn classifier plus blocked grammars in
 `state.go`/`blocked.go`.
 
 **A fresh report wins.** It is exact, it names states the screen can only infer,
@@ -1697,9 +1697,9 @@ report is a first sight, and a first sight is unverified.**
 
 The alternative — writing the rejection back into the option, so it survives with
 the report — is rejected on a rule this design has held since "Not
-`@wterm_label`": the daemon reads that option, it does not write it. A reader
+`@tmux_web_label`": the daemon reads that option, it does not write it. A reader
 that edits the channel it reads cannot be reasoned about when two of them run,
-and nothing promises `wterm-web` is a singleton.
+and nothing promises `tmux-web` is a singleton.
 
 ### Working expires; blocked and idle do not
 
@@ -1753,7 +1753,7 @@ Resting states are ended by three things that are exact:
    crash case, which is also the case a clock was supposed to catch.
 3. **The pane dying**, which takes the option with it. Free.
 
-Plus the evidence rules above, and a manual `tmux set -p -u @wterm_agent` for
+Plus the evidence rules above, and a manual `tmux set -p -u @tmux_web_agent` for
 anyone stuck.
 
 ### No heartbeats — and the reason is not the one revision 1 gave
@@ -1816,7 +1816,7 @@ with a different section — "Re-assertion is not a report".
 
 ### What `clear` is for
 
-`set -p -u @wterm_agent` — a genuine unset — is reserved for teardown, and
+`set -p -u @tmux_web_agent` — a genuine unset — is reserved for teardown, and
 nothing in the normal event path performs one:
 
 - **The user's escape hatch.** A stuck report is one command away, documented.
@@ -1886,7 +1886,7 @@ to.** The rules:
   accepted report is a resting `idle` has `finishedAt` equal to *that report's
   own timestamp*. No memory of a previous report, no edge, no daemon state. Read
   the option, get the answer. It survives a daemon restart, a poller restart, and
-  a `wterm-web` upgrade, because the fact lives in tmux.
+  a `tmux-web` upgrade, because the fact lives in tmux.
 - **From the classifier: unchanged from v2**, `everChanged` and all. That
   authority has no clock — its only way to date a finish is `time.Now()` at the
   moment it first noticed — so first sight must stamp nothing there, or every
@@ -2105,7 +2105,7 @@ of the feature implements it three times: once in TypeScript for pi, once in
 JavaScript for opencode, once in something for claude. Three implementations of
 one security boundary, drifting apart, is not a thing to ship.
 
-**So all three integrations shell out to a new `wterm-web report` subcommand.**
+**So all three integrations shell out to a new `tmux-web report` subcommand.**
 It reads the agent's hook payload on stdin (or takes flags), decides the state,
 sanitizes the text, and performs one `tmux set-option` — preceded, on the two
 events that can re-assert a resting state, by one `show-options -p -v` read; see
@@ -2345,7 +2345,7 @@ classified it nowhere.
 
 ## Sanitization and bounds
 
-In `wterm-web report`, in this order, before the value reaches tmux:
+In `tmux-web report`, in this order, before the value reaches tmux:
 
 1. **Strip whole escape sequences** — CSI, OSC and friends — as sequences. Doing
    this by removing the ESC byte alone leaves the literal `[31m` behind in the
@@ -2420,7 +2420,7 @@ directory as a side effect of polling, of the user opening the sidebar, or of
 noticing an agent that has no integration. There is no "we detected claude, shall
 we…" prompt in the web UI at all.
 
-**Installation is a CLI act**: `wterm-web install-integration --agent
+**Installation is a CLI act**: `tmux-web install-integration --agent
 claude|opencode|pi [dir]`. It prints the exact paths it will write and requires
 confirmation unless `--yes`. Not a button in the web UI, because the web UI is
 reachable over the network from a phone, and "write executable code into a repo"
@@ -2432,8 +2432,8 @@ tmux operation.
 
 | Agent | Path | Kind |
 | --- | --- | --- |
-| pi | `<proj>/.pi/extensions/wterm.ts` | A file we own. TypeScript via jiti, no build step. Needs project trust |
-| opencode | `<proj>/.opencode/plugin/wterm.js` | A file we own. Auto-loaded, no config entry needed |
+| pi | `<proj>/.pi/extensions/tmux-web.ts` | A file we own. TypeScript via jiti, no build step. Needs project trust |
+| opencode | `<proj>/.opencode/plugin/tmux-web.js` | A file we own. Auto-loaded, no config entry needed |
 | claude | `<proj>/.claude/settings.json` | **A file the user owns**, merged into |
 
 The claude case is different in kind and the installer must treat it that way: it
@@ -2445,21 +2445,21 @@ uninstall. A user's own hooks in that file are not ours to reformat.
 our own wording, plus a schema line:
 
 ```
-// managed by tmux-web (wterm-schema: 1)
+// managed by tmux-web (tmux-web-schema: 1)
 // Reinstalling or updating the integration overwrites this file.
-// It does one thing: `tmux set-option -p @wterm_agent`. Nothing else.
+// It does one thing: `tmux set-option -p @tmux_web_agent`. Nothing else.
 ```
 
 The schema line lets `install` tell three cases apart: ours and current
 (overwrite silently), ours and outdated (overwrite, say so), and **not ours**
 (refuse, and say which file). The last case is the one the header exists for.
 
-**Uninstall is `wterm-web install-integration --remove`**, and for the two
+**Uninstall is `tmux-web install-integration --remove`**, and for the two
 file-based agents `rm` also works and is documented as working. An integration
 you cannot remove with `rm` is an integration you have to trust more than this
 one deserves.
 
-**What the integration is permitted to do** is one thing: spawn `wterm-web
+**What the integration is permitted to do** is one thing: spawn `tmux-web
 report`. No network, no filesystem writes, no reading the repository, no
 dependencies. Small enough to read in a minute — which, again, is the trust
 model, not a nicety.
@@ -2588,17 +2588,17 @@ which is what the v2 design already does, and this document continues.
 | Two writes landing out of order (a delayed `working` after a `blocked`) | The daemon refuses a report whose timestamp is not strictly newer than the last it accepted. Ordinary scheduling jitter, not a broken integration, and revision 1 did not account for it |
 | Claude and pi in the same pane (an agent run inside another agent's shell) | **Not handled.** Both integrations see the same `TMUX_PANE` and write the same option, and the last writer wins with no way to tell whose turn ended. See the open questions |
 | A report containing `0x1f` or a newline | Impossible from our writer, which strips control characters. From a hostile writer, tmux substitutes both to spaces before Go sees them, and the report is the only variable field in its own format string, so a survivor costs one report and never a pane |
-| A second, unsanitized field appended to `Format` by a later feature | The thing this design deliberately does not do. `Format`'s last slot is `@wterm_label`'s and the hardening's comments say why; the report reads through its own format string instead |
+| A second, unsanitized field appended to `Format` by a later feature | The thing this design deliberately does not do. `Format`'s last slot is `@tmux_web_label`'s and the hardening's comments say why; the report reads through its own format string instead |
 | A report with an unknown schema version | Ignored whole. The classifier decides, as if no integration were installed |
 | A report with an unparseable timestamp | Discarded whole. A report we cannot date is a report we cannot age |
 | A report dated in the future | Discarded whole if it is more than a few seconds ahead, rather than treated as stale. A resting `idle` derives `finishedAt` from its own timestamp, and a future `finishedAt` is a `done` badge that `seen` can never catch up with |
 | An integration installed mid-run | The first report is a first sight. No `finishedAt` edge, so no badge storm |
 | Daemon restart | Reports are unaffected: they live in tmux, not in the daemon's memory, and `finishedAt` is *derived* from a resting `idle` report rather than stamped on an edge — so a finished agent still badges after a restart. That is better than v2, which has to reset the whole classifier map. Cost, revised: the ordering filter **and** the rejection slot are empty, so the standing report is a first sight — accepted by the ordering filter and then **verified from scratch**. A resting `idle` enters the verification window instead of being re-derived immediately (revision 2's "almost certainly a real turn end" is withdrawn), and a `blocked` that had been dropped can re-badge for up to `N_blocked` polls before rule 1 or 2 drops it again |
 | tmux server restart | The options die with the panes. No generation-keyed state to reset, unlike the classifier's map |
-| `wterm-web` binary missing or moved after install | The integration spawns nothing and says nothing. The pane falls back to the classifier |
+| `tmux-web` binary missing or moved after install | The integration spawns nothing and says nothing. The pane falls back to the classifier |
 | A hook that would fail | `report` exits 0 unconditionally. Exit code `2` specifically blocks a `PreToolUse` call (revision 1 said "nonzero"), and a reporting feature that can stop an agent working is worse than no reporting feature, so the belt-and-braces stands on a corrected premise |
 | The second `list-panes` in the batch fails | The daemon parses stdout on its own terms and does not gate on the exit status. Measured: the first command's output is complete on stdout before the error, so a failed report read is a missing report, never a blank sidebar |
-| Two integrations installed for one agent (a stale herdr asset, say) | Both write their own option; ours is `@wterm_agent` and theirs is not. No collision. A second *tmux-web* integration in a parent directory is a real risk for opencode and pi and is not handled — see the open questions |
+| Two integrations installed for one agent (a stale herdr asset, say) | Both write their own option; ours is `@tmux_web_agent` and theirs is not. No collision. A second *tmux-web* integration in a parent directory is a real risk for opencode and pi and is not handled — see the open questions |
 | A `set-option` value ending in a bare `;` | tmux strips it, and a value of exactly `;` is refused with "empty value" while the option keeps its previous contents. The writer never emits one and the reader accepts three parts as well as four |
 
 ## Testing
@@ -2729,7 +2729,7 @@ tests that catch a composition are the ones that assert two sections' outputs
   `finishedAt` edge**, and that a classifier → report switch *does* produce one
   when the report is a resting `idle`. Both directions, because revision 2
   deliberately made them asymmetric and the next reader will assume they are not.
-- **A regression test that a hostile `@wterm_agent` cannot remove a pane from the
+- **A regression test that a hostile `@tmux_web_agent` cannot remove a pane from the
   snapshot**, sibling to `TestSnapshotHostileLabelCannotRemoveAPane`. It should
   pass trivially, because the option is not in `Format` — and it is worth having
   precisely so that the day somebody appends it there, this goes red.
@@ -2911,7 +2911,7 @@ with it.**
     hoping a screenshot turns up.
 11. **Cross-agent nesting**, which nobody had considered until the second review:
     Claude running inside a pi pane, or any agent started from another agent's
-    shell. Both integrations see the same `TMUX_PANE`, both write `@wterm_agent`,
+    shell. Both integrations see the same `TMUX_PANE`, both write `@tmux_web_agent`,
     and the last writer wins — so the inner agent's turn end can report `idle`
     for a pane whose outer agent is still working, which is the subagent failure
     again with no `parentID` or `agent_id` available to filter on because the two

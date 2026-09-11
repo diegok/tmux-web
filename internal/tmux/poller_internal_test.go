@@ -490,7 +490,7 @@ func TestNewPollerWithRefusesHalfWiredClassification(t *testing.T) {
 // state alone, because the two authorities agree about the state in exactly the
 // case where consulting the wrong one costs the most.
 
-// reportPoller builds a poller whose snapshot, standing @wterm_agent values and
+// reportPoller builds a poller whose snapshot, standing @tmux_web_agent values and
 // captures are all supplied by the test, with agent reporting turned on.
 //
 // captured records the panes capture-pane was actually forked for, which is the

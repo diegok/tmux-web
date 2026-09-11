@@ -18,7 +18,7 @@
 
 1. **Session creation is one command, not four.** `tmux new-session -t <base> -s <name> \; set destroy-unattached on \; ...` with no `-d`. Setting `destroy-unattached on` on a detached session destroys it ~8ms later, before any attach lands. Doing it as a second call after spawning the attach only narrows the race.
 2. **The snapshot is deduplicated in Go, not filtered in tmux.** A `-f` filter drops panes entirely once the user kills the base session while a tab is open.
-3. **App sessions are marked with the `@wterm_web` tmux user option**, never matched by name.
+3. **App sessions are marked with the `@tmux_web_owned` tmux user option**, never matched by name.
 4. **The snapshot does not carry `pane_current_path`.** It is the one field tmux does not sanitize, and putting it last does not contain the damage: a newline in it starts a fresh line whose every field is pane-controlled, forging a row, and a 0x1f in it swallows the next pane's record so a live pane vanishes from the sidebar. `#{q:}` escapes neither byte. Nothing in v1 renders the path; the git panel can query it per pane. Relatedly, sort panes by `#{pane_index}`, never by `pane_id` — after a split-and-kill cycle the ids run `%0 %4 %2 %1` while the layout the user sees runs `0 1 2 3`.
 5. **The frontend must not use `WebSocketTransport`'s built-in reconnect.** It buffers sends while disconnected and flushes on reopen; since our reconnect creates a new tmux session, buffered keystrokes would land in the wrong pane.
 
@@ -35,7 +35,7 @@ Nothing in this phase touches HTTP. At the end of it you can enumerate panes and
 ### Task 1: Repository scaffolding
 
 **Files:**
-- Create: `go.mod`, `.gitignore`, `Makefile`, `cmd/wterm-web/main.go`
+- Create: `go.mod`, `.gitignore`, `Makefile`, `cmd/tmux-web/main.go`
 
 **Step 1: Initialize the module**
 
@@ -54,13 +54,13 @@ go 1.26
 **Step 2: Write `.gitignore`**
 
 ```
-/wterm-web
+/tmux-web
 /web/node_modules
 /web/dist
 /internal/front/dist
 ```
 
-**Step 3: Write a placeholder `cmd/wterm-web/main.go`**
+**Step 3: Write a placeholder `cmd/tmux-web/main.go`**
 
 ```go
 package main
@@ -68,7 +68,7 @@ package main
 import "fmt"
 
 func main() {
-	fmt.Println("wterm-web")
+	fmt.Println("tmux-web")
 }
 ```
 
@@ -78,7 +78,7 @@ func main() {
 .PHONY: build test test-go test-web front
 
 build: front
-	go build -o wterm-web ./cmd/wterm-web
+	go build -o tmux-web ./cmd/tmux-web
 
 front:
 	cd web && pnpm install && pnpm build
@@ -299,7 +299,7 @@ func NewServer(t *testing.T) *Server {
 	if _, err := rand.Read(b); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
-	s := &Server{Socket: "wterm-test-" + socketSafe(t.Name()) + "-" + hex.EncodeToString(b)}
+	s := &Server{Socket: "tmux-web-test-" + socketSafe(t.Name()) + "-" + hex.EncodeToString(b)}
 
 	t.Cleanup(func() {
 		_, _ = s.TryRun("kill-server")
@@ -390,8 +390,8 @@ A leaked server keeps its socket in `argv`, so it is greppable; a dead socket
 file is a separate leak, since tmux does not unlink the socket on shutdown.
 
 ```bash
-pgrep -af -- '[t]mux -L wterm-test' || echo "no leaked servers"
-ls "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/" 2>/dev/null | grep '^wterm-test-' || echo "no leaked sockets"
+pgrep -af -- '[t]mux -L tmux-web-test' || echo "no leaked servers"
+ls "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/" 2>/dev/null | grep '^tmux-web-test-' || echo "no leaked sockets"
 ```
 
 Expected: `no leaked servers` and `no leaked sockets`.
@@ -399,7 +399,7 @@ Expected: `no leaked servers` and `no leaked sockets`.
 The bracket in `[t]mux` keeps the pattern from matching the shell that runs it;
 do not `echo` the unbracketed pattern in the same command, or that echo becomes
 a self-match. Verify the check is not vacuous by starting a server on a
-throwaway `wterm-test-` socket first and confirming it is reported.
+throwaway `tmux-web-test-` socket first and confirming it is reported.
 
 **Step 6: Commit**
 
@@ -615,7 +615,7 @@ type Row struct {
 	GroupKey    string `json:"groupKey"`  // session_group, falling back to session_name
 	PaneID      string `json:"paneId"`    // e.g. "%3", stable for the pane's lifetime
 	PaneIndex   int    `json:"paneIndex"` // position within the window, in layout order
-	AppOwned    bool   `json:"appOwned"`  // set from the @wterm_web user option
+	AppOwned    bool   `json:"appOwned"`  // set from the @tmux_web_owned user option
 	WindowIndex int    `json:"windowIndex"`
 	WindowName  string `json:"windowName"`
 	PaneActive  bool   `json:"paneActive"`
@@ -640,7 +640,7 @@ type Row struct {
 const Format = "#{?#{session_group},#{session_group},#{session_name}}" + Sep +
 	"#{pane_id}" + Sep +
 	"#{pane_index}" + Sep +
-	"#{@wterm_web}" + Sep +
+	"#{@tmux_web_owned}" + Sep +
 	"#{window_index}" + Sep +
 	"#{window_name}" + Sep +
 	"#{pane_active}" + Sep +
@@ -978,12 +978,12 @@ func TestSnapshotAgainstRealTmux(t *testing.T) {
 	srv.Run(t, "new-window", "-t", "work")
 
 	// A user session whose name starts with the app's prefix. It must never be
-	// hidden or swept: only the @wterm_web option marks an app session.
+	// hidden or swept: only the @tmux_web_owned option marks an app session.
 	srv.Run(t, "new-session", "-d", "-s", "_web-notes")
 
 	// Simulate an open browser tab: a grouped, app-marked session.
 	srv.Run(t, "new-session", "-d", "-t", "work", "-s", "_web-sim")
-	srv.Run(t, "set", "-t", "_web-sim", "@wterm_web", "1")
+	srv.Run(t, "set", "-t", "_web-sim", "@tmux_web_owned", "1")
 
 	c := tmux.NewClient(srv.Args())
 	panes, err := c.Snapshot(context.Background())
@@ -1019,7 +1019,7 @@ func TestSnapshotSurvivesBaseSessionKill(t *testing.T) {
 	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
 	srv.Run(t, "new-window", "-t", "work")
 	srv.Run(t, "new-session", "-d", "-t", "work", "-s", "_web-sim")
-	srv.Run(t, "set", "-t", "_web-sim", "@wterm_web", "1")
+	srv.Run(t, "set", "-t", "_web-sim", "@tmux_web_owned", "1")
 
 	srv.Run(t, "kill-session", "-t", "work")
 
@@ -1253,7 +1253,7 @@ func TestAttachArgs(t *testing.T) {
 	}
 	for _, want := range []string{
 		"new-session", "-t", "work", "-s", "_web-abc",
-		"destroy-unattached", "status", "mouse", "@wterm_web",
+		"destroy-unattached", "status", "mouse", "@tmux_web_owned",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q in %q", want, joined)
@@ -1304,7 +1304,7 @@ import (
 // AppOption is the tmux user option marking a session as app-created.
 // Sessions are identified by this, never by name: a user may legitimately have
 // a session called "_web-notes", and it must be neither hidden nor swept.
-const AppOption = "@wterm_web"
+const AppOption = "@tmux_web_owned"
 
 // NewSessionName returns a unique name for a throwaway session.
 func NewSessionName() string {
@@ -1372,7 +1372,7 @@ func (c *Client) Sweep(ctx context.Context) error {
 		// matching falls back to a prefix, and `kill-session -t _web-` will
 		// silently kill _web-abcd and exit 0. Pinning exactness here means a
 		// future caller passing a partial name gets an error instead of
-		// destroying a user's session, which is the failure @wterm_web exists
+		// destroying a user's session, which is the failure @tmux_web_owned exists
 		// to prevent. No test pins this: Sweep never passes a partial name, and
 		// tmux prefers an exact match over a longer prefix, so "=" and a bare
 		// name behave identically for every input reachable today.
@@ -2790,7 +2790,7 @@ by write-to-temp + `os.Rename`. Store `sha256` of the token. Fields: `ID`,
 
 **As built.** `OpenStore(path)`, `AddDevice(name, ua) (token, error)`,
 `Devices()`, `Lookup(token) (Device, bool)`, `Touch(id, t)`, `Revoke(id)`, plus
-`DefaultPath()` for `$XDG_STATE_HOME/wterm-web/devices.json` (a relative
+`DefaultPath()` for `$XDG_STATE_HOME/tmux-web/devices.json` (a relative
 `XDG_STATE_HOME` is ignored, per the basedir spec). `Lookup` and `Touch` are
 here rather than in task 15 because the store is what holds the hash, and
 because `LastSeen` is otherwise a field nothing can ever update. They are split
@@ -2953,7 +2953,7 @@ uids rather than a branch buried in the loop — and `listenAdmin` takes the
 service uid and the credential source as parameters so a test can inject a
 foreign peer on any machine. Root is another uid, not an exception.
 
-**Where the socket lives.** `$XDG_RUNTIME_DIR/wterm-web.sock` whenever there is
+**Where the socket lives.** `$XDG_RUNTIME_DIR/tmux-web.sock` whenever there is
 one: per-user, 0700, cleared on logout, which is exactly the lifetime of a
 socket that grants a shell. It is unset in cron jobs, some containers, and ssh
 sessions without a login manager, so `AdminSocketPath` falls back to
@@ -3082,8 +3082,8 @@ git commit -m "feat: admin unix socket authenticated by SO_PEERCRED"
 ### Task 14: CLI subcommands
 
 **Files:**
-- Modify: `cmd/wterm-web/main.go`
-- Create: `cmd/wterm-web/cli.go`
+- Modify: `cmd/tmux-web/main.go`
+- Create: `cmd/tmux-web/cli.go`
 
 Subcommands: `serve`, `enroll --name`, `devices`, `revoke <id>`. All but `serve`
 talk to the admin socket. `enroll` prints the full URL with the token in the
@@ -3092,10 +3092,10 @@ fragment.
 Manual verification (no automated test — it needs a running daemon):
 
 ```bash
-./wterm-web serve --host tmux.example.com --dev &
-./wterm-web enroll --name laptop
+./tmux-web serve --host tmux.example.com --dev &
+./tmux-web enroll --name laptop
 # expect: https://tmux.example.com/enroll#<43 chars>
-./wterm-web devices
+./tmux-web devices
 ```
 
 ```bash
@@ -3113,7 +3113,7 @@ git commit -m "feat: enroll, devices, and revoke subcommands"
 Tests first:
 
 - No cookie on a protected route → 401.
-- Valid `__Host-wterm_device` cookie → 200.
+- Valid `__Host-tmux_web_device` cookie → 200.
 - Revoked device's cookie → 401.
 - `POST` with `Origin: https://test.example.com` → 403 even with a valid cookie.
 - `POST` with no `Origin` → 403.
@@ -3249,7 +3249,7 @@ git commit -m "feat: revocation closes live sockets and attach ptys"
 
 **Files:**
 - Create: `internal/front/server.go`, `internal/front/embed.go`
-- Modify: `cmd/wterm-web/main.go`
+- Modify: `cmd/tmux-web/main.go`
 
 Routes:
 
@@ -3504,7 +3504,7 @@ placeholder shell until tasks 21-22 replace it.
   pixels; a second observer would only convert pixels back into what the prop
   already says. The 150ms debounce sits on that prop instead.
 - **`sessionStorage` holds the pane id** (`%3`), keyed
-  `wterm-web:pane:<session>`, and a stored value that is not a pane id is
+  `tmux-web:pane:<session>`, and a stored value that is not a pane id is
   discarded on read -- the daemon would refuse it on every reconnect otherwise.
   A human-readable `session:window.pane` never enters the round trip.
 - **Reconnect: exponential backoff from 500ms to a 15s cap, +/-25% jitter,
@@ -3570,7 +3570,7 @@ dot, copy-mode button, terminal. Tests in `useSnapshot.test.ts` and
   slow response cannot stack requests behind it.
 - **401/403 stops the loop for good.** A revoked device cannot be fixed by
   retrying, and hammering it every 1.5s only moves the daemon's rate limiter.
-  The sidebar says so and points at `wterm-web enroll`.
+  The sidebar says so and points at `tmux-web enroll`.
 - **The highlight is the terminal's pane, never `paneActive`.** `paneActive` is
   tmux's active pane *per window* -- shared by the whole group and up to 1.5s
   old -- so it answers "what would this window show", not "what is this tab
@@ -3726,8 +3726,8 @@ git commit -m "test: end-to-end enrollment and terminal round trip"
 - `make build` produces a single binary that runs with no runtime dependencies
   beyond `tmux` itself.
 - Manual check, in order:
-  1. `./wterm-web serve --host <host>` with no prior state.
-  2. `./wterm-web enroll --name laptop`, open the URL on another machine.
+  1. `./tmux-web serve --host <host>` with no prior state.
+  2. `./tmux-web enroll --name laptop`, open the URL on another machine.
   3. Sidebar lists real sessions; clicking a pane switches to it.
   4. Kill the network, restore it: the terminal reconnects to the *same* pane.
   5. Kill the base session locally while the tab is open: agents stay visible.

@@ -8,7 +8,7 @@
 # reports "unknown" in the sidebar footer; the footer already degrades to that
 # and nothing else depends on the name.
 build: front
-	CGO_ENABLED=0 go build -o wterm-web ./cmd/wterm-web
+	CGO_ENABLED=0 go build -o tmux-web ./cmd/tmux-web
 
 front:
 	cd web && pnpm install && pnpm build

@@ -5,7 +5,7 @@
  * ## Why the isolation is this elaborate
  *
  * These tests run on a developer's own machine, where a tmux server holding
- * their actual work is already running. `wterm-web serve` has no flag for
+ * their actual work is already running. `tmux-web serve` has no flag for
  * choosing a tmux server -- `front.Config.TmuxArgs` exists but no CLI flag
  * reaches it -- so a daemon started here would drive the *default* server: it
  * would resize their windows to the headless browser's size, create sessions
@@ -26,7 +26,7 @@
  *
  * The device store (`XDG_STATE_HOME`) and the admin socket (`XDG_RUNTIME_DIR`,
  * plus an explicit `--socket`) are redirected the same way, so nothing here
- * touches `~/.local/state/wterm-web/devices.json`.
+ * touches `~/.local/state/tmux-web/devices.json`.
  *
  * ## Why per test rather than per run
  *
@@ -48,26 +48,26 @@ import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-export const binary = path.join(repoRoot, 'wterm-web')
+export const binary = path.join(repoRoot, 'tmux-web')
 
 /** The base tmux session every test starts with, and the window inside it. */
 export const BASE_SESSION = 'e2e'
 export const BASE_WINDOW = 'shell'
 
-/** One row of `wterm-web devices`. */
+/** One row of `tmux-web devices`. */
 export interface DeviceRow {
   id: string
   name: string
 }
 
-export interface Wterm {
+export interface TmuxWeb {
   /** `http://localhost:<ephemeral>`, the origin the daemon puts in its links. */
   readonly baseURL: string
   /** Mint an enrollment link over the admin socket, as a person would. */
   enroll(name: string): string
-  /** `wterm-web devices`, parsed. */
+  /** `tmux-web devices`, parsed. */
   devices(): DeviceRow[]
-  /** `wterm-web revoke <id>`. */
+  /** `tmux-web revoke <id>`. */
   revoke(id: string): void
   /** Run a tmux command against this test's private server. */
   tmux(...args: string[]): string
@@ -119,7 +119,7 @@ async function waitForHTTP(url: string, deadlineMs: number): Promise<void> {
   }
 }
 
-class Harness implements Wterm {
+class Harness implements TmuxWeb {
   readonly baseURL: string
   readonly #dir: string
   readonly #socket: string
@@ -136,8 +136,8 @@ class Harness implements Wterm {
     this.#port = port
     this.#realTmux = realTmux
     this.baseURL = `http://localhost:${port}`
-    this.#socket = path.join(dir, 'run', 'wterm-web.sock')
-    this.#tmuxSocket = `wterm-e2e-${path.basename(dir).slice(-6)}-${process.pid}`
+    this.#socket = path.join(dir, 'run', 'tmux-web.sock')
+    this.#tmuxSocket = `tmux-web-e2e-${path.basename(dir).slice(-6)}-${process.pid}`
     this.#tmuxTmp = path.join(dir, 'tmux')
     this.#env = {
       ...process.env,
@@ -160,9 +160,9 @@ class Harness implements Wterm {
   }
 
   static async start(): Promise<Harness> {
-    // Short, because $XDG_RUNTIME_DIR/wterm-web.sock has to fit in the 108-byte
+    // Short, because $XDG_RUNTIME_DIR/tmux-web.sock has to fit in the 108-byte
     // sockaddr_un limit and the scratchpad paths on this machine do not.
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wterm-e2e-'))
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tmux-web-e2e-'))
     const realTmux = execFileSync('sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).trim()
     if (realTmux === '') throw new Error('tmux is not on PATH')
 
@@ -240,7 +240,7 @@ class Harness implements Wterm {
       }).trim()
     } catch (err) {
       const stderr = (err as { stderr?: string }).stderr ?? ''
-      throw new Error(`wterm-web ${args.join(' ')} failed: ${stderr.trim() || String(err)}`)
+      throw new Error(`tmux-web ${args.join(' ')} failed: ${stderr.trim() || String(err)}`)
     }
   }
 
@@ -338,8 +338,8 @@ class Harness implements Wterm {
   }
 }
 
-export const test = base.extend<{ wterm: Wterm }>({
-  wterm: async ({}, use, testInfo) => {
+export const test = base.extend<{ tmuxWeb: TmuxWeb }>({
+  tmuxWeb: async ({}, use, testInfo) => {
     const h = await Harness.start()
     try {
       await use(h)
@@ -427,8 +427,8 @@ export async function focusTerminal(page: Page): Promise<void> {
  * socket is open and the remembered pane has been re-selected, so a test that
  * typed earlier would have its keystrokes dropped by design.
  */
-export async function enroll(page: Page, wterm: Wterm, name: string): Promise<void> {
-  await page.goto(wterm.enroll(name))
+export async function enroll(page: Page, tmuxWeb: TmuxWeb, name: string): Promise<void> {
+  await page.goto(tmuxWeb.enroll(name))
   await page.waitForURL((url) => url.pathname === '/')
   await page.locator('.term-row').first().waitFor()
   await pill(page).waitFor({ state: 'detached' })

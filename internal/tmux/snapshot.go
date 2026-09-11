@@ -51,8 +51,8 @@ type Row struct {
 	SessionName string `json:"sessionName"` // live name, for display
 	PaneID      string `json:"paneId"`      // e.g. "%3", stable for the pane's lifetime
 	PaneIndex   int    `json:"paneIndex"`   // position within the window, in layout order
-	AppOwned    bool   `json:"appOwned"`    // set from the @wterm_web user option
-	// Label is @wterm_label, and it may be "": the user never set one, or what
+	AppOwned    bool   `json:"appOwned"`    // set from the @tmux_web_owned user option
+	// Label is @tmux_web_label, and it may be "": the user never set one, or what
 	// they set sanitised away to nothing. It is the only field here whose value
 	// tmux hands over exactly as written, by anything holding the socket --
 	// from v2 that includes third-party agent integrations -- so it is the only
@@ -109,13 +109,13 @@ type Row struct {
 	Question *Question `json:"question,omitempty"`
 }
 
-// labelField is #{@wterm_label} with the two bytes that break this wire format
+// labelField is #{@tmux_web_label} with the two bytes that break this wire format
 // substituted out by tmux, before the value ever reaches Go.
 //
 // tmux's s/// modifier is a POSIX regex substitution over the variable's value,
 // applied to every match, and its pattern can carry the raw bytes: probed on
 // tmux 3.7b, a label of "a\x1fb\nc" reports as "a b c" through this expression
-// and as itself through a bare #{@wterm_label}. The pattern is a bracket SET of
+// and as itself through a bare #{@tmux_web_label}. The pattern is a bracket SET of
 // the two literal bytes rather than a range or a class, deliberately:
 //
 //   - [[:cntrl:]] does not survive tmux's own parse. The modifier's variable is
@@ -165,7 +165,7 @@ const labelField = "#{s/[\n" + Sep + "]/ /:" + LabelOption + "}"
 // reads back as one line with the control bytes gone. It used to hold the last
 // slot for that reason; the label needs it more.
 //
-// @wterm_label is the one field tmux will hand over exactly as somebody wrote
+// @tmux_web_label is the one field tmux will hand over exactly as somebody wrote
 // it, and from v2 that somebody includes third-party agent integrations. It is
 // last so that the damage a raw byte can do is bounded by arithmetic rather
 // than by the sanitiser holding: a 0x1f only adds fields past the end, which
@@ -180,7 +180,7 @@ var formatFields = []string{
 	"#{session_name}",
 	"#{pane_id}",
 	"#{pane_index}",
-	"#{@wterm_web}",
+	"#{" + AppOption + "}",
 	"#{window_id}",
 	"#{window_index}",
 	"#{window_name}",
@@ -260,7 +260,7 @@ func ParseRows(out string) (rows []Row, dropped int, err error) {
 	return rows, dropped, nil
 }
 
-// sanitizeLabel makes an arbitrary @wterm_label value safe to put on the wire
+// sanitizeLabel makes an arbitrary @tmux_web_label value safe to put on the wire
 // and in the DOM, and bounds it.
 //
 // The last of the three defences, and the only one that runs on bytes that have

@@ -21,14 +21,14 @@ import (
 // adminSocketName is the socket's basename in whichever runtime directory
 // AdminSocketPath settles on. The daemon and the CLI must agree on it without
 // talking to each other, so it is a constant rather than a flag default.
-const adminSocketName = "wterm-web.sock"
+const adminSocketName = "tmux-web.sock"
 
 // AdminBaseURL is the URL the admin API answers on. A unix socket has no host,
 // but Go's HTTP client insists on one; the client from AdminClient ignores it
 // and dials the socket instead.
 const AdminBaseURL = "http://admin"
 
-// ErrAdminSocketInUse means another wterm-web is already listening on the admin
+// ErrAdminSocketInUse means another tmux-web is already listening on the admin
 // socket. It is distinct so `serve` can say "already running" rather than
 // reporting a bind failure the operator would try to fix by deleting the file.
 var ErrAdminSocketInUse = errors.New("auth: admin socket already in use")

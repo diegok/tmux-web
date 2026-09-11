@@ -34,7 +34,7 @@ func NewServer(t *testing.T) *Server {
 	if _, err := rand.Read(b); err != nil {
 		t.Fatalf("rand: %v", err)
 	}
-	s := &Server{Socket: "wterm-test-" + socketSafe(t.Name()) + "-" + hex.EncodeToString(b)}
+	s := &Server{Socket: "tmux-web-test-" + socketSafe(t.Name()) + "-" + hex.EncodeToString(b)}
 
 	t.Cleanup(func() {
 		_, _ = s.TryRun("kill-server")

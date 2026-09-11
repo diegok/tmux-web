@@ -35,7 +35,7 @@ import (
 // rewrite that constantly. A user option is durable, dies with the pane, needs
 // no server-side state, and is readable from the same format string -- see
 // Format, which reads it through this same constant so the two cannot drift.
-const LabelOption = "@wterm_label"
+const LabelOption = "@tmux_web_label"
 
 // MaxLabel bounds a pane label in runes.
 //

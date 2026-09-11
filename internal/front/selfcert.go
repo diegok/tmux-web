@@ -58,7 +58,7 @@ func SelfSignedCert(dir, host string) (certPath, keyPath string, err error) {
 	now := time.Now()
 	tmpl := x509.Certificate{
 		SerialNumber: serial,
-		Subject:      pkix.Name{CommonName: host, Organization: []string{"wterm-web"}},
+		Subject:      pkix.Name{CommonName: host, Organization: []string{"tmux-web"}},
 		// Backdated an hour so a client whose clock runs slow does not reject a
 		// certificate that was valid the moment it was written.
 		NotBefore:             now.Add(-time.Hour),

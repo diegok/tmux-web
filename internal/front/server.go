@@ -235,10 +235,10 @@ func NewHandler(cfg HandlerConfig) (http.Handler, error) {
 	// network request should be able to do however well authenticated it is,
 	// and this daemon is reachable from a phone. The Origin middleware below is
 	// the boundary for tmux operations; installing is not a tmux operation. It
-	// lives in cmd/wterm-web (see install.go), in package main, which nothing
+	// lives in cmd/tmux-web (see install.go), in package main, which nothing
 	// can import -- so the direct half of this rule is enforced by the compiler
 	// and the other half, a reimplementation inside this package, is a grep in
-	// cmd/wterm-web/install_test.go. If you were about to add the route, read
+	// cmd/tmux-web/install_test.go. If you were about to add the route, read
 	// that test before you delete it.
 	mux.Handle("GET /enroll", http.HandlerFunc(s.enrollPage))
 	mux.Handle("POST /api/enroll", http.HandlerFunc(s.redeem))
@@ -426,7 +426,7 @@ code{background:#eee;padding:.1em .3em;border-radius:3px}
   // like it could work.
   if (location.hash) { history.replaceState(null, '', location.pathname); }
   if (!token) {
-    fail('This enrollment link has no token in it. Run wterm-web enroll again and open the whole link, including the part after the #.');
+    fail('This enrollment link has no token in it. Run tmux-web enroll again and open the whole link, including the part after the #.');
     return;
   }
 
@@ -505,10 +505,10 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request) {
 		// 400 rather than 401: there is no credential to re-present and no
 		// WWW-Authenticate to offer. The page turns this into "run enroll
 		// again", which is the only thing that helps.
-		writeError(w, http.StatusBadRequest, "this enrollment link is not valid; it may already have been used. Run wterm-web enroll again.")
+		writeError(w, http.StatusBadRequest, "this enrollment link is not valid; it may already have been used. Run tmux-web enroll again.")
 		return
 	case errors.Is(err, auth.ErrEnrollTokenExpired):
-		writeError(w, http.StatusBadRequest, "this enrollment link has expired. Run wterm-web enroll again.")
+		writeError(w, http.StatusBadRequest, "this enrollment link has expired. Run tmux-web enroll again.")
 		return
 	case errors.Is(err, auth.ErrTooManyRedeemAttempts):
 		// The limiter is checked after the token comparison, so this never
@@ -805,7 +805,7 @@ func (r *statusRecorder) Write(b []byte) (int, error) {
 
 // -- the daemon -------------------------------------------------------------
 
-// Config is what `wterm-web serve` runs with.
+// Config is what `tmux-web serve` runs with.
 type Config struct {
 	// Host is the public hostname browsers reach the daemon on. It is what the
 	// certificate is issued for and what the origin allowlist is derived from,
@@ -910,7 +910,7 @@ func Serve(ctx context.Context, cfg Config) error {
 			slog.Error("front: the admin socket stopped serving", "socket", socket, "err", err)
 		}
 	}()
-	slog.Info("wterm-web serving", "url", d.baseURL, "state", d.statePath, "socket", socket)
+	slog.Info("tmux-web serving", "url", d.baseURL, "state", d.statePath, "socket", socket)
 
 	switch {
 	case cfg.Dev:

@@ -39,10 +39,10 @@ function recorder() {
 // 1.18.30. Read from the file rather than retyped, for the same reason pi's
 // test reads its own: this plugin must hand the event over WHOLE, and every
 // reduction -- the basename rule, the per-permission-class metadata reduction,
-// the 1 KiB cap -- lives in `wterm-web report`.
+// the 1 KiB cap -- lives in `tmux-web report`.
 function fixture(name: string): any {
   return JSON.parse(
-    readFileSync(new URL(`../../cmd/wterm-web/testdata/hooks/opencode/${name}.json`, import.meta.url), 'utf8'),
+    readFileSync(new URL(`../../cmd/tmux-web/testdata/hooks/opencode/${name}.json`, import.meta.url), 'utf8'),
   )
 }
 
@@ -322,7 +322,7 @@ async function loadCopy() {
 
 // The claim lives on globalThis, which vitest does not reset between tests.
 beforeEach(() => {
-  delete (globalThis as Record<string, unknown>)['__wterm_web_reporter__']
+  delete (globalThis as Record<string, unknown>)['__tmux_web_reporter__']
 })
 
 describe('the default export', () => {
@@ -344,7 +344,7 @@ describe('the default export', () => {
   // plugin: $XDG_CONFIG_HOME/opencode/plugin/ loads in every project and
   // .opencode/plugin/ loads in this one, and opencode dedupes neither by
   // filename nor by content. Both copies' hooks are called on every event;
-  // without the claim both would fork a `wterm-web report`, and two single-slot
+  // without the claim both would fork a `tmux-web report`, and two single-slot
   // queues would race for one pane.
   //
   // Driven through the real default export rather than through claimReporter,

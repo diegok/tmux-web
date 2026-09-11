@@ -18,7 +18,7 @@ import (
 // unchanged and exiting 0 (measured on 3.7b with a deliberately broken "["
 // pattern), and a tmux too old for the s/// modifier expands the whole
 // expression to "". So this test runs the real format with labelField swapped
-// back for a bare #{@wterm_label} -- exactly what the daemon would be reading
+// back for a bare #{@tmux_web_label} -- exactly what the daemon would be reading
 // if that layer stopped working -- and requires that ParseRows still returns
 // every pane.
 //

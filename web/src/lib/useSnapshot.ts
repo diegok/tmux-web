@@ -89,10 +89,10 @@ export interface SnapshotRow {
   paneId: string
   /** Position in the window's layout. Not the id -- see the header comment. */
   paneIndex: number
-  /** Row came from a session this app created (`@wterm_web`). */
+  /** Row came from a session this app created (`@tmux_web_owned`). */
   appOwned: boolean
   /**
-   * `@wterm_label`: a name given to this pane, or "" when unset -- and also ""
+   * `@tmux_web_label`: a name given to this pane, or "" when unset -- and also ""
    * when what was set sanitised away to nothing. The daemon repairs this field
    * rather than trusting it (control bytes to spaces, invalid UTF-8 to U+FFFD,
    * capped and trimmed): it is the one thing on the wire that anything holding
@@ -297,7 +297,7 @@ export interface PaneNode {
   command: string
   /** The pane's tmux title; the hostname when nothing has set one. */
   title: string
-  /** `@wterm_label`, or "" -- the only one of the three the user chose. */
+  /** `@tmux_web_label`, or "" -- the only one of the three the user chose. */
   label: string
   /** tmux's active pane within this window. */
   active: boolean
@@ -610,7 +610,7 @@ export function sessionState(
 // --- what this browser has already looked at --------------------------------
 
 /** Where `seen` lives. One key: the map is small and read whole on every load. */
-export const SEEN_STORAGE_KEY = 'wterm-web:seen'
+export const SEEN_STORAGE_KEY = 'tmux-web:seen'
 
 /**
  * `finishedAt` of the newest finish this device has been shown, per pane.

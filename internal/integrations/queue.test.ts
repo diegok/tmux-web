@@ -10,7 +10,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { WTERM_SCHEMA, claimReporter, makeQueue, spawnReport } from './queue'
+import { TMUX_WEB_SCHEMA, claimReporter, makeQueue, spawnReport } from './queue'
 
 // A spawn that records what it was handed and hands back a promise the test
 // resolves by hand. Every ordering claim in here is about WHEN that promise
@@ -106,7 +106,7 @@ describe('makeQueue', () => {
       const calls: string[] = []
       const q = makeQueue((item: { event: string }) => {
         calls.push(item.event)
-        return Promise.reject(new Error('wterm-web: no such file or directory'))
+        return Promise.reject(new Error('tmux-web: no such file or directory'))
       })
       expect(() => q.push({ event: 'input' })).not.toThrow()
       q.push({ event: 'agent_settled' })
@@ -183,7 +183,7 @@ describe('spawnReport', () => {
     const spawn = spawnReport('pi', fake.spawn as never)
     spawn({ event: 'tool_execution_start', payload: { tool: 'bash' } })
     expect(fake.calls).toHaveLength(1)
-    expect(fake.calls[0].file).toBe('wterm-web')
+    expect(fake.calls[0].file).toBe('tmux-web')
     expect(fake.calls[0].args).toEqual(['report', '--agent', 'pi', '--event', 'tool_execution_start'])
     expect(fake.stdin).toEqual(['{"tool":"bash"}'])
   })
@@ -244,7 +244,7 @@ describe('spawnReport', () => {
 // neither runtime dedupes by filename, so the same integration installed both
 // globally and in the project is LOADED TWICE in one process. The effect on the
 // pane option is benign -- both copies write the same value -- but it doubles
-// every `wterm-web report` spawn and puts two single-slot queues in a race for
+// every `tmux-web report` spawn and puts two single-slot queues in a race for
 // the pane, which is the one ordering guarantee queue.ts exists to give.
 //
 // The two runtimes load the two scopes in OPPOSITE ORDERS -- opencode does
@@ -252,18 +252,18 @@ describe('spawnReport', () => {
 // pick a different copy in each, and after a partial upgrade that means the
 // OLDER copy wins in one of them. Every case below is one of those orders.
 describe('claimReporter', () => {
-  const slot = '__wterm_web_reporter__'
+  const slot = '__tmux_web_reporter__'
   beforeEach(() => {
     delete (globalThis as Record<string, unknown>)[slot]
   })
 
   it('lets a single copy report', () => {
-    expect(claimReporter(WTERM_SCHEMA)()).toBe(true)
+    expect(claimReporter(TMUX_WEB_SCHEMA)()).toBe(true)
   })
 
   it('leaves exactly one owner when two copies of the same schema load', () => {
-    const first = claimReporter(WTERM_SCHEMA)
-    const second = claimReporter(WTERM_SCHEMA)
+    const first = claimReporter(TMUX_WEB_SCHEMA)
+    const second = claimReporter(TMUX_WEB_SCHEMA)
     expect([first(), second()]).toEqual([false, true])
   })
 
@@ -298,7 +298,7 @@ describe('claimReporter', () => {
   // exactly where a throw costs the pane its reporting.
   it('survives a foreign value in the slot', () => {
     ;(globalThis as Record<string, unknown>)[slot] = 'not ours'
-    expect(claimReporter(WTERM_SCHEMA)()).toBe(true)
+    expect(claimReporter(TMUX_WEB_SCHEMA)()).toBe(true)
   })
 
   // And the case that makes the predicate re-read globalThis instead of closing

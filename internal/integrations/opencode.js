@@ -1,10 +1,10 @@
-// managed by tmux-web (wterm-schema: 1)
+// managed by tmux-web (tmux-web-schema: 1)
 // Reinstalling or updating the integration overwrites this file.
-// It does one thing: `tmux set-option -p @wterm_agent`. Nothing else.
+// It does one thing: `tmux set-option -p @tmux_web_agent`. Nothing else.
 //
 // WHAT IS DELIBERATELY NOT HERE. No state name, no mapping from an event to a
 // state, no activity text, no sanitizer, no command line. All of that is one
-// table in `wterm-web report` (Go), shared by the three integrations, so that
+// table in `tmux-web report` (Go), shared by the three integrations, so that
 // it exists once instead of drifting across a TypeScript extension, a
 // JavaScript plugin and a settings.json the user owns. If you find yourself
 // writing the word "working" or "idle" in this file, or reducing a payload to
@@ -34,7 +34,7 @@ import { claimReporter, makeQueue, spawnReport } from './queue.ts'
  * but it would ignore them one process at a time.
  *
  * These are exactly the bus events `eventRules["opencode"]` in
- * cmd/wterm-web/events.go maps. `session.created` is not among them on
+ * cmd/tmux-web/events.go maps. `session.created` is not among them on
  * purpose: it is this plugin's own bookkeeping, the one event that establishes
  * parentage, and not a state of the pane. `session.error` is not among them
  * either -- it is real and it does fire, but a failed provider call is not a
@@ -57,7 +57,7 @@ const busEvents = new Set(['session.status', 'permission.asked', 'todo.updated',
  * WHY IT IS HERE AND NOT IN GO. Deciding whether session X is a child needs
  * memory of an earlier event -- `session.created`, whose `properties.info`
  * carries the `parentID`, and which is the only event that carries it at all.
- * Every `wterm-web report` process is fresh and has no memory of anything.
+ * Every `tmux-web report` process is fresh and has no memory of anything.
  *
  * IT IS ABSENCE-CODED AND THEREFORE FAILS OPEN: a payload that lost its
  * parentID -- renamed, nested a level deeper, dropped in a refactor -- reads

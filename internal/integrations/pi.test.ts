@@ -40,11 +40,11 @@ const rpc = (idle = true) => ({ mode: 'rpc', hasUI: true, isIdle: () => idle })
 // One recorded payload, read from the same fixtures Go's table is tested
 // against. The point of reading the file rather than retyping a shape is that
 // this extension must hand the event over WHOLE and unreduced: the basename
-// rule, the command-whole rule and the 1 KiB cap all live in `wterm-web
+// rule, the command-whole rule and the 1 KiB cap all live in `tmux-web
 // report`, and a reduction applied here would be a second copy of them.
 function fixture(name: string): unknown {
   return JSON.parse(
-    readFileSync(new URL(`../../cmd/wterm-web/testdata/hooks/pi/${name}.json`, import.meta.url), 'utf8'),
+    readFileSync(new URL(`../../cmd/tmux-web/testdata/hooks/pi/${name}.json`, import.meta.url), 'utf8'),
   )
 }
 
@@ -67,7 +67,7 @@ function loadCopy() {
 
 // The claim lives on globalThis, which vitest does not reset between tests.
 beforeEach(() => {
-  delete (globalThis as Record<string, unknown>)['__wterm_web_reporter__']
+  delete (globalThis as Record<string, unknown>)['__tmux_web_reporter__']
 })
 
 describe('handlers', () => {
@@ -96,14 +96,14 @@ describe('handlers', () => {
     const r = recorder()
     const h = handlers(r.report)
     h.session_start({ type: 'session_start', reason: 'startup' }, tui(true))
-    // `wterm_is_idle` is the contract with cmd/wterm-web/events.go, which
+    // `tmux_web_is_idle` is the contract with cmd/tmux-web/events.go, which
     // discriminates pi's session_start on exactly this key -- ctx is not part
     // of pi's event object and no recorded payload carries it, so the
     // extension is the only thing that can put it there. A different key name
     // is not a smaller bug: the Go side reads a missing key as `working`, so
     // the idle branch would simply never be taken and a reload on a resting
     // pane would keep writing a transient state.
-    expect(r.items).toEqual([{ event: 'session_start', payload: { wterm_is_idle: true } }])
+    expect(r.items).toEqual([{ event: 'session_start', payload: { tmux_web_is_idle: true } }])
     h.input({ type: 'input', text: 'write a haiku', source: 'interactive' }, tui(true))
     // The turn-start invariant. pi's turn end is an EDGE -- it writes idle
     // without reading what is standing -- and that is only safe because this
@@ -118,7 +118,7 @@ describe('handlers', () => {
     const r = recorder()
     const h = handlers(r.report)
     h.session_start({ type: 'session_start', reason: 'startup' }, tui(false))
-    expect(r.items).toEqual([{ event: 'session_start', payload: { wterm_is_idle: false } }])
+    expect(r.items).toEqual([{ event: 'session_start', payload: { tmux_web_is_idle: false } }])
   })
 
   it('hands the tool and prompt events over whole', () => {
@@ -155,7 +155,7 @@ describe('handlers', () => {
   it('records nothing but an event name and the hook’s own payload', () => {
     // The file's one-line contract with Go, and the assertion that catches
     // somebody "helpfully" adding a state name, a timestamp or a --text here.
-    // Every reduction and the whole sanitizer live in `wterm-web report`; an
+    // Every reduction and the whole sanitizer live in `tmux-web report`; an
     // item with a third key is an integration that has started deciding
     // things.
     const r = recorder()
@@ -199,7 +199,7 @@ describe('the default export', () => {
     // The names are written out rather than taken from handlers() on purpose:
     // against `Object.keys(handlers(...))` a dropped handler would move both
     // sides of the comparison at once and survive. These five are the contract
-    // with cmd/wterm-web/events.go's pi table.
+    // with cmd/tmux-web/events.go's pi table.
     const registered: string[] = []
     piExtension({
       on(name: string) {
@@ -216,7 +216,7 @@ describe('the default export', () => {
   // copies of this extension -- $PI_CODING_AGENT_DIR/extensions/ auto-loads in
   // every project, .pi/extensions/ loads in this one -- and pi dedupes neither
   // by filename nor by content. Both register all five handlers; without the
-  // claim in queue.ts both would also fork a `wterm-web report` per event, and
+  // claim in queue.ts both would also fork a `tmux-web report` per event, and
   // two single-slot queues would race for one pane.
   //
   // It is driven through the real default export rather than through
@@ -233,11 +233,11 @@ describe('the default export', () => {
     second.on.session_start(undefined, tui())
 
     expect(first.pushed).toEqual([])
-    expect(second.pushed).toEqual([{ event: 'session_start', payload: { wterm_is_idle: true } }])
+    expect(second.pushed).toEqual([{ event: 'session_start', payload: { tmux_web_is_idle: true } }])
   })
 
   it('reports as pi, through a queue of its own', () => {
-    // `pi` is what cmd/wterm-web/events.go keys its table on and what the
+    // `pi` is what cmd/tmux-web/events.go keys its table on and what the
     // daemon derives from pane_current_command; the wrong name here is a
     // silent no-op on every event, because an agent the table does not know
     // reports nothing.

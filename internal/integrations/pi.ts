@@ -1,10 +1,10 @@
-// managed by tmux-web (wterm-schema: 1)
+// managed by tmux-web (tmux-web-schema: 1)
 // Reinstalling or updating the integration overwrites this file.
-// It does one thing: `tmux set-option -p @wterm_agent`. Nothing else.
+// It does one thing: `tmux set-option -p @tmux_web_agent`. Nothing else.
 //
 // WHAT IS DELIBERATELY NOT HERE. No state name, no mapping from an event to a
 // state, no activity text, no sanitizer, no command line. All of that is one
-// table in `wterm-web report` (Go), shared by the three integrations, so that
+// table in `tmux-web report` (Go), shared by the three integrations, so that
 // it exists once instead of drifting across a TypeScript extension, a
 // JavaScript plugin and a settings.json the user owns. If you find yourself
 // writing the word "working" or "idle" in this file, something has gone wrong.
@@ -15,7 +15,7 @@
 
 import { claimReporter, makeQueue, spawnReport } from './queue.ts'
 
-/** Exactly what `wterm-web report` needs: an event name and the hook's own
+/** Exactly what `tmux-web report` needs: an event name and the hook's own
  *  JSON. No timestamp -- `report` stamps one from its own process start. */
 type ReportItem = { event: string; payload?: unknown }
 
@@ -78,7 +78,7 @@ export function handlers(report: (item: ReportItem) => void): Record<string, Han
       // write idle;<now> and re-badge every device on every reload. `report`
       // knows that from its own table; the extension just names the event.
       //
-      // `wterm_is_idle` is the key cmd/wterm-web/events.go discriminates on,
+      // `tmux_web_is_idle` is the key cmd/tmux-web/events.go discriminates on,
       // and the namespace is because the key is ours and not pi's. ctx is not
       // part of pi's event object and no recorded payload carries it, so this
       // is the only place it can come from. The Go side reads anything absent
@@ -86,7 +86,7 @@ export function handlers(report: (item: ReportItem) => void): Record<string, Han
       // direction from the other discriminators, because both branches are
       // known and only one of them rests forever -- so `=== true` here keeps
       // the value a boolean whatever ctx does.
-      report({ event: 'session_start', payload: { wterm_is_idle: ctx?.isIdle?.() === true } })
+      report({ event: 'session_start', payload: { tmux_web_is_idle: ctx?.isIdle?.() === true } })
     },
 
     // The turn-start invariant. pi's turn end is an edge: it writes a resting

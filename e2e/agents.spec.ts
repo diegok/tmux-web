@@ -35,7 +35,7 @@ import {
   test,
   windowRow,
 } from './harness'
-import type { Wterm } from './harness'
+import type { TmuxWeb } from './harness'
 import type { Locator, Page } from '@playwright/test'
 
 /** A verbatim Claude Code permission dialog, as captured on a live machine. */
@@ -68,11 +68,11 @@ function group(page: Page, session: string): Locator {
  * from the previous poll's. Faster than the 1.5s poll on purpose, so that no
  * poll can land between two redraws and read the pane as still.
  */
-function churn(wterm: Wterm, target: string): () => void {
+function churn(tmuxWeb: TmuxWeb, target: string): () => void {
   let n = 0
   const timer = setInterval(() => {
     try {
-      wterm.tmux('send-keys', '-t', target, `tick-${n++}`, 'Enter')
+      tmuxWeb.tmux('send-keys', '-t', target, `tick-${n++}`, 'Enter')
     } catch {
       // The pane went away, which is a teardown race and not a failure. The
       // assertions say whether that mattered.
@@ -83,10 +83,10 @@ function churn(wterm: Wterm, target: string): () => void {
 
 test('an agent pane reads working while it redraws and idle when it stops', async ({
   page,
-  wterm,
+  tmuxWeb,
 }) => {
-  await enroll(page, wterm, 'laptop')
-  wterm.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'agent', wterm.fakeAgent('claude'))
+  await enroll(page, tmuxWeb, 'laptop')
+  tmuxWeb.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'agent', tmuxWeb.fakeAgent('claude'))
 
   const row = windowRow(page, 'agent')
   await expect(row).toBeVisible()
@@ -95,7 +95,7 @@ test('an agent pane reads working while it redraws and idle when it stops', asyn
   // below is about a genuine agent pane and not about a row that happens to
   // carry a badge.
   expect(
-    wterm.tmux('list-panes', '-t', `${BASE_SESSION}:agent`, '-F', '#{pane_current_command}'),
+    tmuxWeb.tmux('list-panes', '-t', `${BASE_SESSION}:agent`, '-F', '#{pane_current_command}'),
   ).toBe('claude')
 
   // Idle FIRST, and the order is the whole test. A pane's first observation
@@ -105,7 +105,7 @@ test('an agent pane reads working while it redraws and idle when it stops', asyn
   // taken twice and compared.
   await expect(stateDot(row)).toHaveAttribute('data-agent-state', 'idle')
 
-  const stop = churn(wterm, `${BASE_SESSION}:agent`)
+  const stop = churn(tmuxWeb, `${BASE_SESSION}:agent`)
   try {
     await expect(stateDot(row)).toHaveAttribute('data-agent-state', 'working')
   } finally {
@@ -139,10 +139,10 @@ test('an agent pane reads working while it redraws and idle when it stops', asyn
  */
 test('a pane title gets a line of its own, cut, and scrolled only when it is too long', async ({
   page,
-  wterm,
+  tmuxWeb,
 }) => {
-  await enroll(page, wterm, 'laptop')
-  const claude = wterm.fakeAgent('claude')
+  await enroll(page, tmuxWeb, 'laptop')
+  const claude = tmuxWeb.fakeAgent('claude')
 
   // Long enough to be cut in a 16rem sidebar at 12px, and short enough to be a
   // title a coding agent would really write.
@@ -156,20 +156,20 @@ test('a pane title gets a line of its own, cut, and scrolled only when it is too
   // narrower than the row.
   const SHORT = 'in tests'
 
-  wterm.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'catalog', claude)
-  wterm.tmux('select-pane', '-t', `${BASE_SESSION}:catalog`, '-T', LONG)
-  wterm.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'unit', claude)
-  wterm.tmux('select-pane', '-t', `${BASE_SESSION}:unit`, '-T', SHORT)
+  tmuxWeb.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'catalog', claude)
+  tmuxWeb.tmux('select-pane', '-t', `${BASE_SESSION}:catalog`, '-T', LONG)
+  tmuxWeb.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'unit', claude)
+  tmuxWeb.tmux('select-pane', '-t', `${BASE_SESSION}:unit`, '-T', SHORT)
   // A split window, whose pane rows are a different button with a different
   // set of shadcn defaults -- notably no width of its own, since a `<button>`
   // is shrink-to-fit.
-  wterm.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'split', claude)
-  wterm.tmux('select-pane', '-t', `${BASE_SESSION}:split.0`, '-T', LONG)
-  wterm.tmux('split-window', '-d', '-v', '-t', `${BASE_SESSION}:split`, 'sh')
+  tmuxWeb.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'split', claude)
+  tmuxWeb.tmux('select-pane', '-t', `${BASE_SESSION}:split.0`, '-T', LONG)
+  tmuxWeb.tmux('split-window', '-d', '-v', '-t', `${BASE_SESSION}:split`, 'sh')
   // A second session, so there are two blocks to keep apart.
   // Named `scratch`, not `shell`: `windowRow` finds a row by its name, and a
   // second window called `shell` would make the base one ambiguous.
-  wterm.tmux('new-session', '-d', '-s', 'notes', '-n', 'scratch', 'sh')
+  tmuxWeb.tmux('new-session', '-d', '-s', 'notes', '-n', 'scratch', 'sh')
 
   const long = windowRow(page, 'catalog')
   const short = windowRow(page, 'unit')
@@ -308,9 +308,9 @@ test('a pane title gets a line of its own, cut, and scrolled only when it is too
 
 test('a blocked agent rolls up to its window and session, and badges the tab', async ({
   page,
-  wterm,
+  tmuxWeb,
 }) => {
-  await enroll(page, wterm, 'laptop')
+  await enroll(page, tmuxWeb, 'laptop')
 
   // Counted from here, for the "read once" assertion further down. The tab has
   // already fetched the icon to display it; what must not happen is another
@@ -331,10 +331,10 @@ test('a blocked agent rolls up to its window and session, and badges the tab', a
   // this window twice would leave 10-row panes with the question scrolled off.
   // `manual` is what makes the screen these tests are about independent of the
   // viewport the suite happens to run at.
-  wterm.tmux('new-session', '-d', '-s', 'agents', '-n', 'shell', '-x', '120', '-y', '120', 'sh')
-  wterm.tmux('set-option', '-t', 'agents', 'window-size', 'manual')
-  wterm.tmux('new-window', '-d', '-t', 'agents', '-n', 'bot', 'sh')
-  wterm.tmux('resize-window', '-t', 'agents:bot', '-x', '120', '-y', '120')
+  tmuxWeb.tmux('new-session', '-d', '-s', 'agents', '-n', 'shell', '-x', '120', '-y', '120', 'sh')
+  tmuxWeb.tmux('set-option', '-t', 'agents', 'window-size', 'manual')
+  tmuxWeb.tmux('new-window', '-d', '-t', 'agents', '-n', 'bot', 'sh')
+  tmuxWeb.tmux('resize-window', '-t', 'agents:bot', '-x', '120', '-y', '120')
   // The agent is the second pane of the second window, so both roll-ups have
   // something to roll up over: a window that reported its first pane's state,
   // or a session that reported its first window's, would read as nothing here.
@@ -342,18 +342,18 @@ test('a blocked agent rolls up to its window and session, and badges the tab', a
   // `cat <dialog>; exec claude` puts the captured screen up and then holds the
   // pane open under the agent's name -- the dialog is what is on the pane when
   // the daemon captures it.
-  wterm.tmux(
+  tmuxWeb.tmux(
     'split-window',
     '-d',
     '-v',
     '-t',
     'agents:bot',
-    `sh -c 'cat ${BLOCKED_SCREEN}; exec ${wterm.fakeAgent('claude')}'`,
+    `sh -c 'cat ${BLOCKED_SCREEN}; exec ${tmuxWeb.fakeAgent('claude')}'`,
   )
 
   // Again, tmux first: the approval box really is on that pane's screen.
   await expect
-    .poll(() => wterm.tmux('capture-pane', '-p', '-J', '-t', 'agents:bot.1'))
+    .poll(() => tmuxWeb.tmux('capture-pane', '-p', '-J', '-t', 'agents:bot.1'))
     .toContain(QUESTION)
 
   const agents = group(page, 'agents')
@@ -385,16 +385,16 @@ test('a blocked agent rolls up to its window and session, and badges the tab', a
   // been read at all", which is the regression the `source !== null` guard in
   // `useTabBadge` exists to prevent. Several polls also go by in here with the
   // badge up, so a read on every poll would show up too.
-  wterm.tmux(
+  tmuxWeb.tmux(
     'split-window',
     '-d',
     '-v',
     '-t',
     'agents:bot',
-    `sh -c 'cat ${BLOCKED_SCREEN}; exec ${wterm.fakeAgent('claude')}'`,
+    `sh -c 'cat ${BLOCKED_SCREEN}; exec ${tmuxWeb.fakeAgent('claude')}'`,
   )
   await expect
-    .poll(() => wterm.tmux('capture-pane', '-p', '-J', '-t', 'agents:bot.1'))
+    .poll(() => tmuxWeb.tmux('capture-pane', '-p', '-J', '-t', 'agents:bot.1'))
     .toContain(QUESTION)
   await expect(page).toHaveTitle('(2) tmux-web')
   expect(favicons, 'the icon must not be re-read when the count changes').toBe(readsSoFar)
@@ -402,7 +402,7 @@ test('a blocked agent rolls up to its window and session, and badges the tab', a
   // And both halves go back when nothing needs you. The panes are killed rather
   // than answered: an answered dialog leaves a pane that has just changed, and
   // three seconds later that is a finished run with a `done` badge of its own.
-  wterm.tmux('kill-window', '-t', 'agents:bot')
+  tmuxWeb.tmux('kill-window', '-t', 'agents:bot')
   await expect(windowRow(page, 'bot')).toHaveCount(0)
   await expect(stateDot(sessionLabel(page, 'agents'))).toHaveCount(0)
   await expect(page).toHaveTitle('tmux-web')
@@ -411,9 +411,9 @@ test('a blocked agent rolls up to its window and session, and badges the tab', a
 
 test('a finished run badges the tab until this device looks, and stays looked-at', async ({
   page,
-  wterm,
+  tmuxWeb,
 }) => {
-  await enroll(page, wterm, 'laptop')
+  await enroll(page, tmuxWeb, 'laptop')
 
   // A second tab, in the same context so it shares the cookie and localStorage
   // but not sessionStorage. It exists to hold a terminal socket open while the
@@ -422,20 +422,20 @@ test('a finished run badges the tab until this device looks, and stays looked-at
   // one tab, a reload would clear the badge whether or not anything was
   // remembered, and the assertion at the end would be vacuous.
   const other = await page.context().newPage()
-  await other.goto(wterm.baseURL + '/')
+  await other.goto(tmuxWeb.baseURL + '/')
   await other.locator('.term-row').first().waitFor()
   // Live, not merely loaded: it is the open socket that matters here, and the
   // status pill is rendered only while there is not one.
   await pill(other).waitFor({ state: 'detached' })
 
-  wterm.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'agent', wterm.fakeAgent('claude'))
-  const paneId = wterm.tmux('list-panes', '-t', `${BASE_SESSION}:agent`, '-F', '#{pane_id}')
+  tmuxWeb.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'agent', tmuxWeb.fakeAgent('claude'))
+  const paneId = tmuxWeb.tmux('list-panes', '-t', `${BASE_SESSION}:agent`, '-F', '#{pane_id}')
   const row = windowRow(page, 'agent')
   await expect(stateDot(row)).toHaveAttribute('data-agent-state', 'idle')
 
   // A run: the screen moves, then stops. Only a run that was seen to change
   // earns a finish edge, which is why the pane has to churn before it settles.
-  const stop = churn(wterm, `${BASE_SESSION}:agent`)
+  const stop = churn(tmuxWeb, `${BASE_SESSION}:agent`)
   try {
     await expect(stateDot(row)).toHaveAttribute('data-agent-state', 'working')
   } finally {
@@ -457,7 +457,7 @@ test('a finished run badges the tab until this device looks, and stays looked-at
   // keyed on the tmux server's generation so a pane id reused after a restart
   // cannot inherit it.
   const stored = JSON.parse(
-    (await page.evaluate(() => globalThis.localStorage.getItem('wterm-web:seen'))) ?? '{}',
+    (await page.evaluate(() => globalThis.localStorage.getItem('tmux-web:seen'))) ?? '{}',
   ) as Record<string, number>
   const key = Object.keys(stored).find((k) => k.endsWith(`:${paneId}`))
   expect(key, `seen = ${JSON.stringify(stored)}`).toBeDefined()

@@ -58,7 +58,7 @@ in the browser, which the per-tab client model cannot do.
 One Go binary. Three concerns: front door, tmux control, asset serving.
 
 ```
-wterm-web (single static binary)
+tmux-web (single static binary)
 ├─ certmagic           tmux.example.com via ACME HTTP-01  (wildcard later)
 ├─ net/http            UI, JSON API, WebSocket
 ├─ net/http/httputil   reverse proxy for published ports   (deferred)
@@ -84,7 +84,7 @@ tmux new-session -t work -s _web-<uuid> \; \
      set destroy-unattached on \; \
      set status off \; \
      set mouse on \; \
-     set @wterm_web 1
+     set @tmux_web_owned 1
 ```
 
 **Why one command and not four.** `destroy-unattached on` is not an on-detach
@@ -103,7 +103,7 @@ exit. No race, no polling `#{session_attached}`, no sleep.
 Belt and braces: also `kill-session` explicitly when the WebSocket closes.
 `destroy-unattached` is the safety net for crashes, not the primary path.
 
-`@wterm_web` is a tmux user option tagging the session as app-created. The
+`@tmux_web_owned` is a tmux user option tagging the session as app-created. The
 sidebar filter and the startup sweep both match on it rather than on the name —
 a user with a real session called `_web-notes` would otherwise have it hidden
 from the sidebar and killed by the sweep.
@@ -168,7 +168,7 @@ One command, polled every ~1.5s **globally** — a single poll fanned out to eve
 connected client, never one poll per tab.
 
 ```sh
-tmux list-panes -a -F '#{?#{session_group},#{session_group},#{session_name}}␟#{pane_id}␟#{pane_index}␟#{@wterm_web}␟#{window_index}␟#{window_name}␟#{pane_active}␟#{pane_current_command}'
+tmux list-panes -a -F '#{?#{session_group},#{session_group},#{session_name}}␟#{pane_id}␟#{pane_index}␟#{@tmux_web_owned}␟#{window_index}␟#{window_name}␟#{pane_active}␟#{pane_current_command}'
 ```
 
 The rows are then **deduplicated in Go by `pane_id`, preferring a
@@ -187,7 +187,7 @@ attached tab. Verified — including with the `session_group` fallback in place,
 which fixes the label but not the dropped row. Dedupe keeps the pane and just
 sources it from whichever session is left.
 
-**`@wterm_web` is the app marker, not the name.** A user with a real session
+**`@tmux_web_owned` is the app marker, not the name.** A user with a real session
 called `_web-notes` must not be hidden from the sidebar, and must not be killed
 by the startup sweep. Both match the user option; verified that `_web-notes`
 survives both.
@@ -287,13 +287,13 @@ trust onto a remote device. No password is ever created, stored, or typed.
 
 ### Admin socket
 
-`$XDG_RUNTIME_DIR/wterm-web.sock`, mode 0600. Every connection is checked with
+`$XDG_RUNTIME_DIR/tmux-web.sock`, mode 0600. Every connection is checked with
 `unix.GetsockoptUcred`; a uid other than the service's own is refused. The CLI
 speaks only to this socket, so "can you run this as me on this box" *is* the
 authorization proof.
 
 ```
-$ wterm-web enroll --name laptop
+$ tmux-web enroll --name laptop
 https://tmux.example.com/enroll#Ck9tR2p…    single use, expires in 10m
 ```
 
@@ -307,7 +307,7 @@ scanners messaging apps run when you paste yourself a URL. The page reads
 ### Device sessions
 
 Redeeming mints a 32-byte device token. Only its hash is stored, with name,
-user-agent, created-at, last-seen. The cookie is named `__Host-wterm_device` and
+user-agent, created-at, last-seen. The cookie is named `__Host-tmux_web_device` and
 set `HttpOnly; Secure; Path=/`, with no `Domain` — so it is scoped to the exact
 host `tmux.example.com`.
 
@@ -429,7 +429,7 @@ automatic with backoff.
 | --- | --- |
 | No tmux server running | First load offers "create session `main`" |
 | `destroy-unattached` set too early | Set it only after attach; see attach model |
-| Orphaned sessions after `SIGKILL` | Sweep at startup: kill `@wterm_web` sessions with zero clients |
+| Orphaned sessions after `SIGKILL` | Sweep at startup: kill `@tmux_web_owned` sessions with zero clients |
 | Namesake session killed under a tab | Snapshot keys on `session_group`; windows stay addressable |
 | Orphaned `_web-*` from half-open TCP | WS ping/pong tears down the attach |
 | Resize contention on a co-viewed window | Debounced; accepted limitation |
@@ -446,7 +446,7 @@ bytes to a live client; never stall tmux for a dead one.
 
 ## Storage
 
-One JSON file under `$XDG_STATE_HOME/wterm-web/`, written by atomic rename, with
+One JSON file under `$XDG_STATE_HOME/tmux-web/`, written by atomic rename, with
 all writes serialized through a single goroutine. Atomic rename prevents torn
 files; it does not prevent lost updates from concurrent read-modify-write.
 Devices now, published routes later. No SQLite: nothing here has a query.
@@ -454,7 +454,7 @@ Devices now, published routes later. No SQLite: nothing here has a query.
 ## Testing
 
 **Integration against real tmux** is the high-value layer. Use an isolated
-socket (`tmux -L wterm-test`): assert the one-shot create-and-attach comes up
+socket (`tmux -L tmux-web-test`): assert the one-shot create-and-attach comes up
 attached with every option set, assert the snapshot returns exactly one row per
 pane with group members present, assert a session named `_web-notes` survives
 both the dedupe and the sweep, assert the snapshot stays populated after the
@@ -473,7 +473,7 @@ this is an ordinary DOM assertion — a canvas-based terminal would not allow it
 ## Repository layout
 
 ```
-cmd/wterm-web/        serve, enroll, devices
+cmd/tmux-web/        serve, enroll, devices
 internal/tmux/        snapshot, session lifecycle, command builders
 internal/ptybridge/   attach + WebSocket bridge
 internal/auth/        peercred, enrollment, device store, origin checks

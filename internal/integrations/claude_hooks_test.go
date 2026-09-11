@@ -22,12 +22,12 @@ import (
 // What is NOT tested here, and where it is instead:
 //
 //   - What each hook MEANS -- the state, the whitelist, the edge/re-assertion
-//     split, the absence-coded agent_id filter -- is cmd/wterm-web/events.go's
+//     split, the absence-coded agent_id filter -- is cmd/tmux-web/events.go's
 //     table over the eleven recorded payloads in
-//     cmd/wterm-web/testdata/hooks/claude/. This package has no opinion about
+//     cmd/tmux-web/testdata/hooks/claude/. This package has no opinion about
 //     any of it, which is the whole point of the split.
 //   - That the four registered names are names that table knows is
-//     cmd/wterm-web/integration_claude_test.go: this package cannot import
+//     cmd/tmux-web/integration_claude_test.go: this package cannot import
 //     package main, and a hook registered under a name events.go does not map
 //     reports NOTHING while passing every assertion in this file.
 
@@ -47,7 +47,7 @@ type hookJSON struct {
 }
 
 func TestGeneratedClaudeHooks(t *testing.T) {
-	block := ClaudeHookBlock("/opt/wterm/report.sh")
+	block := ClaudeHookBlock("/opt/tmux-web/report.sh")
 
 	// A string search over the marshalled JSON, deliberately: a struct-field
 	// assertion cannot see a key somebody adds to a map later.
@@ -115,7 +115,7 @@ func TestGeneratedClaudeHooks(t *testing.T) {
 		// --event. Asserting the whole command line rather than a substring is
 		// what catches the two ways this goes wrong quietly: the wrong event
 		// name on the wrong hook, and an unquoted path.
-		if wantCmd := "'/opt/wterm/report.sh' " + event; h["command"] != wantCmd {
+		if wantCmd := "'/opt/tmux-web/report.sh' " + event; h["command"] != wantCmd {
 			t.Errorf("%s command = %v, want %q", event, h["command"], wantCmd)
 		}
 	}
@@ -211,7 +211,7 @@ func TestClaudeWrapperHandsOverArgvAndStdinUntouched(t *testing.T) {
 
 	// A real payload, not a token: newlines and quotes are what a wrapper that
 	// round-trips stdin through a shell variable would eat.
-	payload, err := os.ReadFile(filepath.Join("..", "..", "cmd", "wterm-web", "testdata", "hooks", "claude", "stop.json"))
+	payload, err := os.ReadFile(filepath.Join("..", "..", "cmd", "tmux-web", "testdata", "hooks", "claude", "stop.json"))
 	if err != nil {
 		t.Fatalf("reading the recorded Stop payload: %v", err)
 	}
@@ -235,7 +235,7 @@ func TestClaudeWrapperHandsOverArgvAndStdinUntouched(t *testing.T) {
 // TestClaudeWrapperIsQuietOnEveryFailure is the table the plan names, plus the
 // two rows that come from the placeholder.
 func TestClaudeWrapperIsQuietOnEveryFailure(t *testing.T) {
-	bin := buildWtermWeb(t)
+	bin := buildTmuxWeb(t)
 
 	cases := []struct {
 		name  string
@@ -246,9 +246,9 @@ func TestClaudeWrapperIsQuietOnEveryFailure(t *testing.T) {
 		// The reason the -x guard exists. Without it the shell's own "not
 		// found" reaches the hook's stderr on every tool call, and the exit
 		// status is 127.
-		{"BIN missing", filepath.Join(t.TempDir(), "gone", "wterm-web"), []string{"Stop"}, "{}"},
+		{"BIN missing", filepath.Join(t.TempDir(), "gone", "tmux-web"), []string{"Stop"}, "{}"},
 		// Half-installed: the file is there and is not runnable.
-		{"BIN not executable", writeFile(t, filepath.Join(t.TempDir(), "wterm-web"), "#!/bin/sh\n", 0o644), []string{"Stop"}, "{}"},
+		{"BIN not executable", writeFile(t, filepath.Join(t.TempDir(), "tmux-web"), "#!/bin/sh\n", 0o644), []string{"Stop"}, "{}"},
 		// The file as it ships, before any installer has touched it. The
 		// placeholder is not a path, so the same guard catches it -- which is
 		// why the placeholder lives inside the quotes and not in place of the
@@ -325,13 +325,13 @@ func installScript(t *testing.T, dir, bin string) string {
 	return writeFile(t, filepath.Join(dir, "claude-report.sh"), string(body), 0o755)
 }
 
-// recordingStub is a `wterm-web` that writes down what it was given instead of
+// recordingStub is a `tmux-web` that writes down what it was given instead of
 // touching a tmux server. Its own stdout stays empty on purpose: the wrapper's
 // stdout is the child's, so a stub that printed would make the stdout assertion
 // pass for the wrong reason -- or fail for one.
 func recordingStub(t *testing.T, dir, log string) string {
 	t.Helper()
-	return writeFile(t, filepath.Join(dir, "wterm-web"),
+	return writeFile(t, filepath.Join(dir, "tmux-web"),
 		"#!/bin/sh\n{ printf '%s\\n--stdin--\\n' \"$*\"; cat; } > "+shellQuote(log)+"\n", 0o755)
 }
 
@@ -346,7 +346,7 @@ func writeFile(t *testing.T, path, body string, mode os.FileMode) string {
 	return path
 }
 
-// buildWtermWeb builds the real binary once for the whole package, because the
+// buildTmuxWeb builds the real binary once for the whole package, because the
 // rows that matter most -- garbage on stdin, no arguments, outside tmux -- are
 // claims about the wrapper AND `report` together, and a stub would let a
 // wrapper that mangles argv pass them all.
@@ -357,21 +357,21 @@ var (
 	buildLog  string
 )
 
-func buildWtermWeb(t *testing.T) string {
+func buildTmuxWeb(t *testing.T) string {
 	t.Helper()
 	buildOnce.Do(func() {
-		dir, err := os.MkdirTemp("", "wterm-build")
+		dir, err := os.MkdirTemp("", "tmux-web-build")
 		if err != nil {
 			buildErr = err
 			return
 		}
-		builtBin = filepath.Join(dir, "wterm-web")
-		cmd := exec.Command("go", "build", "-o", builtBin, "../../cmd/wterm-web")
+		builtBin = filepath.Join(dir, "tmux-web")
+		cmd := exec.Command("go", "build", "-o", builtBin, "../../cmd/tmux-web")
 		out, err := cmd.CombinedOutput()
 		buildErr, buildLog = err, string(out)
 	})
 	if buildErr != nil {
-		t.Fatalf("building cmd/wterm-web: %v\n%s", buildErr, buildLog)
+		t.Fatalf("building cmd/tmux-web: %v\n%s", buildErr, buildLog)
 	}
 	return builtBin
 }
@@ -431,7 +431,7 @@ func hookCounts(matchers []hookMatcherJSON) []int {
 // is one shell process alive for the ~8 ms the report takes.
 func TestTheOneExitCodeThisWrapperCannotMake0(t *testing.T) {
 	dir := t.TempDir()
-	bin := writeFile(t, filepath.Join(dir, "wterm-web"), "#!/nonexistent/interp\n", 0o755)
+	bin := writeFile(t, filepath.Join(dir, "tmux-web"), "#!/nonexistent/interp\n", 0o755)
 	script := installScript(t, dir, bin)
 
 	cmd := exec.Command("/bin/sh", script, "Stop")

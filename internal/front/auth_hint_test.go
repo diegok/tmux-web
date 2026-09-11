@@ -17,7 +17,7 @@ func TestUnenrolledBrowserIsToldHowToEnroll(t *testing.T) {
 		t.Fatalf("GET / unauthenticated = %d, want 401", rec.Code)
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "wterm-web enroll") {
+	if !strings.Contains(body, "tmux-web enroll") {
 		t.Errorf("the 401 a new owner sees must name the enroll command, got %q", body)
 	}
 }
@@ -32,7 +32,7 @@ func TestApiAndSocketRefusalsStayTerse(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("GET %s = %d, want 401", target, rec.Code)
 		}
-		if strings.Contains(rec.Body.String(), "wterm-web enroll") {
+		if strings.Contains(rec.Body.String(), "tmux-web enroll") {
 			t.Errorf("%s should not answer a machine caller with prose: %q", target, rec.Body.String())
 		}
 	}

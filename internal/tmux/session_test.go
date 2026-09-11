@@ -15,7 +15,7 @@ func TestAttachArgs(t *testing.T) {
 	}
 	for _, want := range []string{
 		"new-session", "-t", "work", "-s", "_web-abc",
-		"destroy-unattached", "status", "mouse", "@wterm_web",
+		"destroy-unattached", "status", "mouse", "@tmux_web_owned",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q in %q", want, joined)

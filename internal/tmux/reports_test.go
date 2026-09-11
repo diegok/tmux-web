@@ -99,7 +99,7 @@ func TestAnUnsetOptionClearsTheMemory(t *testing.T) {
 	if _, ok := r.Observe("%1", FormatReport(StateIdle, now.UnixMilli(), ""), "claude", now); !ok {
 		t.Fatal("setup")
 	}
-	// `tmux set -p -u @wterm_agent` is the documented escape hatch for a stuck
+	// `tmux set -p -u @tmux_web_agent` is the documented escape hatch for a stuck
 	// report. If the daemon kept serving the last value it accepted, the escape
 	// hatch would do nothing.
 	if _, ok := r.Observe("%1", "", "claude", now.Add(time.Second)); ok {
@@ -428,8 +428,8 @@ func TestANewerValueClearsTheRejection(t *testing.T) {
 //
 // That is the honest cost of holding the rejection in daemon memory rather than
 // in tmux: bounded, one-shot, and only on a restart. The alternative -- writing
-// the rejection back into @wterm_agent so it survives with the report -- is
-// refused on a rule this design has held since "Not @wterm_label": the daemon
+// the rejection back into @tmux_web_agent so it survives with the report -- is
+// refused on a rule this design has held since "Not @tmux_web_label": the daemon
 // READS that option, it does not write it, and a reader that edits the channel
 // it reads cannot be reasoned about when two of them run.
 func TestAfterARestartAStandingIdleEntersTheWindow(t *testing.T) {
@@ -502,7 +502,7 @@ func TestARestingIdleNeedsNoPreviousReport(t *testing.T) {
 	// The restart. A Reports that has seen nothing reads the same standing
 	// value and answers identically, because the fact lives in tmux and not in
 	// here -- which is what makes it survive a daemon restart, a poller restart
-	// and a wterm-web upgrade.
+	// and a tmux-web upgrade.
 	r2 := NewReports()
 	got2, ok2 := r2.Observe("%1", raw, "claude", now)
 	if !ok2 || got2 != got {

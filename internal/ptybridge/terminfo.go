@@ -16,8 +16,17 @@ import (
 // xterm-256color to be installed either. The source is kept alongside it for
 // anyone who needs to rebuild it.
 //
-//go:embed terminfo/w/wterm-256color
+// The directory under terminfo/ is ncurses' first-letter bucket, so it is
+// tmux.TermName's own first letter -- derived below rather than written out,
+// because a rename of TermName that left a literal behind would compile and
+// then fail to find the entry at runtime.
+//
+//go:embed terminfo/t/tmux-web-256color
 var terminfoFS embed.FS
+
+// termBucket is ncurses' first-letter directory for tmux.TermName, and it is
+// the same bucket the //go:embed path above names.
+var termBucket = tmux.TermName[:1]
 
 var (
 	terminfoOnce sync.Once
@@ -33,8 +42,8 @@ var (
 // and quietly shadow a real one if the name ever collided.
 func TerminfoDir() (string, error) {
 	terminfoOnce.Do(func() {
-		dir := filepath.Join(os.TempDir(), fmt.Sprintf("wterm-web-terminfo-%d", os.Getuid()))
-		if err := os.MkdirAll(filepath.Join(dir, "w"), 0o700); err != nil {
+		dir := filepath.Join(os.TempDir(), fmt.Sprintf("tmux-web-terminfo-%d", os.Getuid()))
+		if err := os.MkdirAll(filepath.Join(dir, termBucket), 0o700); err != nil {
 			terminfoErr = err
 			return
 		}
@@ -45,8 +54,8 @@ func TerminfoDir() (string, error) {
 	}
 	// Rewritten rather than written once: /tmp is swept on some systems, and a
 	// missing entry makes tmux refuse to attach at all.
-	dst := filepath.Join(terminfoDir, "w", tmux.TermName)
-	want, err := terminfoFS.ReadFile("terminfo/w/" + tmux.TermName)
+	dst := filepath.Join(terminfoDir, termBucket, tmux.TermName)
+	want, err := terminfoFS.ReadFile("terminfo/" + termBucket + "/" + tmux.TermName)
 	if err != nil {
 		return "", err
 	}

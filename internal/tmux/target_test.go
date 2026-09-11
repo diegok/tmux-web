@@ -103,7 +103,7 @@ func TestValidateSessionName(t *testing.T) {
 		{"my project", true, "an inner space is harmless: arguments go to exec, never through a shell"},
 		{"a-b", true, "a dash that is not leading is an ordinary character"},
 		{"señor", true, "tmux stores non-ASCII names fine, and refusing them would be parochial"},
-		{"_web-notes", true, "app sessions are identified by the @wterm_web option and never by name, so this prefix stays the user's to take"},
+		{"_web-notes", true, "app sessions are identified by the @tmux_web_owned option and never by name, so this prefix stays the user's to take"},
 		{" lead", true, "a leading or trailing space is addressable and harmless; only an all-whitespace name is refused"},
 		{long, true, "exactly at the cap is allowed"},
 

@@ -1,17 +1,17 @@
-// Package integrations holds the files `wterm-web install-integration` writes
+// Package integrations holds the files `tmux-web install-integration` writes
 // into a user's agent configuration, and the little code that has to generate
 // rather than copy.
 //
 // It is deliberately thin, and the shape of it is the same for all three
 // agents: the integration transports an event name and the hook's own payload
-// to `wterm-web report`, and every judgement about what that event MEANS lives
-// in one Go table (cmd/wterm-web/events.go) instead of being spread across a
+// to `tmux-web report`, and every judgement about what that event MEANS lives
+// in one Go table (cmd/tmux-web/events.go) instead of being spread across a
 // TypeScript extension, a JavaScript plugin and a settings.json the user owns.
 // Three copies of a judgement are three copies that drift.
 //
 // This file is also the package's //go:embed host, and that is not an aside.
 // //go:embed reads only from the directory of the file that declares it and its
-// subtree: cmd/wterm-web CANNOT embed ../../internal/integrations, and a path
+// subtree: cmd/tmux-web CANNOT embed ../../internal/integrations, and a path
 // with ".." in it is a compile error rather than a lookup that fails at run
 // time. So the bytes the installer writes can only be reached from a .go file
 // sitting here, next to them, and this is it.
@@ -45,14 +45,14 @@ var Files = []string{"claude-report.sh", "opencode.js", "pi.ts", "queue.ts"}
 func File(name string) ([]byte, error) { return files.ReadFile(name) }
 
 // ClaudeBinPlaceholder is the token claude-report.sh ships with in place of the
-// wterm-web path, which is not known until install time.
+// tmux-web path, which is not known until install time.
 //
 // It sits INSIDE the quotes of the BIN assignment rather than in place of the
 // whole line, so that the file as shipped is still a valid shell script and
 // still fails the way the installed one does: the placeholder is not an
 // executable path, so the `[ -x "$BIN" ]` guard catches it and the script exits
 // 0 having said nothing.
-const ClaudeBinPlaceholder = "__WTERM_BIN__"
+const ClaudeBinPlaceholder = "__TMUX_WEB_BIN__"
 
 // ClaudeReportScript is claude-report.sh with BIN resolved to a real path.
 //
@@ -80,7 +80,7 @@ func ClaudeReportScript(bin string) []byte {
 //     avoiding. Claude's own subagent-launching tool is `Agent`, not `Task`,
 //     and its payloads carry `agent_id`; but agent_id is ABSENCE-coded, so the
 //     payload filter fails OPEN and not registering the hook is the only part
-//     of this that fails closed. cmd/wterm-web/events.go leaves SubagentStop
+//     of this that fails closed. cmd/tmux-web/events.go leaves SubagentStop
 //     out of its table as well, so even a hand-edited settings.json that
 //     registered it writes nothing.
 //   - PreToolUse is the hot one, and it is a TRADE rather than an obvious win.

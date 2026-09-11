@@ -192,7 +192,7 @@ func TestPeerCredentialsDescribeThePeerNotThisProcess(t *testing.T) {
 	defer ln.Close()
 
 	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperDialsAdminSocket$")
-	cmd.Env = append(os.Environ(), "WTERM_TEST_HELPER_SOCK="+sock)
+	cmd.Env = append(os.Environ(), "TMUX_WEB_TEST_HELPER_SOCK="+sock)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestPeerCredentialsDescribeThePeerNotThisProcess(t *testing.T) {
 // TestHelperDialsAdminSocket is not a test: it is the child process
 // TestPeerCredentialsDescribeThePeerNotThisProcess reads credentials from.
 func TestHelperDialsAdminSocket(t *testing.T) {
-	sock := os.Getenv("WTERM_TEST_HELPER_SOCK")
+	sock := os.Getenv("TMUX_WEB_TEST_HELPER_SOCK")
 	if sock == "" {
 		t.Skip("helper process for TestPeerCredentialsDescribeThePeerNotThisProcess")
 	}
@@ -433,7 +433,7 @@ func TestAdminSocketPathPrefersTheRuntimeDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "/run/user/4242/wterm-web.sock"; got != want {
+	if want := "/run/user/4242/tmux-web.sock"; got != want {
 		t.Fatalf("AdminSocketPath = %q, want %q", got, want)
 	}
 }
@@ -454,7 +454,7 @@ func TestAdminSocketPathIgnoresARelativeRuntimeDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(mine, "wterm-web.sock"); got != want {
+	if want := filepath.Join(mine, "tmux-web.sock"); got != want {
 		t.Fatalf("AdminSocketPath = %q, want %q", got, want)
 	}
 }
@@ -472,7 +472,7 @@ func TestAdminSocketPathFallsBackToThePrivateStateDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(state, "wterm-web", "wterm-web.sock"); got != want {
+	if want := filepath.Join(state, "tmux-web", "tmux-web.sock"); got != want {
 		t.Fatalf("AdminSocketPath = %q, want %q", got, want)
 	}
 
@@ -484,7 +484,7 @@ func TestAdminSocketPathFallsBackToThePrivateStateDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(home, ".local", "state", "wterm-web", "wterm-web.sock"); got != want {
+	if want := filepath.Join(home, ".local", "state", "tmux-web", "tmux-web.sock"); got != want {
 		t.Fatalf("AdminSocketPath = %q, want %q", got, want)
 	}
 }
@@ -507,7 +507,7 @@ func TestAdminSocketPathSkipsAnUnusableRuntimeDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(state, "wterm-web", "wterm-web.sock"); got != want {
+	if want := filepath.Join(state, "tmux-web", "tmux-web.sock"); got != want {
 		t.Fatalf("AdminSocketPath = %q, want %q", got, want)
 	}
 }
@@ -536,7 +536,7 @@ func TestAdminSocketPathSkipsARuntimeDirOwnedByAnotherUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := filepath.Join(state, "wterm-web", "wterm-web.sock"); got != want {
+	if want := filepath.Join(state, "tmux-web", "tmux-web.sock"); got != want {
 		t.Fatalf("AdminSocketPath = %q, want %q: another user's directory must not hold our socket", got, want)
 	}
 }

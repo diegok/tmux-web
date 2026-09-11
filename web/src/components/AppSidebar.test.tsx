@@ -89,7 +89,7 @@ function fromRows(rows: SnapshotRow[], over: Partial<SnapshotState> = {}): Snaps
  */
 function withSeen<T>(seen: Record<string, number>, fn: () => T): T {
   const items: Record<string, string> = {
-    'wterm-web:seen': JSON.stringify(seen),
+    'tmux-web:seen': JSON.stringify(seen),
   }
   const fake = {
     getItem: (k: string) => items[k] ?? null,

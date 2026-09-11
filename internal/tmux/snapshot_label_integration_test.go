@@ -12,7 +12,7 @@ import (
 	"github.com/diegok/tmux-web/internal/tmux/testutil"
 )
 
-// A pane must survive any @wterm_label, whatever bytes are in it.
+// A pane must survive any @tmux_web_label, whatever bytes are in it.
 //
 // This runs against a real server because the bug it guards only exists
 // because of what real tmux does with real bytes: tmux normalises a pane title

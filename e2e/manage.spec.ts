@@ -30,21 +30,21 @@ import {
   test,
   windowRow,
 } from './harness'
-import type { Wterm } from './harness'
+import type { TmuxWeb } from './harness'
 import type { Page } from '@playwright/test'
 
 /** `tmux list-sessions`, tolerating there being no server at all. */
-function sessions(wterm: Wterm): string[] {
+function sessions(tmuxWeb: TmuxWeb): string[] {
   try {
-    return wterm.tmux('list-sessions', '-F', '#{session_name}').split('\n')
+    return tmuxWeb.tmux('list-sessions', '-F', '#{session_name}').split('\n')
   } catch {
     return []
   }
 }
 
 /** The windows of the base session, by name. */
-function windows(wterm: Wterm): string[] {
-  return wterm.tmux('list-windows', '-t', BASE_SESSION, '-F', '#{window_name}').split('\n')
+function windows(tmuxWeb: TmuxWeb): string[] {
+  return tmuxWeb.tmux('list-windows', '-t', BASE_SESSION, '-F', '#{window_name}').split('\n')
 }
 
 /** Open a row's context menu, over its text rather than its padding. */
@@ -59,9 +59,9 @@ function dialog(page: Page) {
 
 test('renaming a session from the browser renames it in tmux and in the sidebar', async ({
   page,
-  wterm,
+  tmuxWeb,
 }) => {
-  await enroll(page, wterm, 'laptop')
+  await enroll(page, tmuxWeb, 'laptop')
 
   // Grouped, which is the whole point of renaming *this* session: the tab is
   // attached through a throwaway session in `e2e`'s group, and tmux freezes
@@ -69,7 +69,7 @@ test('renaming a session from the browser renames it in tmux and in the sidebar'
   // session the group field is already the live name, and a sidebar keyed and
   // labelled on it would pass this test while renaming looked like it did
   // nothing for every real user.
-  expect(wterm.tmux('list-sessions', '-F', '#{session_name} #{session_group}').split('\n')).toEqual(
+  expect(tmuxWeb.tmux('list-sessions', '-F', '#{session_name} #{session_group}').split('\n')).toEqual(
     expect.arrayContaining([expect.stringMatching(/^_web-\w+ e2e$/)]),
   )
 
@@ -84,10 +84,10 @@ test('renaming a session from the browser renames it in tmux and in the sidebar'
   await dialog(page).getByRole('button', { name: 'Rename' }).click()
 
   // tmux, first and for real.
-  await expect.poll(() => sessions(wterm)).toContain('renamed')
+  await expect.poll(() => sessions(tmuxWeb)).toContain('renamed')
   // And tmux's group is still the old name, so the sidebar below can only have
   // got "renamed" from the live session name.
-  expect(wterm.tmux('list-sessions', '-F', '#{session_name} #{session_group}')).toContain(
+  expect(tmuxWeb.tmux('list-sessions', '-F', '#{session_name} #{session_group}')).toContain(
     `renamed ${BASE_SESSION}`,
   )
   await expect(sessionLabel(page, 'renamed')).toBeVisible()
@@ -99,19 +99,19 @@ test('renaming a session from the browser renames it in tmux and in the sidebar'
   await focusTerminal(page)
   await page.keyboard.type("printf 'still-%s\\n' attached\n")
   await expect
-    .poll(() => wterm.tmux('capture-pane', '-p', '-t', `renamed:${BASE_WINDOW}`))
+    .poll(() => tmuxWeb.tmux('capture-pane', '-p', '-t', `renamed:${BASE_WINDOW}`))
     .toContain('still-attached')
 })
 
 test('a new window from the +, a split from the palette, a zoom from the menu', async ({
   page,
-  wterm,
+  tmuxWeb,
 }) => {
-  await enroll(page, wterm, 'laptop')
+  await enroll(page, tmuxWeb, 'laptop')
 
   // The session row's `+`. tmux names the window itself.
   await page.getByRole('button', { name: `New window in "${BASE_SESSION}"` }).click()
-  await expect.poll(() => windows(wterm)).toHaveLength(2)
+  await expect.poll(() => windows(tmuxWeb)).toHaveLength(2)
 
   const row = page.getByRole('button', { name: /^1: / })
   await expect(row).toBeVisible()
@@ -125,7 +125,7 @@ test('a new window from the +, a split from the palette, a zoom from the menu', 
   await page.getByRole('button', { name: /Jump to/ }).click()
   await page.getByRole('option', { name: 'Split right' }).click()
   await expect
-    .poll(() => wterm.tmux('list-panes', '-t', `${BASE_SESSION}:1`, '-F', '#{pane_id}').split('\n'))
+    .poll(() => tmuxWeb.tmux('list-panes', '-t', `${BASE_SESSION}:1`, '-F', '#{pane_id}').split('\n'))
     .toHaveLength(2)
   // It closed, which is how a palette says the command went through.
   await expect(page.locator('[data-slot="command-input"]')).toHaveCount(0)
@@ -138,18 +138,18 @@ test('a new window from the +, a split from the palette, a zoom from the menu', 
   // so the same test on the window before the split would pass without zooming
   // anything.
   const zoomed = () =>
-    wterm.tmux('display-message', '-p', '-t', `${BASE_SESSION}:1`, '#{window_zoomed_flag}')
+    tmuxWeb.tmux('display-message', '-p', '-t', `${BASE_SESSION}:1`, '#{window_zoomed_flag}')
   expect(zoomed()).toBe('0')
-  const label = `1: ${wterm.tmux('display-message', '-p', '-t', `${BASE_SESSION}:1`, '#{window_name}')}`
+  const label = `1: ${tmuxWeb.tmux('display-message', '-p', '-t', `${BASE_SESSION}:1`, '#{window_name}')}`
   await rightClick(row, label)
   await page.getByRole('menuitem', { name: 'Zoom window' }).click()
   await expect.poll(zoomed).toBe('1')
 })
 
-test('the kill dialog does nothing until it is armed', async ({ page, wterm }) => {
-  await enroll(page, wterm, 'laptop')
-  wterm.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'doomed', 'sh')
-  wterm.tmux('split-window', '-d', '-t', `${BASE_SESSION}:doomed`, 'sh')
+test('the kill dialog does nothing until it is armed', async ({ page, tmuxWeb }) => {
+  await enroll(page, tmuxWeb, 'laptop')
+  tmuxWeb.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'doomed', 'sh')
+  tmuxWeb.tmux('split-window', '-d', '-t', `${BASE_SESSION}:doomed`, 'sh')
 
   const row = windowRow(page, 'doomed')
   await expect(row).toBeVisible()
@@ -169,29 +169,29 @@ test('the kill dialog does nothing until it is armed', async ({ page, wterm }) =
   await page.waitForTimeout(1_000)
   // The assertion that means something: the window is still there. A red button
   // that only *looked* inert would have taken it by now.
-  expect(windows(wterm)).toContain('doomed')
+  expect(windows(tmuxWeb)).toContain('doomed')
   await expect(dialog(page)).toBeVisible()
 
   await dialog(page).getByRole('checkbox').check()
   await expect(red).toBeEnabled()
   await red.click()
 
-  await expect.poll(() => windows(wterm)).not.toContain('doomed')
+  await expect.poll(() => windows(tmuxWeb)).not.toContain('doomed')
   await expect(row).toHaveCount(0)
   // The tab is attached to this session, and it survives: the kill took the
   // window it named and nothing else.
   await expect(pill(page)).toHaveCount(0)
 })
 
-test('with no tmux server at all, the browser starts a session', async ({ page, wterm }) => {
-  await enroll(page, wterm, 'laptop')
+test('with no tmux server at all, the browser starts a session', async ({ page, tmuxWeb }) => {
+  await enroll(page, tmuxWeb, 'laptop')
 
   // The only session there is, so this takes the whole tmux server with it.
   // That is the state the design points at -- a phone, no shell on this host,
   // an empty server -- and the one v1 could only answer with "go and run tmux
   // over SSH".
-  wterm.tmux('kill-server')
-  await expect.poll(() => sessions(wterm)).toEqual([])
+  tmuxWeb.tmux('kill-server')
+  await expect.poll(() => sessions(tmuxWeb)).toEqual([])
 
   // The empty state's button, in the main area rather than the sidebar: this is
   // `App`'s own `onNewSession`, which no test in the vitest suite reaches.
@@ -202,7 +202,7 @@ test('with no tmux server at all, the browser starts a session', async ({ page, 
   await dialog(page).getByLabel('Name').fill('fresh')
   await dialog(page).getByRole('button', { name: 'Create' }).click()
 
-  await expect.poll(() => sessions(wterm)).toEqual(['fresh'])
+  await expect.poll(() => sessions(tmuxWeb)).toEqual(['fresh'])
   await expect(sessionLabel(page, 'fresh')).toBeVisible()
 
   // Attached to it, not merely showing it. The keystroke is the proof: the tab
@@ -213,5 +213,5 @@ test('with no tmux server at all, the browser starts a session', async ({ page, 
   await expect(breadcrumb(page)).toContainText('fresh')
   await focusTerminal(page)
   await page.keyboard.type("printf 'e2e-%s\\n' fresh\n")
-  await expect.poll(() => wterm.tmux('capture-pane', '-p', '-t', 'fresh:0')).toContain('e2e-fresh')
+  await expect.poll(() => tmuxWeb.tmux('capture-pane', '-p', '-t', 'fresh:0')).toContain('e2e-fresh')
 })

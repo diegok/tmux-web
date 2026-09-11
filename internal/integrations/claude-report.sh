@@ -1,11 +1,11 @@
 #!/bin/sh
-# managed by tmux-web (wterm-schema: 1)
+# managed by tmux-web (tmux-web-schema: 1)
 # Reinstalling or updating the integration overwrites this file.
-# It does one thing: `tmux set-option -p @wterm_agent`. Nothing else.
+# It does one thing: `tmux set-option -p @tmux_web_agent`. Nothing else.
 #
 # WHAT IS DELIBERATELY NOT HERE. No state name, no mapping from an event to a
 # state, no activity text, no sanitizer, no filter. Claude Code hands a hook its
-# event name and its own JSON, and both go straight through to `wterm-web
+# event name and its own JSON, and both go straight through to `tmux-web
 # report`, which owns the one table the three integrations share. If you find
 # yourself writing the word "working" or "idle" in this file, something has gone
 # wrong.
@@ -43,7 +43,7 @@
 # a malformed command line; this file keeps it on the one path that is its own.
 # Nothing here writes to stdout either -- a PreToolUse hook's stdout is READ,
 # and a JSON permissionDecision on it denies the tool call.
-BIN='__WTERM_BIN__'
+BIN='__TMUX_WEB_BIN__'
 
 # Moved, uninstalled, never built, or shipped and not yet installed: say
 # nothing. Without this guard the shell's own "not found" reaches the hook's

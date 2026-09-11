@@ -477,7 +477,7 @@ describe('position', () => {
 
     expect(term.select('%7')).toBe(true)
     expect(types(MockWebSocket.last)).toEqual(['select'])
-    expect(storage.map.get('wterm-web:pane:work')).toBe('%7')
+    expect(storage.map.get('tmux-web:pane:work')).toBe('%7')
     expect(term.status.pane).toBe('%7')
   })
 
@@ -494,7 +494,7 @@ describe('position', () => {
   })
 
   it('restores the remembered pane on a fresh session object', () => {
-    const storage = memoryStorage({ 'wterm-web:pane:work': '%4' })
+    const storage = memoryStorage({ 'tmux-web:pane:work': '%4' })
     const { term } = makeSession({ storage })
     expect(term.status.pane).toBe('%4')
     term.start()
@@ -503,7 +503,7 @@ describe('position', () => {
   })
 
   it('ignores a stored value that is not a pane id', () => {
-    const storage = memoryStorage({ 'wterm-web:pane:work': 'work:1.0' })
+    const storage = memoryStorage({ 'tmux-web:pane:work': 'work:1.0' })
     const { term } = makeSession({ storage })
     expect(term.status.pane).toBeNull()
     term.start()

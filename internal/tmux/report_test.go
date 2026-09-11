@@ -231,8 +231,8 @@ func TestFormatReport(t *testing.T) {
 // that parses successfully with another pane's values in it.
 func TestReportFormat(t *testing.T) {
 	if strings.Contains(Format, AgentOption) {
-		t.Fatal("@wterm_agent must not be in the snapshot format string: the last " +
-			"slot is @wterm_label's, and any other slot shifts the record")
+		t.Fatal("@tmux_web_agent must not be in the snapshot format string: the last " +
+			"slot is @tmux_web_label's, and any other slot shifts the record")
 	}
 	// The option is the last and only variable field of its own format, so it
 	// gets the same three layers the label has.

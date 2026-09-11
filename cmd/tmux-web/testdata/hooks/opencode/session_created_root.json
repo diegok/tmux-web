@@ -1,0 +1,36 @@
+{
+  "id": "evt_08eca0337001y3MTikfdtdtf4P",
+  "type": "session.created",
+  "properties": {
+    "sessionID": "ses_f7135fcc9ffebuJVObk3PCMWN8",
+    "info": {
+      "id": "ses_f7135fcc9ffebuJVObk3PCMWN8",
+      "slug": "silent-rocket",
+      "version": "1.18.30",
+      "projectID": "global",
+      "directory": "/tmp/tmux-web-capture/oc/proj",
+      "path": "tmp/tmux-web-capture/oc/proj",
+      "title": "New session - 2026-09-11T04:46:38.902Z",
+      "agent": "build",
+      "model": {
+        "id": "example-model",
+        "providerID": "example-provider",
+        "variant": "high"
+      },
+      "cost": 0,
+      "tokens": {
+        "input": 0,
+        "output": 0,
+        "reasoning": 0,
+        "cache": {
+          "read": 0,
+          "write": 0
+        }
+      },
+      "time": {
+        "created": 1789101998902,
+        "updated": 1789101998902
+      }
+    }
+  }
+}

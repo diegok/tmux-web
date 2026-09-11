@@ -1,0 +1,20 @@
+{
+  "session_id": "1f498509-8cf5-4b81-9c9b-dd638b5746b1",
+  "transcript_path": "/home/user/.claude/projects/-tmp-tmux-web-capture-cc-proj/1f498509-8cf5-4b81-9c9b-dd638b5746b1.jsonl",
+  "cwd": "/tmp/tmux-web-capture/cc/proj",
+  "scratchpad_dir": "/tmp/tmux-web-capture/-tmp-tmux-web-capture-cc-proj/1f498509-8cf5-4b81-9c9b-dd638b5746b1/scratchpad",
+  "prompt_id": "39b047c0-c8a8-42b4-80a5-d5e0e7dbb85d",
+  "permission_mode": "default",
+  "agent_id": "a18dabd7c4f03b2f2",
+  "agent_type": "Explore",
+  "effort": {
+    "level": "high"
+  },
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "wc -l /tmp/tmux-web-capture/cc/proj/sample.txt",
+    "description": "Count lines in sample.txt"
+  },
+  "tool_use_id": "toolu_01DF1E6VjwEMpmSjkaExzDvZ"
+}

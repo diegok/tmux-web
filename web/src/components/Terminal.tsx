@@ -25,7 +25,7 @@
  *   - Reconnecting stops when the base session is *gone* rather than merely
  *     unreachable. v2 lets the owner kill the session their own tab is attached
  *     to -- killing a base session's last window destroys the whole group, the
- *     app's `@wterm_web` member included -- and against a session that no
+ *     app's `@tmux_web_owned` member included -- and against a session that no
  *     longer exists the backoff would retry until the tab was closed. The
  *     distinction cannot be read off the socket (see `probeSession`), so it is
  *     asked of `/api/snapshot`, and only a fresh snapshot that has lost the
@@ -224,7 +224,7 @@ export function isPaneId(s: string): boolean {
 
 /** Where this tab remembers the pane it was looking at, per base session. */
 export function paneStorageKey(session: string): string {
-  return `wterm-web:pane:${session}`
+  return `tmux-web:pane:${session}`
 }
 
 /**

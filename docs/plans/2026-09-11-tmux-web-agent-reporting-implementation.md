@@ -2437,6 +2437,14 @@ git commit -m "feat: check a reported blocked against every registered screen fo
 
 ### Task 9: What "dropped" means, against a transport that never forgets
 
+> **Carried from Task 5's implementer, unverified and worth settling here.** `refresh` in `poller.go` resets
+> `p.classifier` on a tmux-server generation change, but does **not** reset `p.reports`. That is probably safe
+> by derivation: a restarted server's panes carry no options, so the raw value is `""`, `ParseReport` fails and
+> `Observe` deletes the entry. But it is a derivation nobody has tested, and this task is the one that decides
+> what daemon-side report memory means across a restart -- the rejection slot has exactly the same question.
+> Either assert it (a generation change with a standing report, and the entry gone afterwards) or reset
+> `p.reports` alongside the classifier and say why. Do not leave it as a derivation a reader has to redo.
+
 **Files:**
 - Modify: `internal/tmux/reports.go`, `internal/tmux/reports_test.go`
 

@@ -291,11 +291,15 @@ func TestSubagentFilters(t *testing.T) {
 			{"claude/pre_tool_use_bash.json", "PreToolUse", tmux.StateWorking},
 			{"claude/notification_permission_prompt.json", "Notification", tmux.StateBlocked},
 			{"claude/stop.json", "Stop", tmux.StateIdle},
-			// A Stop can fire with work still running under the session:
-			// background_tasks is not empty here. It does not change what we
-			// report -- the root session is waiting on the user, which is
-			// exactly what idle means and exactly what the sidebar is asking.
-			{"claude/stop_subagent_running.json", "Stop", tmux.StateIdle},
+			// claude/stop_subagent_running.json used to be here, reporting
+			// idle, and it is deliberately NOT here now: that Stop reports
+			// nothing, because background_tasks says a subagent is still
+			// running under the root's turn. THE FILTER UNDER TEST STILL
+			// ACCEPTS IT -- there is no agent_id anywhere in that payload and
+			// TestTheFilterOverEveryRecordedPayload asserts it passes -- so
+			// keeping it in this list would make this subtest pass or fail on
+			// a decision that has nothing to do with the subagent filter. See
+			// TestClaudeStopWithWorkStillRunningUnderIt.
 		} {
 			rep, writes := reportOne(t, []string{"--agent", "claude", "--event", tc.event},
 				readFixture(t, tc.fixture))
@@ -311,11 +315,12 @@ func TestSubagentFilters(t *testing.T) {
 		// have parsed and must be the shape a hook sends, so a wholesale
 		// schema change is caught rather than read as a root event.
 		//
-		// Stop is the event to test it on, because Stop is undiscriminated:
-		// before this filter existed it wrote idle on any stdin at all,
-		// including none, which is the reading "a turn ended, whatever else is
-		// on stdin". That reading is what an absence-coded filter cannot
-		// afford.
+		// Stop is the event to test it on, because before this filter existed
+		// it wrote idle on any stdin at all, including none -- the reading "a
+		// turn ended, whatever else is on stdin", which is what an
+		// absence-coded filter cannot afford. Stop reads its payload for
+		// background_tasks now as well, but this gate runs first and these
+		// payloads never reach it.
 		for _, stdin := range []string{
 			"",
 			"not json at all",

@@ -332,10 +332,16 @@ var eventFixtures = []struct {
 	// and then to the command.
 	{"claude/notification_idle_prompt.json", "claude", "Notification", tmux.StateIdle, ""},
 	{"claude/stop.json", "claude", "Stop", tmux.StateIdle, ""},
-	// background_tasks is not empty here: a Stop can fire with work still
-	// running under the session. It does not change what we report -- the root
-	// session is waiting on the user, which is what idle means here.
-	{"claude/stop_subagent_running.json", "claude", "Stop", tmux.StateIdle, ""},
+	// The SAME hook, the same session, no agent_id anywhere in it -- this
+	// really is the root's Stop -- and it must write NOTHING. background_tasks
+	// holds one {type:"subagent", status:"running"} entry, and that entry is
+	// the only structural difference between this payload and stop.json above.
+	// MEASURED twice on Claude Code 2.1.267: the root Stop fires while a
+	// subagent it launched is still working, and a new turn starts when that
+	// subagent returns -- 13.2 s and 6.2 s of reported idle in the middle of
+	// work. See claudeStops for why silence rather than working, and for what
+	// the silence costs.
+	{"claude/stop_subagent_running.json", "claude", "Stop", "", ""},
 	// Structural, not a filter: SubagentStop is a different hook and the
 	// installer does not register it, so claude's Stop is root-only against
 	// the Task-tool subagent class. If it is ever passed anyway -- by hand, or
@@ -416,9 +422,11 @@ var eventFixtures = []struct {
 	{"pi/agent_settled.json", "pi", "agent_settled", tmux.StateIdle, ""},
 }
 
-// An unparseable payload is a silent no-op -- on a discriminated event because
-// its discriminator reads as "", and since Task 15 on an undiscriminated one
-// too.
+// An unparseable payload is a silent no-op. Two independent reasons, and the
+// rows below are here for the second: a discriminator reads "" out of a payload
+// it cannot parse and "" is on no whitelist, and since Task 15 the payload gate
+// refuses the payload BEFORE any discriminator runs, which is what also covers
+// the events that have none (UserPromptSubmit, PreToolUse).
 //
 // TASK 15 CHANGED THE SECOND HALF OF THIS TEST, and the change is deliberate
 // rather than incidental. Before it, "Stop means the turn ended whatever else
@@ -440,17 +448,17 @@ func TestAMalformedPayload(t *testing.T) {
 		{"a discriminated event with junk on stdin", "Notification", "not json at all", ""},
 		{"a discriminated event with no stdin", "Notification", "", ""},
 		{"a discriminated event with the wrong shape", "Notification", `{"notification_type":{"a":1}}`, ""},
-		{"an undiscriminated event with junk on stdin", "Stop", "not json at all", ""},
-		{"an undiscriminated event with no stdin", "Stop", "", ""},
+		{"the turn end with junk on stdin", "Stop", "not json at all", ""},
+		{"the turn end with no stdin", "Stop", "", ""},
 		// A JSON object is what every hook on all three agents sends. A
 		// scalar, an array or a truncated object is not one, and each is a
 		// different way for a wrapper or a schema change to go wrong.
-		{"an undiscriminated event with an array on stdin", "Stop", `["Stop"]`, ""},
-		{"an undiscriminated event with a truncated object", "Stop", `{"hook_event_name":"Stop"`, ""},
+		{"the turn end with an array on stdin", "Stop", `["Stop"]`, ""},
+		{"the turn end with a truncated object", "Stop", `{"hook_event_name":"Stop"`, ""},
 		// The empty object still reports: it parsed, it is the right shape,
 		// and there is no agent_id in it. Without this row the test above is
 		// satisfied by a mutant that refuses every payload.
-		{"an undiscriminated event with an empty object", "Stop", `{}`, tmux.StateIdle},
+		{"the turn end with an empty object", "Stop", `{}`, tmux.StateIdle},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rep, writes := reportOne(t, []string{"--agent", "claude", "--event", tc.event}, tc.stdin)
@@ -460,6 +468,105 @@ func TestAMalformedPayload(t *testing.T) {
 			}
 			if tc.want != "" && got != tc.want {
 				t.Fatalf("wrote %q in %d command(s), want %q", got, writes, tc.want)
+			}
+		})
+	}
+}
+
+// claude's root Stop, and what background_tasks does to it.
+//
+// MEASURED TWICE against a real Claude Code 2.1.267: the ROOT's Stop fires
+// while a subagent it launched is still working, and a new turn starts when
+// that subagent returns. 13.2 s and 6.2 s of reported idle in the middle of
+// work, on two separate runs. It is NOT the nested-CLI hole and agent_id does
+// not filter it -- the payload really is the root's -- so the fix has to come
+// out of the payload's own contents, and `background_tasks` is the only
+// structural difference between the two captured Stops.
+//
+// Driven through the whole subcommand rather than through lookupMapping,
+// because the claim is "NOTHING IS WRITTEN AND NOTHING IS READ". A test that
+// only compared states would pass against a mutant that reported working, and
+// one that only counted writes would pass against a mutant that made this a
+// re-assertion -- which would still write idle over the standing working of
+// the turn that is still running.
+//
+// The fixtures carry the two real payloads; every row here is SYNTHETIC, and
+// says so, because what it pins down is the decision and not the capture: only
+// type "subagent" and only status "running" were ever observed, and the rows
+// for the other six documented types and for a finished task are this table's
+// own fail directions, not evidence about Claude Code.
+func TestClaudeStopWithWorkStillRunningUnderIt(t *testing.T) {
+	for _, tc := range []struct {
+		name, tasks, want string
+	}{
+		// The two shapes the capture really contains.
+		{"no background_tasks key at all", "", tmux.StateIdle},
+		{"the empty array of the plain stop", `,"background_tasks":[]`, tmux.StateIdle},
+		{"one running subagent, as captured", `,"background_tasks":[{"id":"a9004f2faabee84ce",` +
+			`"type":"subagent","status":"running","description":"Write two-line poem","agent_type":"Explore"}]`, ""},
+		// SYNTHETIC from here down.
+		//
+		// The scan is over the whole array, not its first entry: a turn that
+		// backgrounded a shell and then launched a subagent has both.
+		{"a shell first and a running subagent second",
+			`,"background_tasks":[{"type":"shell","status":"running"},{"type":"subagent","status":"running"}]`, ""},
+		// The six documented types nobody has observed are NOT filtered, and
+		// that is a decision. A backgrounded shell is exactly the case where
+		// the root really is idle -- the user has the prompt back and the turn
+		// is over -- so suppressing there costs a badge on an ordinary turn.
+		// What was measured is narrower than "work is running": a returning
+		// SUBAGENT resumes the root's turn.
+		{"a running shell alone", `,"background_tasks":[{"type":"shell","status":"running"}]`, tmux.StateIdle},
+		{"a running monitor alone", `,"background_tasks":[{"type":"monitor","status":"running"}]`, tmux.StateIdle},
+		{"a type nobody has documented yet",
+			`,"background_tasks":[{"type":"a_type_nobody_has_documented_yet","status":"running"}]`, tmux.StateIdle},
+		// status must say running, and this row is why. No capture shows what
+		// a FINISHED background task reads -- subagent_stop.json still says
+		// "running" at the subagent's own SubagentStop -- so if a completed
+		// one lingers in the array, matching the type alone would mean one
+		// subagent anywhere in a session silences every Stop for the rest of
+		// it. Permanent silent badge loss is worse than the 13 seconds this
+		// row exists to fix.
+		{"a subagent that has completed", `,"background_tasks":[{"type":"subagent","status":"completed"}]`, tmux.StateIdle},
+		{"a subagent with no status at all", `,"background_tasks":[{"type":"subagent"}]`, tmux.StateIdle},
+		{"a subagent whose status is spelled some other way",
+			`,"background_tasks":[{"type":"subagent","status":"in_progress"}]`, tmux.StateIdle},
+		// The fail direction for a field this cannot read, and it is the one
+		// that matters most: a rename or a re-shape must degrade to today's
+		// behaviour -- a bounded false idle -- and NOT to silencing every Stop
+		// on every pane forever with every other test still passing.
+		{"background_tasks as an object", `,"background_tasks":{"a9004f2faabee84ce":{"type":"subagent","status":"running"}}`,
+			tmux.StateIdle},
+		{"background_tasks as null", `,"background_tasks":null`, tmux.StateIdle},
+		{"background_tasks as a string", `,"background_tasks":"subagent"`, tmux.StateIdle},
+		{"an entry that is not an object", `,"background_tasks":["subagent"]`, tmux.StateIdle},
+		// Case is not folded, here or in any other whitelist in this file.
+		{"a SUBAGENT in capitals", `,"background_tasks":[{"type":"SUBAGENT","status":"RUNNING"}]`, tmux.StateIdle},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdin := `{"hook_event_name":"Stop","stop_hook_active":false` + tc.tasks + `}`
+			r := &recordingTmux{standing: "1;working;1789075200000"}
+			runReportWith(t, r, []string{"--agent", "claude", "--event", "Stop"}, withStdin(stdin))
+			if tc.want == "" {
+				if r.sets != 0 {
+					t.Fatalf("wrote %q while a subagent was still running. The root turn is not over: "+
+						"idle here is a false done badge on an agent that is working, and working -- "+
+						"the other defensible answer -- is the one this table did not take, because it "+
+						"overwrites the activity line with nothing. See claudeStops", r.lastSet())
+				}
+				// Not a re-assertion either. There is no standing state that
+				// could make a resting claim true here, so there is nothing
+				// to read and no fork to spend reading it.
+				if r.shows != 0 {
+					t.Errorf("read the standing option %d times, want 0: this is an ignored event, not a repair", r.shows)
+				}
+				return
+			}
+			if r.sets != 1 {
+				t.Fatalf("made %d writes, want 1: this Stop is the end of the turn and it has to badge", r.sets)
+			}
+			if got := wroteState(t, r); got != tc.want {
+				t.Fatalf("wrote %q, want %q", got, tc.want)
 			}
 		})
 	}

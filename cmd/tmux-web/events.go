@@ -217,14 +217,20 @@ var eventRules = map[string]map[string]eventRule{
 			kind: kindEdge, text: textClaudeTool}},
 		// Not a state on its own. See claudeNotifications.
 		"Notification": {discriminate: claudeNotificationType, byValue: claudeNotifications},
-		// The turn end.
-		"Stop": {mapping: mapping{name: "claude/Stop", state: tmux.StateIdle, kind: kindEdge}},
+		// The turn end, and not always. See claudeStops: a root Stop fires
+		// while a subagent it launched is still working.
+		"Stop": {discriminate: claudeStopSubagentRunning, byValue: claudeStops},
 		// SubagentStop is deliberately absent, and its absence is structural
 		// rather than a filter: the installer does not register that hook, so
 		// Stop is root-only against the Task-tool subagent class. Leaving the
 		// table without an entry means that even a hand-edited settings.json
 		// that did register it cannot write idle onto a pane whose root agent
 		// is still working.
+		//
+		// What that does NOT buy, and claudeStops does: the ROOT's own Stop
+		// fires while a subagent is still running. Not registering
+		// SubagentStop keeps the CHILD from reporting; it says nothing about
+		// the parent reporting too early.
 	},
 	"opencode": {
 		// The turn start, with the prompt text on it.
@@ -382,6 +388,107 @@ var claudeNotifications = map[string]mapping{
 	// Reported as idle it is a false done badge on an agent that is still
 	// working, which is v2's central failure arriving through another door.
 	"agent_completed": {name: "claude/Notification(agent_completed)"},
+}
+
+// claudeStops is what a root Stop means, and it is the one event in this table
+// whose own name is not the whole answer.
+//
+// MEASURED TWICE against a real Claude Code 2.1.267: the ROOT's Stop fires
+// while a subagent it launched is still working, and a new turn starts when
+// that subagent returns. 13.2 s and 6.2 s of reported idle IN THE MIDDLE OF
+// WORK, on two separate runs.
+//
+// This is not the nested-CLI hole and agent_id does not filter it: there is no
+// agent_id anywhere in the payload, because the payload really is the root's,
+// and the root filter waves it through correctly. What separates the two
+// captured Stops is `background_tasks` and nothing else -- stop.json carries
+// `[]`, stop_subagent_running.json carries one {id, type:"subagent",
+// status:"running", description, agent_type}, and every other difference
+// between the two files is the turn's own content.
+//
+// WHAT IT REPORTS INSTEAD: NOTHING. Not working. The pane keeps the working
+// report this turn already put on it, which expires on its own 60 s after the
+// last root tool call and then falls back to the screen classifier -- A LATE
+// TRANSITION RATHER THAN A FALSE RESTING STATE, which is the direction this
+// project takes everywhere else. Reporting working is defensible too and would
+// refresh the keepalive, but it would overwrite the activity line the Agent
+// tool call put there with nothing, and it would assert a state for a moment
+// when the root model genuinely is not generating. Silence claims nothing and
+// keeps the line.
+//
+// WHAT THE SILENCE COSTS, in the case it does not cover: a turn whose LAST act
+// is the subagent and where no further event ever arrives -- the subagent is
+// killed, the user presses escape, claude exits. That turn's finish badge is
+// lost: the pane holds working to the 60-second expiry and then lives where a
+// pane with no integration at all lives, on the classifier. One badge on an
+// abandoned turn, against 13 seconds of a false DONE badge on every turn that
+// ends with a subagent still running.
+//
+// BOUND THE CLAIM, so nobody simplifies this away for being unreproducible:
+// WITH A BROWSER ATTACHED, evidence rule 3 already drops that reported idle,
+// because the screen is still churning under the subagent -- so someone
+// watching the app sees no bad badge and cannot reproduce this at all. The
+// damage is unbounded only when NOBODY IS WATCHING, which is the case this
+// whole feature exists for. Failing to reproduce it with the app open is not
+// evidence that it is not there.
+var claudeStops = map[string]mapping{
+	// The ordinary turn end, and still an edge: the turn-start invariant put a
+	// working in front of it, and a Stop cannot fire twice inside one resting
+	// period.
+	"settled": {name: "claude/Stop(settled)", state: tmux.StateIdle, kind: kindEdge},
+	// Listed rather than omitted, like the ignored notification types, so that
+	// the next person to read this table finds the case already considered.
+	"subagent_running": {name: "claude/Stop(subagent_running)"},
+}
+
+// claudeStopSubagentRunning reads Stop's background_tasks.
+//
+// WHY ONLY type "subagent". The documented type list is `shell`, `subagent`,
+// `monitor`, `workflow`, `teammate`, `cloud session` and `MCP task`; ONLY
+// `subagent` has ever been observed, and the other six are deliberately not
+// filtered. A backgrounded SHELL is precisely the case where the root really
+// is idle -- the user has the prompt back, the turn is over, and the shell
+// re-wakes claude later -- so suppressing there would cost a badge on an
+// ordinary turn. What was measured is narrower than "work is running": a
+// returning SUBAGENT resumes the root's turn. An unknown type reports idle,
+// which is where this row already was.
+//
+// WHY status must say "running", which is the opposite asymmetry. No capture
+// shows what a FINISHED background task reads -- subagent_stop.json still
+// lists its own entry as "running" at the subagent's own SubagentStop -- so a
+// completed task lingering in the array is a thing this evidence cannot rule
+// out. Matching the type alone would then mean ONE subagent anywhere in a
+// session silences every Stop for the rest of it: permanent, silent badge
+// loss, which is far worse than the 13 seconds this filter exists to remove.
+// Matching the one value that was actually observed fails toward today's
+// behaviour instead.
+//
+// THE FAIL DIRECTION for a background_tasks this cannot read at all -- renamed,
+// re-nested, turned into an object -- is "settled", for the same reason: a
+// bounded false idle is the failure this project can see, and silencing every
+// Stop on every pane forever with every other test still passing is the one it
+// cannot.
+func claudeStopSubagentRunning(payload []byte) string {
+	var p struct {
+		BackgroundTasks []struct {
+			Type   string `json:"type"`
+			Status string `json:"status"`
+		} `json:"background_tasks"`
+	}
+	// Dropped on purpose, and in the other direction from every other
+	// discriminator here: a payload whose background_tasks is a shape this
+	// struct cannot hold says nothing about whether a subagent is running, and
+	// the answer to "nothing known" on this event is the turn end it has always
+	// been. The payload gate has already refused anything that is not the JSON
+	// object a hook sends.
+	_ = json.Unmarshal(payload, &p)
+	for _, task := range p.BackgroundTasks {
+		// Both fields, exactly as spelled, uncased. A whitelist of one.
+		if task.Type == "subagent" && task.Status == "running" {
+			return "subagent_running"
+		}
+	}
+	return "settled"
 }
 
 // piSessionStarts is pi's re-derivation of state on a session_start, and it is

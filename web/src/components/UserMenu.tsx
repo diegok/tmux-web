@@ -98,7 +98,7 @@ export async function fetchIdentity(
   return parseIdentity(await res.json())
 }
 
-/** `diegok@devbox`, or a placeholder while the request is in flight. */
+/** `dev@devbox`, or a placeholder while the request is in flight. */
 export function identityLabel(identity: Identity | null): string {
   if (!identity) return '…'
   if (identity.user && identity.host) return `${identity.user}@${identity.host}`

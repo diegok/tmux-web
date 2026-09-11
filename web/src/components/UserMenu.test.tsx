@@ -31,7 +31,7 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 
 const goSource = (path: string) => readFileSync(new URL(`../../../${path}`, import.meta.url), 'utf8')
 
-const me: Identity = { user: 'diegok', host: 'devbox', device: 'laptop', deviceId: 'dev-1' }
+const me: Identity = { user: 'dev', host: 'devbox', device: 'laptop', deviceId: 'dev-1' }
 
 function response(status: number, body: unknown, json = true): Response {
   return {
@@ -72,7 +72,7 @@ describe('parseIdentity', () => {
   it('refuses a response that names no device', () => {
     // The device id is what Sign out revokes; without it the footer would show
     // a menu whose most important item cannot work.
-    expect(() => parseIdentity({ user: 'diegok', host: 'devbox' })).toThrow(/named no device/)
+    expect(() => parseIdentity({ user: 'dev', host: 'devbox' })).toThrow(/named no device/)
     expect(() => parseIdentity(null)).toThrow()
   })
 })
@@ -95,7 +95,7 @@ describe('fetchIdentity', () => {
 
 describe('identityLabel', () => {
   it('is user@host: which box am I driving', () => {
-    expect(identityLabel(me)).toBe('diegok@devbox')
+    expect(identityLabel(me)).toBe('dev@devbox')
   })
 
   it('says something while the answer is in flight', () => {
@@ -206,7 +206,7 @@ describe('<IdentityLines>', () => {
 
   it('is user@host over device and connection state', () => {
     const markup = render(me, 'ready')
-    expect(markup).toContain('diegok@devbox')
+    expect(markup).toContain('dev@devbox')
     expect(markup).toContain('laptop · connected')
   })
 

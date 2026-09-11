@@ -738,7 +738,7 @@ function RetryButton({ onRefresh }: { onRefresh: () => void }) {
  * distinguishes the default from a real one; it is not empty and it is not the
  * command.
  *
- * Narrow on purpose: it suppresses `thinkpad` and `dev-box.local` but not
+ * Narrow on purpose: it suppresses `laptop` and `build-box.local` but not
  * `~/devel/tmux-web` or `✳ Thinking`, so the only titles it can lose are
  * single bare words, and losing one costs the command that was there before.
  */
@@ -756,9 +756,9 @@ const HOSTNAME_LIKE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
  * Keyed by `pane_current_command`, and a subset of Go's `tmux.Agents` exactly as
  * `AGENT_MARKS` is: a pane that is not a known agent has its title left alone.
  * That is not a formality. A shell sitting where an agent last ran keeps the
- * agent's title -- `zsh` titled `π - browsers` is on this machine right now --
- * and that row has no mark beside it, so there is nothing there for the branding
- * to be redundant with.
+ * agent's title -- `zsh` titled `π - browsers` is an observed row, not a
+ * hypothetical -- and that row has no mark beside it, so there is nothing there
+ * for the branding to be redundant with.
  *
  * Each entry is the branding *without* its trailing space; the separator is the
  * matching rule's, not the table's, so that a title trimmed down to nothing but
@@ -913,7 +913,7 @@ interface PaneText {
  * earns its row because `π - master` has a space in it, and re-testing the
  * `master` that is left would fail the hostname rule and drop the row back to a
  * `pi` capsule -- losing the one word it had to say to a rule written for
- * `thinkpad`.
+ * `laptop`.
  *
  * The one thing stripping may not do is empty the row. A title that is nothing
  * but branding -- `π - `, a pi with no session yet -- has nothing left once the

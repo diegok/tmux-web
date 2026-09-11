@@ -1,20 +1,79 @@
 # tmux-web v3 — agent-side reporting
 
 Date: 2026-09-10
-Status: design, not agreed. Revision 5, written against **a measurement rather
-than a review**: 88 turns across the three agents, 44 of them with the agent's
-own turn-end event wired up, and 1,440 replays of the 1.5s poll grid at every
-phase offset. It confirms revision 4's derivation, fixes `N_idle` at a measured
-value, and finds two things no review had: a late repaint that can re-light a
-cleared badge, and mid-turn stillness that makes the classifier agree with an
-idle report before the turn has ended. See "Revision 5"; the four revision
-sections below it are the rounds they answer.
+Status: design, not agreed. Revision 6 is a **correction of a justification, not
+of a decision**: the exposure argument that revisions 1–5 used to choose activity
+over prompt and to shred tool arguments does not survive the threat model, and it
+had quietly distorted one rule. See "Revision 6". Revision 5 was written against
+**a measurement rather than a review**: 88 turns across the three agents, 44 of
+them with the agent's own turn-end event wired up, and 1,440 replays of the 1.5s
+poll grid at every phase offset. It confirms revision 4's derivation, fixes
+`N_idle` at a measured value, and finds two things no review had: a late repaint
+that can re-light a cleared badge, and mid-turn stillness that makes the
+classifier agree with an idle report before the turn has ended. See "Revision 5";
+the four revision sections below it are the rounds they answer.
 Follows: `2026-09-10-tmux-web-v2-design.md` (v2), which it partly supersedes.
 Depends on: the hardening of `internal/tmux/snapshot.go` against hostile
 `@wterm_label` values, **committed as `f25e066`** — in history, not pending, and
 not a thing this design is waiting on. It is a prerequisite, it answers one of
 the questions this document opened with, and it constrains the transport more
 than expected — see "The hazard" and "Why the report is not a fourteenth field".
+
+## Revision 6
+
+Every round from 1 to 5 carried one argument nobody checked, and the owner
+checked it. The claim: `@wterm_agent` is readable by anything that can talk to
+the tmux server and the label is rendered in a web UI, therefore the user's words
+and the agent's tool arguments must be kept out of it — with `pi-subagents`
+quoted approvingly for the same rule, *"raw prompts never enter pane metadata."*
+
+**It does not hold, and it was load-bearing in one place.**
+
+- **A pane option is not a boundary.** Anything that can talk to the tmux server
+  can already `capture-pane` the whole screen — the prompt, the code, the diff,
+  everything the label would have contained and far more. A value in
+  `@wterm_agent` is visible to processes running as the same uid that could have
+  read it off the screen a second earlier. The rule protected nothing.
+- **There is no second actor on the web side.** HTTPS, device enrolment, and one
+  user: the machine's owner. "Rendered in a web UI" named a risk that has no
+  subject here.
+- **The one real version of the concern is about fixtures, not the wire.** This
+  repository is **public**, so nothing in a fixture is ever copied out of a live
+  pane — captured from the implementer's own content, in an isolated session.
+  That rule stands, it is already enforced where fixtures are made, and it says
+  nothing whatever about what the daemon sends to the owner's own browser at
+  runtime. It must not be borrowed as a wire argument again.
+
+**What changes, and what does not.**
+
+- **Activity over prompt stands**, on the two grounds that were always the real
+  ones and are stated as such now: it answers "what is it doing now" rather than
+  "what was it asked twenty minutes ago", which is the exact complaint about
+  opencode's frozen title that this feature exists to fix; and `MaxActivity` is
+  128 runes, so a prompt arrives cut in half and says nothing. See "The options
+  considered".
+- **The first-word reduction of shell commands is deleted.** This is the damage
+  the bad reason was doing. `rm -rf build` and `git push origin main` both render
+  as a bare verb under it, and on a blocked permission prompt the command *is*
+  the question the row exists to answer. A shell command now goes through whole,
+  bounded by `SanitizeActivity` and the 128-rune cap, which is what those two are
+  for.
+- **The basename default for paths stays, re-argued on display grounds**: a full
+  path eats most of 128 runes and wraps badly in a 16rem sidebar, and its leading
+  components repeat the window and session names above the row. A default, not a
+  boundary.
+- **opencode's edit `metadata.diff` is still excluded, on size**: it is unbounded
+  and would blow the 1 KiB value cap, and an over-cap value is discarded whole —
+  so sending it costs the pane its whole report.
+- **v1's and v2's rule about paths is cited correctly now.** Their reason is
+  *parsing*: tmux does not sanitise `pane_current_path`, a raw newline in it
+  forges a sidebar row and a raw `0x1f` swallows the next pane's record, both
+  verified. It was never a secrecy rule and revisions 1–5 half-implied it was.
+  See "How much of a tool call the label carries".
+
+Nothing mechanical moves. The wire format, the ladder, the state rules, the
+filters and every measured number are untouched; three paragraphs of reasoning
+and one line of behaviour are what this revision is.
 
 ## Revision 5
 
@@ -685,21 +744,41 @@ This is the central choice, and the recommendation is **activity, not prompt**.
 opencode's `chat.message`, claude's `UserPromptSubmit.prompt` (a string — *not*
 `user_input.text`, which is what you will write first). Rejected as the default:
 
-- It answers the wrong question. It is the same answer the frozen title gives,
-  only fresher — "what was it asked" rather than "what is it doing now". Twenty
-  minutes into a task, a prompt is history.
-- It publishes the user's own words into a tmux option that anything able to
-  talk to the tmux server can read, and then renders them in a web UI. The
-  developer holds private client work in these panes. `pi-subagents` already
-  refuses this for the same reason, in almost these words: *"raw prompts never
-  enter pane metadata."*
-- It is unbounded prose. Truncating a prompt to a sidebar row produces a
-  sentence fragment; truncating a tool call produces a tool call.
+- **Utility. It answers the wrong question.** It is the same answer the frozen
+  title gives, only fresher — "what was it asked" rather than "what is it doing
+  now". Twenty minutes into a task, a prompt is history. This is not a side
+  point: opencode's title is frozen at the session's first message and claude's
+  at its first turn, and *that* is the complaint this whole feature exists to
+  answer. A label built from the prompt reproduces the defect with a shorter
+  staleness and calls it a fix.
+- **The budget. It does not fit.** `MaxActivity` is 128 runes and a prompt is
+  unbounded prose. A long prompt arrives cut in half and says nothing:
+  truncating a prompt to a sidebar row produces a sentence fragment, where
+  truncating a tool call produces a tool call.
+
+**Revisions 1–5 gave a third reason, and revision 6 withdraws it.** The argument
+was that a prompt in `@wterm_agent` is readable by anything able to talk to the
+tmux server and is then rendered in a web UI, with `pi-subagents` cited
+approvingly for the same rule — *"raw prompts never enter pane metadata."* **It
+is not a boundary.** Anything that can talk to the tmux server can already run
+`capture-pane` and read the entire screen: the prompt, the code, all of it. A
+pane option exposes nothing to a process already running as this uid that was
+not exposed a second earlier. And the web side is HTTPS with device enrolment
+and the only user is the machine's owner, so there is no second actor for the
+rule to protect anything from. The decision did not change; its stated grounds
+did, and it now rests on the two above and nothing else.
+
+The one place that concern is real is that **this repository is public**, which
+is a rule about *fixtures* — every one captured from the implementer's own
+content in an isolated session, never copied out of a live pane — and is already
+enforced there. It says nothing about what the daemon sends to the owner's own
+browser at runtime, and it must not be borrowed to argue about the wire.
 
 **The current tool call, as verb plus object.** Available on pi
 (`tool_execution_start` → `toolName` + `args`, verified) and on opencode (tool
 events), and *probably* on Claude Code via `PreToolUse` — see the open question.
-This is the recommendation, with a caveat below about arguments.
+This is the recommendation; how much of the arguments it carries is settled in
+"How much of a tool call the label carries".
 
 **opencode's `in_progress` todo.** opencode emits `todo.updated`, and the entry
 marked `in_progress` is a short, human-readable description of the step the agent
@@ -709,10 +788,12 @@ agent's own statement of intent rather than a mechanical trace.
 
 It is also, honestly, closer to the prompt end of the scale than a tool name is —
 it is model-generated text derived from the user's request, and it can echo the
-request's nouns. Accepted anyway, because it is a *step* description rather than
-the request, it is generated for display, and it is short by construction. This
-is a judgement call and it is the one place where the privacy argument above is
-weakened rather than honoured.
+request's nouns. Accepted, and it passes both tests the prompt fails: it is a
+description of the step the agent is on *now* rather than of the request, and it
+is short by construction, so it fits the 128-rune budget instead of being halved
+by it. Revisions 1–5 flagged this rung as "the one place where the privacy
+argument is weakened rather than honoured"; with that argument withdrawn there is
+nothing left for it to weaken.
 
 ### The ladder
 
@@ -1043,29 +1124,58 @@ document holds and the choice has to be explicit:
   writer still has to read the standing report to learn what to restate. It adds
   a wire field and buys nothing.
 
-### The object of a tool call is not the whole argument
+### How much of a tool call the label carries
 
-An unremarked hazard in "verb plus object": a tool's arguments are not a safe
-thing to publish. `Bash`'s argument is a command line, which routinely contains
-paths and occasionally contains a token. `Read`'s argument is an absolute path —
-and v1 and v2 both deliberately keep `pane_current_path` out of the snapshot.
+"Verb plus object" leaves open how much of the object. Revisions 1–5 answered it
+on an exposure argument — a tool's arguments "are not a safe thing to publish",
+`Bash`'s being a command line that occasionally carries a token and `Read`'s an
+absolute path — and reduced both almost to nothing. **Revision 6 withdraws that
+argument and re-derives the rules, and this is the place where the bad reason was
+doing real damage rather than merely sitting in a sentence.** Two corrections
+first:
 
-That exclusion was about *parsing* (a path can contain a `0x1f`), and our
-sanitizer covers that. But widening a web UI from "no paths" to "every path the
-agent touches" is a change of kind that nobody asked for. So:
+- **The exposure premise is false here.** See "The options considered": a pane
+  option is readable by exactly the set of processes that can already
+  `capture-pane` the whole screen, and the browser at the other end is the
+  owner's, over HTTPS, behind device enrolment.
+- **v1's and v2's rule about paths is not an exposure rule and must not be cited
+  as one.** v1 drops `pane_current_path` from the snapshot because tmux does not
+  sanitise it: a path can carry a raw newline — which starts a fresh line of
+  eight pane-controlled fields and forges a sidebar row, verified — or a raw
+  `0x1f`, which swallows the following pane's record so that a live pane vanishes
+  from the sidebar, also verified. v2 keeps pane paths off the wire for the same
+  framing reason and says so where it contrasts them with titles: *"Titles are
+  safe to parse, unlike paths… Paths come from the filesystem and never pass
+  through that parser, which is why they remain excluded from the snapshot."* It
+  is a **parsing** rule about hostile bytes, not a secrecy rule, and here it is
+  answered in full by `SanitizeActivity`.
 
-- A path argument is reduced to its **basename**: `read snapshot.go`, not
-  `read /home/dev/src/example-app/…/snapshot.go`.
-- A shell command is reduced to its **first word**: `run go`, not the command
-  line. (`run go test ./internal/tmux` in the example above is what the *pi*
-  integration would produce from a structured `args` object; a raw `Bash` string
-  gets the first word only.)
-- Anything else is the tool name alone.
+What the label carries, re-derived on display and budget grounds:
 
-This is deliberately lossy. `read snapshot.go` is not enough to know which repo
-the agent is in — and it does not have to be, because the window name and the
-session name above it already say that. The second line describes; the first line
-identifies.
+- **A path argument is reduced to its basename**: `read snapshot.go`, not
+  `read /home/dev/src/example-app/…/snapshot.go`. The reason is the row. A full
+  path eats most of a 128-rune budget and wraps badly in a 16rem sidebar, and the
+  leading components repeat what the window and session names above the row
+  already say. It is a sensible **default for display**, not a boundary — and
+  nothing breaks if a future rung wants more of it.
+- **A shell command is carried whole**, through `SanitizeActivity` and the
+  128-rune cap, which is precisely what those two exist for. **The first-word
+  reduction is deleted.** Under it `rm -rf build` and `git push origin main` both
+  render as a bare verb, and on a blocked permission prompt **the command *is*
+  the question** — a row that says `run rm` when the pane is asking whether to
+  run `rm -rf build` has destroyed the one thing that row exists to answer.
+- **Anything else is the tool name alone**, because there is no field we
+  recognise to put after it.
+- **One argument is still excluded, and on size.** opencode's edit tool carries a
+  `metadata.diff`, which is unbounded; sending it would blow the 1 KiB value cap
+  in "Sanitization and bounds", and an over-cap value is discarded *whole*, so
+  the pane would silently lose its report and fall back to the classifier. Size,
+  not secrecy — and the same test any other field has to pass.
+
+The basename reduction is still lossy and is still allowed to be: `read
+snapshot.go` is not enough to know which repo the agent is in, and it does not
+have to be, because the window name and the session name above it already say
+that. The second line describes; the first line identifies.
 
 ### Claude Code's activity, re-argued on true premises
 
@@ -1096,12 +1206,15 @@ The planks, corrected:
   narrower than revision 1 claimed.
 
 **What survives unchanged: the prompt is still not the label.** That decision
-never rested on either plank. It rests on the three arguments in "The options
-considered" — a prompt answers "what was it asked", it publishes the user's own
-words about private client work into an option any process on the box can read,
-and it truncates into a sentence fragment — plus the argument that "only for
-claude, only until `PreToolUse` is measured" is how a temporary exception becomes
-the contract. All four still hold. `UserPromptSubmit` remains a *state* hook for
+never rested on either plank. It rests on the arguments in "The options
+considered" — a prompt answers "what was it asked" rather than "what is it doing
+now", and 128 runes of a prompt is a sentence fragment — plus the argument that
+"only for claude, only until `PreToolUse` is measured" is how a temporary
+exception becomes the contract. All three still hold. Revisions 1–5 listed a
+fourth, that a prompt "publishes the user's own words about private client work
+into an option any process on the box can read"; **revision 6 withdraws it as
+false** — see "The options considered". The decision stood through that; its
+stated reason did not. `UserPromptSubmit` remains a *state* hook for
 Claude and its `prompt` field is not published.
 
 **What does not survive: deferring `PreToolUse`.** Revision 1 held it back
@@ -2739,12 +2852,13 @@ with it.**
    `.gitignore` consequence stops applying to client repos.
 6. **How often opencode's todo ladder rung is empty.** Whether `todo.updated`
    fires for sessions that never use todos decides whether the tool-call rung is
-   the common case or the rare one — and therefore how much the argument-reduction
-   rules matter.
+   the common case or the rare one — and therefore how much the basename default
+   matters.
 7. **What pi's `tool_execution_start.args` actually contains**, per tool. The
-   basename and first-word reductions are designed against a guess about its
-   shape; they need checking against the real thing, particularly for tools that
-   take structured input.
+   basename default is designed against a guess about its shape, and so is the
+   question of whether pi hands a shell command over as one string or as a
+   structured object; both need checking against the real thing, particularly for
+   tools that take structured input.
 8. **Nested project installs.** opencode and pi load project-local files; it is
    not established what happens when a repository contains an installed
    integration and a working directory below it does too, or whether a parent

@@ -363,7 +363,7 @@ describe('what a pane row says', () => {
     // Verified on this machine: an untouched pane's title is the hostname. A
     // sidebar that showed it would print the same word down every shell row --
     // and, now, would spend a second line on every one of them to do it.
-    for (const host of ['devbox', 'dev-box.local', 'x1_carbon', 'w520']) {
+    for (const host of ['devbox', 'build-box.local', 'dev_laptop', 'desk01']) {
       const markup = render(fromRows([row({ command: 'zsh', title: host })]))
       const [said] = rowText(markup)
       expect(said).toMatchObject({ kind: 'command', text: 'zsh' })

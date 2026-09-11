@@ -146,6 +146,17 @@ function dots(markup: string): string[] {
   return [...markup.matchAll(/data-agent-state="([^"]*)"/g)].map((m) => m[1])
 }
 
+/**
+ * Every mark's accessible name, in document order.
+ *
+ * Scoped to `<svg>` on purpose: the state dot and the tmux-active marker are
+ * named spans with `role="img"` too, so a helper that swept the markup for
+ * every accessible name would report a mark on rows that have none.
+ */
+function markNames(markup: string): string[] {
+  return [...markup.matchAll(/<svg[^>]*aria-label="([^"]*)"/g)].map((m) => m[1])
+}
+
 /** Every element carrying data-active="true", as its opening tag. */
 function activeTags(markup: string): string[] {
   return [...markup.matchAll(/<[^>]*data-active="true"[^>]*>/g)].map((m) => m[0])
@@ -990,7 +1001,7 @@ describe('the agent mark', () => {
     const markup = render(
       fromRows([
         row({ windowIndex: 1, paneId: '%4', paneIndex: 0, command: 'zsh' }),
-        row({ windowIndex: 1, paneId: '%2', paneIndex: 1, command: 'vim' }),
+        row({ windowIndex: 1, paneId: '%2', paneIndex: 1, command: 'psql' }),
       ]),
     )
     expect(markup).not.toContain('aria-label="Claude Code"')
@@ -999,6 +1010,123 @@ describe('the agent mark', () => {
     // any of this existed.
     expect(markup).not.toContain('relative flex size-4')
     expect(dots(markup)).toEqual([])
+  })
+})
+
+/**
+ * The editor mark: the other thing that is always open in a tmux session.
+ *
+ * Deliberately *not* an entry in the agents table, and the tests below are
+ * mostly about that difference. An agent's mark travels with a state -- a dot
+ * that says this pane needs you -- and an editor has no state to travel with:
+ * putting one in the agents table would give a text editor a status badge and
+ * ask the daemon to start classifying a pane nobody can be blocked in. Agents
+ * are things with state; this is identity and nothing else.
+ */
+describe('the editor mark', () => {
+  it('marks a window running an editor', () => {
+    const markup = render(fromRows([row({ command: 'vim' })]))
+    expect(markup).toContain('aria-label="Vim"')
+    // In place of the generic terminal glyph, not beside it.
+    expect(markup).not.toContain('lucide-square-terminal lucide-terminal-square"')
+  })
+
+  it('marks each pane of a split window', () => {
+    const markup = render(
+      fromRows([
+        row({ windowIndex: 1, paneId: '%4', paneIndex: 0, command: 'vim' }),
+        row({ windowIndex: 1, paneId: '%2', paneIndex: 1, command: 'nvim', paneActive: false }),
+      ]),
+    )
+    expect(markup).toContain('aria-label="Vim"')
+    expect(markup).toContain('aria-label="Neovim"')
+  })
+
+  it('never puts a state dot on an editor', () => {
+    // The whole reason this is not another row in the agents table. An editor
+    // is not working, is not blocked and cannot be idle; a dot here would be a
+    // claim about a pane the daemon never looked at, on the one signal in the
+    // sidebar that has to stay worth trusting.
+    const alone = render(fromRows([row({ command: 'nvim' })]))
+    expect(alone).toContain('aria-label="Neovim"')
+    expect(dots(alone)).toEqual([])
+    // And no wrapper reserving the corner a dot would ride in.
+    expect(alone).not.toContain('relative flex size-4')
+
+    // The same render, beside an agent that does have one, so the emptiness
+    // above is the editor's and not the fixture's.
+    const beside = render(
+      fromRows([
+        row({ windowIndex: 0, paneId: '%0', command: 'vim' }),
+        row({ windowIndex: 1, paneId: '%1', command: 'claude', agentState: 'working' }),
+      ]),
+    )
+    expect(beside).toContain('aria-label="Vim"')
+    // The session roll-up and the agent's own window row. The editor window in
+    // between contributes nothing.
+    expect(dots(beside)).toEqual(['working', 'working'])
+  })
+
+  it('reserves no gutter for a mark that is not there', () => {
+    // `paneMark` answers null, not an element that renders nothing: an element
+    // returning null is still an element, and `RowIcon` would wrap it and hang
+    // the state dot off its corner -- moving the dot 16px right on every pane
+    // row running something with no mark at all. Visible only where there is a
+    // dot to move, hence the states, and only on the pane rows: the window row
+    // above them has an icon of its own either way, and its wrapper is the one
+    // occurrence these counts expect.
+    const panes = (a: string, b: string) =>
+      fromRows([
+        row({ windowIndex: 1, paneId: '%4', paneIndex: 0, command: a, agentState: 'working' }),
+        row({
+          windowIndex: 1,
+          paneId: '%2',
+          paneIndex: 1,
+          command: b,
+          agentState: 'working',
+          paneActive: false,
+        }),
+      ])
+    const gutters = (markup: string) => markup.match(/relative flex size-4/g)?.length ?? 0
+
+    const bare = render(panes('psql', 'toString'))
+    expect(markNames(bare)).toEqual([])
+    expect(gutters(bare)).toBe(1)
+    // Not vacuous: the dots are all there, and a row that *does* have a mark
+    // gets exactly the wrapper this one is refusing.
+    expect(dots(bare)).toEqual(['working', 'working', 'working', 'working'])
+    expect(gutters(render(panes('claude', 'vim')))).toBe(3)
+  })
+
+  it('leaves the agent marks alone', () => {
+    // Two tables, looked up in order, and an agent is still an agent: nothing
+    // about adding editors may reach a row that had a mark already.
+    const markup = render(fromRows([row({ command: 'claude', agentState: 'blocked' })]))
+    expect(markup).toContain('aria-label="Claude Code"')
+    expect(markup).not.toContain('aria-label="Vim"')
+    expect(dots(markup)).toEqual(['blocked', 'blocked'])
+  })
+
+  it('does not mistake an inherited property for an editor', () => {
+    // `'toString' in EDITOR_MARKS` is true, and the branch it opens draws a
+    // mark on a pane running a command nothing has a mark for.
+    const markup = render(
+      fromRows([
+        row({ windowIndex: 0, paneId: '%0', command: 'toString' }),
+        row({ windowIndex: 1, paneId: '%4', paneIndex: 0, command: 'constructor' }),
+        row({ windowIndex: 1, paneId: '%2', paneIndex: 1, command: 'valueOf' }),
+      ]),
+    )
+    expect(markNames(markup)).toEqual([])
+  })
+
+  it('is exact about which command is an editor', () => {
+    // The lookup is the same exact match the agent table uses: an editor is
+    // the binary named in the table and nothing that merely looks like it.
+    for (const command of ['vi', 'VIM', 'nvim-qt', 'neovim', 'vimdiff', 'gvim']) {
+      const markup = render(fromRows([row({ command })]))
+      expect(markNames(markup), command).toEqual([])
+    }
   })
 })
 

@@ -67,7 +67,9 @@
  *
  * ## Which one needs you
  *
- * An agent pane carries its agent's mark and a state dot; a window and a
+ * An agent pane carries its agent's mark and a state dot; an editor pane
+ * carries a mark and **no dot at all** -- see `paneMark`, and `EditorIcon` for
+ * why that is a second table rather than two more agents. A window and a
  * session carry the most urgent state under them, `blocked > done > working >
  * idle`, so the question is answerable without expanding anything. A pane the
  * daemon computed no state for carries neither -- a shell is not idle, it is a
@@ -111,6 +113,7 @@ import { Fragment } from 'react'
 import type { ReactNode } from 'react'
 
 import { AGENT_MARKS, AgentIcon } from '@/components/AgentIcon'
+import { EDITOR_MARKS, EditorIcon } from '@/components/EditorIcon'
 import { UserMenu } from '@/components/UserMenu'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -391,6 +394,7 @@ function WindowItem({
   // which is why the pane below it gets no second dot of its own.
   const state = windowState(window, serverStart, seen)
   const lone = split ? undefined : window.panes[0]
+  const loneMark = lone ? paneMark(lone.command) : null
   const unreachable = reachable
     ? undefined
     : 'This session was killed; its panes are only alive because a tab is holding the group open'
@@ -429,13 +433,11 @@ function WindowItem({
               icon={
                 split ? (
                   <Columns2 aria-hidden />
-                ) : lone && Object.hasOwn(AGENT_MARKS, lone.command) ? (
-                  // The agent's own mark says more than a generic terminal glyph,
-                  // and on a single-pane window this row *is* the pane. A pane
-                  // running something else keeps the glyph.
-                  <AgentIcon command={lone.command} />
                 ) : (
-                  <SquareTerminal aria-hidden />
+                  // A mark says more than a generic terminal glyph, and on a
+                  // single-pane window this row *is* the pane. A pane running
+                  // something nothing has a mark for keeps the glyph.
+                  (loneMark ?? <SquareTerminal aria-hidden />)
                 )
               }
             />
@@ -491,18 +493,11 @@ function WindowItem({
                   >
                     <RowIcon
                       state={paneState(pane, serverStart, seen)}
-                      // Null rather than an <AgentIcon> that renders nothing:
-                      // an element returning null is still an element, and
-                      // RowIcon would reserve 16px of gutter for it on every
-                      // shell row. hasOwn rather than `in` because `in` walks the
-                      // prototype, so a pane whose command happened to be
-                      // `toString` would take this branch and be handed a
-                      // function to draw.
-                      icon={
-                        Object.hasOwn(AGENT_MARKS, pane.command) ? (
-                          <AgentIcon command={pane.command} />
-                        ) : null
-                      }
+                      // `paneMark` answers null rather than an <AgentIcon>
+                      // that renders nothing: an element returning null is
+                      // still an element, and RowIcon would reserve 16px of
+                      // gutter for it on every shell row.
+                      icon={paneMark(pane.command)}
                     />
                     <PaneLines
                       pane={pane}
@@ -747,6 +742,31 @@ function RetryButton({ onRefresh }: { onRefresh: () => void }) {
       Retry now
     </button>
   )
+}
+
+/**
+ * The mark a row draws for what a pane is running, or null when nothing has one.
+ *
+ * Two tables, asked in order, and the order is not an accident: **an agent's
+ * mark comes with a state dot and an editor's must not.** `AGENT_MARKS` is a
+ * subset of Go's `tmux.Agents` -- the one list that gates capture, state and
+ * logo together -- so a mark drawn from it sits beside a dot the daemon
+ * computed. `EDITOR_MARKS` is disjoint from that list by construction and by
+ * test: the daemon never classifies a vim pane, `agentState` is `""` for it,
+ * and `RowIcon` therefore renders the mark with no dot and no corner to hang
+ * one in. Identity, and nothing about who needs you. See `EditorIcon`.
+ *
+ * `Object.hasOwn` rather than `in` for both: `in` walks the prototype, so a
+ * pane whose command happened to be `toString` would take the branch and be
+ * handed a function to draw.
+ *
+ * Null, not an empty element, for everything else -- a shell is a shell, and
+ * `RowIcon` reserves no gutter for a mark that is not there.
+ */
+function paneMark(command: string): ReactNode {
+  if (Object.hasOwn(AGENT_MARKS, command)) return <AgentIcon command={command} />
+  if (Object.hasOwn(EDITOR_MARKS, command)) return <EditorIcon command={command} />
+  return null
 }
 
 /**

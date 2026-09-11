@@ -509,3 +509,37 @@ func TestARestingIdleNeedsNoPreviousReport(t *testing.T) {
 		t.Errorf("after a restart: %+v, %v, want the identical report %+v back", got2, ok2, got)
 	}
 }
+
+// lateRepaintDwell is the CLASSIFIER's guard and must never reach a report's
+// derivation.
+//
+// The classifier dates our NOTICING, so two finishes seconds apart are more
+// likely one finish plus a stray repaint -- measured on 2 of 30 claude turns --
+// than two turns. A report dates the FINISH: the agent says when its turn ended,
+// a resting state is never re-asserted with a later timestamp, and two turn ends
+// ten seconds apart are simply two turn ends. A dwell here would silently
+// swallow the second one, and a swallowed turn end is a badge that never lights.
+func TestTwoReportedTurnEndsInsideTheDwellBothDerive(t *testing.T) {
+	now := time.UnixMilli(1789075200000)
+	r := NewReports()
+
+	if _, ok := r.Observe("%1", FormatReport(StateIdle, now.UnixMilli(), ""), "claude", now); !ok {
+		t.Fatal("setup: the first report was not accepted")
+	}
+	if !r.Confirmed("%1", false) {
+		t.Fatal("setup: a resting idle with no client connected derives immediately")
+	}
+
+	// A second genuine turn end, well inside the dwell of the first -- a third
+	// of it, which on today's constant is the 5.0 s of the shorter measured
+	// repaint. Written against the constant: if the dwell moves, so does this.
+	gap := lateRepaintDwell / 3
+	later := now.Add(gap)
+	if _, ok := r.Observe("%1", FormatReport(StateIdle, later.UnixMilli(), ""), "claude", later); !ok {
+		t.Fatal("setup: the second report was not accepted")
+	}
+	if !r.Confirmed("%1", false) {
+		t.Fatalf("a second reported turn end %v after the first did not derive "+
+			"finishedAt: the dwell applies to the classifier's stamp only", gap)
+	}
+}

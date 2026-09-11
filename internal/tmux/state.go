@@ -25,6 +25,32 @@ const (
 // not flicker, short enough to feel live.
 const settleAfter = 2
 
+// lateRepaintDwell is how long after a stamped finish another one is refused.
+//
+// It exists for a measured failure: on 2 of 30 claude turns a single line near
+// the input box repainted 5.0 s and 9.0 s after everything else had stopped.
+// That produces a second working->idle edge about 13 s after the real turn end,
+// and since a browser badges on finishedAt > the VALUE it was last shown, the
+// second stamp re-lights a done badge the user has already cleared.
+//
+// It is NOT symmetric with the other two guards and should not be described as
+// one: they decide whether THIS run earned an edge, and this decides whether a
+// second edge so soon after the first can be a different finish at all.
+//
+// The constant is a GUESS, of the same standing as the 60-second working
+// window. It is floored by the measurement (the second edge landed 12 to 13.5 s
+// after the first) and that floor rests on a sample of TWO events, which is a
+// bound and not a distribution. 15 s, biased long. Biasing long costs two
+// genuine finishes inside the dwell collapsing to one badge -- for which the
+// user would have to have looked at the pane between them and then walked away
+// within seconds -- against a failure measured at 2 of 30 claude turns.
+//
+// It applies to the classifier's stamp ONLY, never to a report's derivation. A
+// report dates its own finish, and a resting state is never re-asserted with a
+// later timestamp, so there is nothing there for a dwell to protect against and
+// adding one would silently swallow a genuine second turn end.
+const lateRepaintDwell = 15 * time.Second
+
 // Status is what one observation of a pane concluded.
 type Status struct {
 	State      string // StateWorking or StateIdle; blocked is decided elsewhere
@@ -141,7 +167,21 @@ func (c *Classifier) Observe(paneID, capture string, now time.Time, blocked bool
 	// pane held at a dialog passes through settleAfter exactly once too, and
 	// that poll is its only chance to stamp. Withholding it there means a run
 	// interrupted by a question earns no edge until it really ends.
-	if p.still == settleAfter && p.everChanged && !blocked {
+	//
+	// lateRepaintDwell is the fourth, and it answers a different question again:
+	// a repaint seconds after a finish draws a whole second working->idle edge,
+	// and a stamp for it re-lights a done badge its owner has already cleared.
+	//
+	// The `p.finishedAt == 0` disjunct is LOAD-BEARING and must be written out.
+	// "A pane that has never finished has finishedAt 0, and now - epoch is
+	// obviously more than 15s" is true only when `now` is a real wall clock.
+	// Every test in this file's suite starts at `now := time.Unix(0, 0)` and
+	// advances in 1.5s steps, so at the first genuine stamp `now` is 7.5 seconds
+	// past the epoch and time.UnixMilli(0) IS the epoch: the subtraction gives
+	// 7.5s, which is less than the dwell, and the first stamp of the existing v2
+	// suite is refused.
+	if p.still == settleAfter && p.everChanged && !blocked &&
+		(p.finishedAt == 0 || now.Sub(time.UnixMilli(p.finishedAt)) >= lateRepaintDwell) {
 		p.finishedAt = now.UnixMilli()
 	}
 	// Changed is always false on this path -- a differing capture resets `still`

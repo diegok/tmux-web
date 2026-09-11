@@ -3656,6 +3656,24 @@ git commit -m "feat: four Claude hooks, async, and never asyncRewake"
 
 ---
 
+> **Carried from Task 19's implementer, measured twice against a real Claude Code and not fixed.**
+> Claude's **root** `Stop` fires while a subagent it launched is still running, and a new turn then starts
+> when that subagent returns -- 13.2 s and 6.2 s of reported `idle` in the middle of work, on two separate
+> runs. This is not the nested-CLI hole and it is not filtered by `agent_id`: the payload really is the
+> root's. `events.go` decides it, so the fix is a row there, not in the shell wrapper. Note the cost is
+> bounded by evidence rule 3 whenever a client is connected -- the screen is churning, so the reported
+> idle is dropped -- and unbounded only when nobody is watching, which is the case this feature exists
+> for. Needs its own commit and its own mutant.
+
+> **Also from Task 19, for open questions 9 and 11.** Teammate and background-session hooks
+> (`TeammateIdle`, `TaskCreated`, `TaskCompleted`) were registered and **never fired**, even across a turn
+> that launched a subagent -- no hook process, so no guard is needed and that half of the question is
+> closed. The **nested CLI** half is open and reproduced: a `claude -p` from a Bash tool call fires its own
+> hooks with `TMUX_PANE` inherited unchanged and no `agent_id`, and its `Stop` wrote idle 1.23 s before the
+> outer root's. One candidate discriminator was found and deliberately not used: `CLAUDE_CODE_ENTRYPOINT`
+> is `cli` for a TUI root and `sdk-cli` for the nested process -- but it separates *print mode*, not
+> nesting, so it would also refuse a legitimately headless root.
+
 ### Task 20: `wterm-web install-integration`
 
 **Files:**

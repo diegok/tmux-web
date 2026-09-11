@@ -23,6 +23,7 @@ import {
   sessionState,
   viewedSeen,
   windowState,
+  succeedPane,
   windowTarget,
   writeSeen,
 } from './useSnapshot'
@@ -450,6 +451,123 @@ describe('findPane', () => {
   it('is null for a pane that is not in the snapshot, and for no pane', () => {
     expect(findPane(groups, '%99')).toBeNull()
     expect(findPane(groups, null)).toBeNull()
+  })
+})
+
+describe('succeedPane', () => {
+  // Two windows in one session, three panes: an editor in `1: api` beside a
+  // shell, and a shell alone in `0: shell`.
+  const live = [
+    row({ windowIndex: 0, windowName: 'shell', paneId: '%0', paneActive: true }),
+    row({ windowIndex: 1, windowName: 'api', paneId: '%1', paneActive: true, command: 'sh' }),
+    row({
+      windowIndex: 1,
+      windowName: 'api',
+      paneId: '%75',
+      paneIndex: 1,
+      paneActive: false,
+      command: 'vim',
+    }),
+  ]
+  const gone = (rows: SnapshotRow[], paneId: string) => {
+    const at = findPane(groupRows(rows), paneId)
+    if (!at) throw new Error(`fixture does not contain ${paneId}`)
+    return at
+  }
+
+  it('lands on the dead pane\'s own window when the window survived it', () => {
+    const was = gone(live, '%75')
+    const after = groupRows(live.filter((r) => r.paneId !== '%75'))
+    const to = succeedPane(after, was)
+    expect(to?.pane.paneId).toBe('%1')
+    // The point of preferring the window: the user closed an editor in `api`
+    // and is still in `api`, not thrown back to window 0.
+    expect(to?.window.name).toBe('api')
+  })
+
+  it('falls back to the first window when the whole window went with the pane', () => {
+    const was = gone(live, '%1')
+    // `%1` was the last pane in `api`, so tmux took the window too.
+    const after = groupRows(live.filter((r) => r.windowIndex !== 1))
+    const to = succeedPane(after, was)
+    expect(to?.pane.paneId).toBe('%0')
+    expect(to?.window.name).toBe('shell')
+  })
+
+  it('prefers the surviving window over the first one', () => {
+    // Guards the order specifically: window 0 is present and would be a
+    // perfectly good answer, so a rule that simply took `windows[0]` passes
+    // every test above and fails this one.
+    const was = gone(live, '%75')
+    const after = groupRows(live.filter((r) => r.paneId !== '%75'))
+    expect(succeedPane(after, was)?.window.index).toBe(1)
+  })
+
+  it('follows the window active pane, not the first in layout order', () => {
+    const rows = [
+      row({ windowIndex: 0, windowName: 'shell', paneId: '%0', paneActive: true }),
+      row({ windowIndex: 1, windowName: 'api', paneId: '%1', paneActive: false }),
+      row({ windowIndex: 1, windowName: 'api', paneId: '%2', paneIndex: 1, paneActive: true }),
+      row({ windowIndex: 1, windowName: 'api', paneId: '%75', paneIndex: 2, paneActive: false }),
+    ]
+    const was = gone(rows, '%75')
+    const after = groupRows(rows.filter((r) => r.paneId !== '%75'))
+    // %1 is first in layout order; %2 is where tmux actually moved the client.
+    expect(succeedPane(after, was)?.pane.paneId).toBe('%2')
+  })
+
+  it('is null when the session itself is gone', () => {
+    const was = gone(live, '%75')
+    expect(succeedPane(groupRows([row({ groupKey: 'other', paneId: '%9' })]), was)).toBeNull()
+  })
+
+  it('is null for an empty snapshot, so a failed poll cannot move a tab', () => {
+    // The daemon reports its own failed tmux poll as an error with no rows.
+    // Treating that as "every pane died" would yank every tab off its pane.
+    expect(succeedPane([], gone(live, '%75'))).toBeNull()
+  })
+
+  it('never hands back the pane it was told is gone', () => {
+    // A caller that passed a pane still in the snapshot must not be told to
+    // re-select it: the caller would do so on every poll, forever.
+    const was = gone(live, '%1')
+    expect(succeedPane(groupRows(live.filter((r) => r.windowIndex === 1)), was)).toBeNull()
+  })
+
+  it('follows the window id, not its index, across a renumber', () => {
+    // tmux reuses window indices: with `renumber-windows on`, killing the pane
+    // that took a window with it shifts every window after it down one. A rule
+    // that remembered "window 1" would then land on whatever window *became*
+    // number 1, which is a different window that merely inherited the number.
+    const before = [
+      row({ windowId: '@9', windowIndex: 0, windowName: 'shell', paneId: '%0' }),
+      row({ windowId: '@7', windowIndex: 1, windowName: 'api', paneId: '%1' }),
+      row({
+        windowId: '@7',
+        windowIndex: 1,
+        windowName: 'api',
+        paneId: '%75',
+        paneIndex: 1,
+        paneActive: false,
+        command: 'vim',
+      }),
+    ]
+    const was = gone(before, '%75')
+    // %75 closed, and the windows were renumbered the other way round.
+    const after = groupRows([
+      row({ windowId: '@7', windowIndex: 0, windowName: 'api', paneId: '%1' }),
+      row({ windowId: '@9', windowIndex: 1, windowName: 'shell', paneId: '%0' }),
+    ])
+    const to = succeedPane(after, was)
+    expect(to?.window.id).toBe('@7')
+    expect(to?.pane.paneId).toBe('%1')
+  })
+
+  it('matches the window by key when the daemon sent no window id', () => {
+    const old = live.map((r) => ({ ...r, windowId: '' }))
+    const was = gone(old, '%75')
+    const after = groupRows(old.filter((r) => r.paneId !== '%75'))
+    expect(succeedPane(after, was)?.pane.paneId).toBe('%1')
   })
 })
 

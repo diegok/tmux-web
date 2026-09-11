@@ -508,6 +508,69 @@ export function findPane(
 }
 
 /**
+ * Where a tab should go when the pane it was pinned to has left the snapshot.
+ * `null` means "nowhere better", and the caller must then stay put.
+ *
+ * ## Why this follows rather than reports
+ *
+ * A tab does not stop looking at tmux when its pane dies. tmux moves the
+ * client to another pane in the window, or to another window, and the keyboard
+ * goes with it -- so the terminal on screen is live and typing into it works.
+ * What goes stale is only *this app's* record: `TerminalSession` remembers the
+ * last pane it asked for and nothing ever corrects it, so the breadcrumb, the
+ * sidebar highlight and `useSeenPanes` all go on naming a pane that no longer
+ * exists while the user reads a different, living one.
+ *
+ * That is the part that is not honest. "%75 is gone" is a true sentence about
+ * %75 and a false answer to the question a breadcrumb exists to answer, which
+ * is *where am I*. Re-pinning is what makes the two agree again; it is a
+ * correction, not a convenience, and the caller still has to say out loud that
+ * the pane closed.
+ *
+ * ## The order, and why it is the window first
+ *
+ * The window is where the work is. Closing an editor in `2: api` should leave
+ * you in `2: api`, not at the top of the session -- and the window's own active
+ * pane is exactly where tmux moved the client, so following it agrees with the
+ * screen the user is already looking at instead of overriding it.
+ *
+ * Only when the window went too -- the editor was the last pane in it -- does
+ * this fall back to the session's first window.
+ *
+ * ## Why "nowhere better" is a real answer
+ *
+ * A snapshot with no panes at all is not evidence that every pane died: the
+ * daemon reports its own failed tmux poll by returning an error with no rows.
+ * Moving on that would yank a tab off a perfectly good pane because a poll
+ * hiccuped. Returning null keeps the caller where it is, which is the one
+ * behaviour that is safe to take on a snapshot that may be wrong.
+ */
+export function succeedPane(
+  groups: readonly SessionNode[],
+  gone: PaneLocation,
+): PaneLocation | null {
+  const session = groups.find((g) => g.key === gone.session.key)
+  if (!session) return null
+
+  // The window's id is the identity; `key` is the fallback for a daemon too
+  // old to send `@N`, and is what `groupRows` already keys the tree on.
+  const same = session.windows.find((w) =>
+    gone.window.id !== '' ? w.id === gone.window.id : w.key === gone.window.key,
+  )
+  for (const window of [same, session.windows[0]]) {
+    if (!window) continue
+    const paneId = windowTarget(window)
+    // Never hand back the pane that is gone. It cannot be in `groups` -- that
+    // is what made this call happen -- but a caller that re-selected it would
+    // loop on every poll, so the guard is here rather than at each call site.
+    if (!paneId || paneId === gone.pane.paneId) continue
+    const pane = window.panes.find((p) => p.paneId === paneId)
+    if (pane) return { session, window, pane }
+  }
+  return null
+}
+
+/**
  * The pane a click on the *window* row should land on: tmux's active pane for
  * that window, else the first in layout order.
  *

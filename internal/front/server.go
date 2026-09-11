@@ -228,6 +228,18 @@ func NewHandler(cfg HandlerConfig) (http.Handler, error) {
 
 	mux := http.NewServeMux()
 
+	// NO ROUTE HERE EVER INSTALLS AN AGENT INTEGRATION, and that is a rule
+	// about capability rather than about authentication.
+	//
+	// Writing executable code into somebody's repository is not a thing a
+	// network request should be able to do however well authenticated it is,
+	// and this daemon is reachable from a phone. The Origin middleware below is
+	// the boundary for tmux operations; installing is not a tmux operation. It
+	// lives in cmd/wterm-web (see install.go), in package main, which nothing
+	// can import -- so the direct half of this rule is enforced by the compiler
+	// and the other half, a reimplementation inside this package, is a grep in
+	// cmd/wterm-web/install_test.go. If you were about to add the route, read
+	// that test before you delete it.
 	mux.Handle("GET /enroll", http.HandlerFunc(s.enrollPage))
 	mux.Handle("POST /api/enroll", http.HandlerFunc(s.redeem))
 

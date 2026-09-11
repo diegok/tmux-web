@@ -58,6 +58,7 @@ Usage:
   wterm-web devices
   wterm-web revoke  <device-id>
   wterm-web report  --state working|blocked|idle [--text TEXT]
+  wterm-web install-integration --agent claude|opencode|pi [dir] [--global] [--yes] [--remove]
 
 serve runs the daemon. enroll, devices and revoke talk to its admin socket,
 which only the user the daemon runs as can open -- that is the whole
@@ -66,6 +67,13 @@ authorization.
 report is different: an agent's integration runs it inside its own tmux pane to
 say what it is doing, and it writes one tmux pane option. It needs no daemon,
 and it always exits 0 so that a reporting failure can never stop an agent.
+
+install-integration writes the integration that calls report into a project, and
+it is a command rather than a button in the web UI on purpose: writing
+executable code into a repository is not a thing a network request should be
+able to do however well authenticated it is. It prints the paths first, asks
+before writing, refuses any file tmux-web did not write, and undoes itself with
+--remove.
 
 Run "wterm-web <command> -h" for a command's flags.
 `
@@ -94,6 +102,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdRevoke(rest, stdout, stderr)
 	case "report":
 		return cmdReport(rest, stdout, stderr)
+	case "install-integration":
+		return cmdInstall(rest, stdout, stderr)
 	case "help", "-h", "-help", "--help":
 		printUsage(stdout)
 		return 0

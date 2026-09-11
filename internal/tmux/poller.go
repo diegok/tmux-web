@@ -267,17 +267,61 @@ func (p *Poller) classify(ctx context.Context, rows []Row, reports map[string]st
 		// already settled which wins -- so the second fork buys nothing either
 		// way, and not taking it is the whole win of the feature.
 		if rep, ok := p.reports.Observe(rows[i].PaneID, reports[rows[i].PaneID], rows[i].Command, now); ok {
-			rows[i].AgentState = rep.State
-			rows[i].Activity = rep.Activity
-			rows[i].StateSource = SourceEvent
-			if rep.State == StateIdle {
-				// Derived, not stamped: no memory of a previous report, no
-				// edge. Read the option, get the answer -- which is why it
-				// survives a daemon restart. See Task 10.
-				rows[i].FinishedAt = rep.Timestamp
+			// Evidence rule 3. A resting idle makes a claim about the screen,
+			// and while a client is connected the claim is checked over a
+			// window of NIdle polls: the pane IS captured, and the report is
+			// dropped only if the classifier says working for the whole of it.
+			// Every other report -- and every report at all with nobody
+			// watching -- skips the capture entirely, which is the win.
+			stands := true
+			var st Status
+			if connected && rep.State == StateIdle && p.reports.NeedsScreen(rows[i].PaneID) {
+				screen, err := p.capture(ctx, rows[i].PaneID)
+				if err == nil {
+					captured = append(captured, rows[i].PaneID)
+					// blocked=false: the window asks the classifier one
+					// question only -- has the screen settled. blocked's only
+					// effect in Observe is to withhold the finish stamp, and
+					// inside the window the row's FinishedAt is the report's
+					// derivation either way.
+					st = p.classifier.Observe(rows[i].PaneID, screen, now, false)
+					stands = p.reports.Corroborate(rows[i].PaneID, st.State == StateIdle)
+				}
 			}
-			// The capture is skipped entirely, and this pane is deliberately
-			// NOT added to `captured`: see Retain below.
+			if stands {
+				rows[i].AgentState = rep.State
+				rows[i].Activity = rep.Activity
+				rows[i].StateSource = SourceEvent
+				if rep.State == StateIdle && p.reports.Confirmed(rows[i].PaneID, connected) {
+					// Derived, not stamped: no memory of a previous report, no
+					// edge. Read the option, get the answer -- which is why it
+					// survives a daemon restart. See Task 10.
+					//
+					// Suppressed while the window is open rather than stamped
+					// and retracted: a done badge that has landed on three
+					// devices does not un-land.
+					rows[i].FinishedAt = rep.Timestamp
+				}
+				// Outside the window the capture is skipped entirely, and this
+				// pane is then deliberately NOT added to `captured`: see Retain
+				// below.
+				continue
+			}
+			// The screen never settled, so the report is dropped and this pane
+			// goes back to the classifier -- on the verdict the window's own
+			// capture already produced. It is not captured or Observed a second
+			// time: two Observes of one capture would count the same screen
+			// twice.
+			//
+			// The blocked grammars are not run on this poll, and that costs at
+			// most one poll of latency on the one screen that could have been
+			// holding a dialog all through the window -- a box with a spinner
+			// churning under it, which TestRefreshBlockedOverridesChurn shows
+			// is a real shape. The drop is remembered, so the very next poll
+			// takes the full classifier path, grammars included.
+			rows[i].AgentState = st.State
+			rows[i].FinishedAt = st.FinishedAt
+			rows[i].StateSource = SourceScreen
 			continue
 		}
 		if !connected {

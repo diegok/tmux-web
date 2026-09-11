@@ -547,6 +547,13 @@ func TestFreshReportSkipsTheCapture(t *testing.T) {
 
 	// A fresh resting report costs no capture either, and derives its finish
 	// stamp from its own timestamp rather than from a clock we read.
+	//
+	// With nobody connected, which is the half of this claim Task 7 left
+	// standing: evidence rule 3 now checks a resting IDLE against the screen
+	// while a client is watching, so with one connected this same report opens
+	// the verification window and is captured for NIdle polls. See
+	// TestIdleWindowSurvivesTheTurnEndRepaint and the rule-3 tests below.
+	connected = false
 	fin := now.Add(time.Second).UnixMilli()
 	reports["%1"] = FormatReport(StateIdle, fin, "")
 	p.refresh(ctx)
@@ -738,5 +745,320 @@ func TestAPaneThatStoppedBeingAnAgentIsForgottenByTheReportMemory(t *testing.T) 
 	if got := stateOf(t, p, "%1"); got.AgentState != StateWorking || got.Activity != "run go" {
 		t.Errorf("relaunched agent = %+v, want its own report: its predecessor's "+
 			"accepted report must not have survived the shell as an ordering floor", got)
+	}
+}
+
+// --- evidence rule 3: the idle verification window ---------------------------
+//
+// The measured fixture, and the constants are the point of it. A test spelling
+// 3 and 4 out would pass straight through the next change to settleAfter --
+// which is exactly how revision 3 of the design shipped an off-by-one.
+//
+// EVERYTHING here is built from settleAfter and asserted against settleAfter,
+// and NIdle appears nowhere in these tests except inside a failure message.
+// That is not style. NIdle is the constant the headline mutant retargets, so a
+// fixture driven by NIdle and an assertion made against NIdle move TOGETHER
+// when it is retargeted and the mutant survives them both: with
+// NIdle = settleAfter + 1 the window rejects at poll 3, the fixture stops
+// there, `captures == NIdle == 3`, green. Build from the constant the mutant
+// does not touch; assert against the one it does. The model is
+// TestSanitizeActivityBounds' `MaxActivity != MaxLabel` line
+// (internal/tmux/report_test.go:56).
+
+// maxWindowPolls bounds the loops below so a broken window fails the test
+// rather than hanging it. It is deliberately wider than any window this task
+// can produce: the window has to close on its own, so that the capture counts
+// measure the window and not the loop.
+const maxWindowPolls = settleAfter + 6
+
+func TestIdleWindowSurvivesTheTurnEndRepaint(t *testing.T) {
+	// Poll 1: a first sight of the PRE-FINAL screen. The turn-end event fired
+	// 7-52 ms before the agent's last repaint, so the report is written to a
+	// screen that is not yet final.
+	// Poll 2: the repaint -- one changed capture.
+	// Polls 3..settleAfter+2: identical.
+	// The classifier says idle at poll settleAfter+2, the report stands, and
+	// finishedAt is derived from the REPORT's timestamp, not from now.
+	reportTS := time.Now().Add(-3 * time.Second).UnixMilli()
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	screens := map[string]string{"%1": "the pre-final screen"}
+	reports := map[string]string{"%1": FormatReport(StateIdle, reportTS, "")}
+	var captured []string
+	connected := true
+	p := reportPoller(&rows, reports, screens, &captured, &connected)
+	ctx := context.Background()
+
+	// The loop condition is also the assertion that nothing is derived while
+	// the window is open: an implementation that stamps finishedAt while the
+	// window is pending leaves the loop at poll 1 and fails the count below.
+	var row Row
+	for polls := 0; row.FinishedAt == 0; {
+		polls++
+		if polls > maxWindowPolls {
+			t.Fatalf("the window never closed in %d polls", maxWindowPolls)
+		}
+		if polls >= 2 {
+			screens["%1"] = "the final screen"
+		}
+		p.refresh(ctx)
+		row = stateOf(t, p, "%1")
+	}
+
+	// settleAfter + 2, spelled out, NOT NIdle. This is the assertion that pins
+	// the constant, and it can only pin it by being written in something else.
+	if len(captured) != settleAfter+2 {
+		t.Fatalf("took %d captures, want settleAfter+2 = %d (NIdle is %d)", len(captured), settleAfter+2, NIdle)
+	}
+	// And this is the assertion that actually kills NIdle = settleAfter + 1:
+	// the shortened window rejects the report at poll settleAfter+1, one poll
+	// before the classifier settles, so the pane falls through to the
+	// classifier and the row's finishedAt is no longer the report's own.
+	if row.FinishedAt != reportTS {
+		t.Fatalf("finishedAt = %d, want the report's own timestamp %d", row.FinishedAt, reportTS)
+	}
+	if row.AgentState != StateIdle || row.StateSource != SourceEvent {
+		t.Errorf("the verified report = %+v, want idle from the event source", row)
+	}
+}
+
+// The same fixture one poll short of the window: the classifier has NOT agreed
+// yet, so a window that short drops a true turn end. Written against
+// settleAfter -- a loop over settleAfter+1 polls -- and NOT over NIdle-1: a
+// bound written as NIdle-1 tracks the very constant the headline mutant
+// retargets, so it holds for settleAfter+1, settleAfter+2 and settleAfter+3
+// alike and proves nothing on its own. This test is a sibling of the one
+// above, not a substitute for it.
+func TestAWindowOnePollShortWouldDropATrueTurnEnd(t *testing.T) {
+	reportTS := time.Now().Add(-3 * time.Second).UnixMilli()
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	screens := map[string]string{"%1": "the pre-final screen"}
+	reports := map[string]string{"%1": FormatReport(StateIdle, reportTS, "")}
+	var captured []string
+	connected := true
+	p := reportPoller(&rows, reports, screens, &captured, &connected)
+	ctx := context.Background()
+
+	for poll := 1; poll <= settleAfter+1; poll++ {
+		if poll >= 2 {
+			screens["%1"] = "the final screen"
+		}
+		p.refresh(ctx)
+	}
+
+	row := stateOf(t, p, "%1")
+	// The turn really has ended -- this is the measured fixture -- and after
+	// settleAfter+1 polls the classifier still says working. A window closing
+	// here would discard it.
+	if row.AgentState != StateIdle || row.StateSource != SourceEvent {
+		t.Fatalf("after settleAfter+1 = %d polls the row is %+v, want the true turn end still "+
+			"standing: the classifier cannot have settled yet", settleAfter+1, row)
+	}
+	if row.FinishedAt != 0 {
+		t.Errorf("finishedAt = %d one poll before the classifier can settle", row.FinishedAt)
+	}
+	if len(captured) != settleAfter+1 {
+		t.Errorf("took %d captures in settleAfter+1 = %d polls", len(captured), settleAfter+1)
+	}
+}
+
+// A screen that changes at every poll for the whole window: dropped, no
+// finishedAt derived, and the pane goes back to the classifier. That is the
+// unfiltered-subagent case caught by evidence rather than by a discriminator
+// holding -- which matters most on pi and opencode, whose turn-end filters are
+// absence-coded and fail open.
+//
+// The poll at which the drop happens is pinned exactly, which is what kills
+// `windowPolls >= NIdle` written as `>`.
+func TestAnIdleReportOverAChurningScreenIsDropped(t *testing.T) {
+	reportTS := time.Now().Add(-3 * time.Second).UnixMilli()
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	screens := map[string]string{"%1": "frame 0"}
+	reports := map[string]string{"%1": FormatReport(StateIdle, reportTS, "")}
+	var captured []string
+	connected := true
+	p := reportPoller(&rows, reports, screens, &captured, &connected)
+	ctx := context.Background()
+
+	for poll := 1; poll <= settleAfter+2; poll++ {
+		screens["%1"] = "frame " + strconv.Itoa(poll)
+		p.refresh(ctx)
+		row := stateOf(t, p, "%1")
+		if poll < settleAfter+2 {
+			if row.AgentState != StateIdle || row.StateSource != SourceEvent {
+				t.Fatalf("poll %d of settleAfter+2 = %d: %+v, want the report still standing "+
+					"while the window is open", poll, settleAfter+2, row)
+			}
+			if row.FinishedAt != 0 {
+				t.Fatalf("poll %d: finishedAt = %d while the window was still open", poll, row.FinishedAt)
+			}
+			continue
+		}
+		// settleAfter+2 polls of `working`, so the report is dropped on this
+		// poll and not on any other one.
+		if row.AgentState != StateWorking || row.StateSource != SourceScreen {
+			t.Fatalf("poll %d: %+v, want the pane back on the classifier (NIdle is %d)", poll, row, NIdle)
+		}
+		if row.FinishedAt != 0 {
+			t.Errorf("a dropped report derived finishedAt = %d", row.FinishedAt)
+		}
+	}
+	if len(captured) != settleAfter+2 {
+		t.Errorf("took %d captures, want settleAfter+2 = %d", len(captured), settleAfter+2)
+	}
+
+	// The drop is remembered rather than re-litigated: the standing option
+	// still holds the same value, and Observe reads it again on the very next
+	// poll. Task 9 owns the full semantics of that memory.
+	//
+	// The probe is a DIALOG, because that is what separates the two: a pane
+	// that is genuinely back on the classifier takes the whole classifier path,
+	// grammars included, and one that is merely being re-dropped every poll
+	// never reaches IsBlocked at all -- the window asks the classifier one
+	// question only. Asserting StateSource here cannot see the difference:
+	// windowPolls stays past the count, so the re-read report is dropped again
+	// on arrival and the row reads from the screen either way.
+	screens["%1"] = readFixture(t, "claude-blocked.txt") + "\nframe after the drop"
+	p.refresh(ctx)
+	row := stateOf(t, p, "%1")
+	if row.AgentState != StateBlocked || row.StateSource != SourceScreen {
+		t.Errorf("the poll after the drop = %+v, want the pane fully back on the classifier, "+
+			"blocked grammars and all", row)
+	}
+	if row.Question == nil || row.Question.Text == "" {
+		t.Errorf("the poll after the drop carries no question: %+v", row.Question)
+	}
+}
+
+// The window closes at the VERDICT, not at the count. Asserted on the captures
+// the poller makes and not only on the state it ends with: a report accepted at
+// poll settleAfter+1 and one accepted at poll NIdle look identical from
+// outside, and the difference is a capture-pane fork per poll per agent.
+func TestTheWindowClosesAtTheVerdict(t *testing.T) {
+	reportTS := time.Now().Add(-3 * time.Second).UnixMilli()
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	// A screen already still at the first window poll settles at settleAfter+1.
+	screens := map[string]string{"%1": "a screen that is already still"}
+	reports := map[string]string{"%1": FormatReport(StateIdle, reportTS, "")}
+	var captured []string
+	connected := true
+	p := reportPoller(&rows, reports, screens, &captured, &connected)
+	ctx := context.Background()
+
+	var row Row
+	for polls := 0; row.FinishedAt == 0; {
+		polls++
+		if polls > maxWindowPolls {
+			t.Fatalf("the window never closed in %d polls", maxWindowPolls)
+		}
+		p.refresh(ctx)
+		row = stateOf(t, p, "%1")
+	}
+	if len(captured) != settleAfter+1 {
+		t.Fatalf("took %d captures, want %d: the window must close at the verdict", len(captured), settleAfter+1)
+	}
+	if row.FinishedAt != reportTS {
+		t.Errorf("finishedAt = %d, want the report's own timestamp %d", row.FinishedAt, reportTS)
+	}
+
+	// And it stays closed. A verified report costs no further forks, which is
+	// the whole point of closing at the verdict.
+	before := len(captured)
+	p.refresh(ctx)
+	p.refresh(ctx)
+	if len(captured) != before {
+		t.Errorf("took %d more captures after the verdict", len(captured)-before)
+	}
+}
+
+// With no client connected there is nothing to verify, so the derivation is
+// immediate -- which is the case the app exists for.
+func TestWithNoClientTheDerivationIsImmediate(t *testing.T) {
+	reportTS := time.Now().Add(-3 * time.Second).UnixMilli()
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	screens := map[string]string{"%1": "a screen nobody is connected to see"}
+	reports := map[string]string{"%1": FormatReport(StateIdle, reportTS, "")}
+	var captured []string
+	connected := false
+	p := reportPoller(&rows, reports, screens, &captured, &connected)
+	p.refresh(context.Background())
+
+	row := stateOf(t, p, "%1")
+	if row.AgentState != StateIdle || row.StateSource != SourceEvent {
+		t.Fatalf("a resting report with nobody connected = %+v, want idle from the event source", row)
+	}
+	if row.FinishedAt != reportTS {
+		t.Errorf("finishedAt = %d on the first poll, want the report's own %d: with no screen to "+
+			"check there is nothing to wait for", row.FinishedAt, reportTS)
+	}
+	if len(captured) != 0 {
+		t.Errorf("captured %v with no client connected", captured)
+	}
+}
+
+// The premise the arithmetic rests on: window poll 1 is a FIRST SIGHT, because
+// a capture-skipped pane was never passed to Retain. So the settle count the
+// window measures is the window's own -- `still` starts at 0 here -- and not a
+// leftover from a baseline taken minutes ago, which is what NIdle = settleAfter
+// + 2 is counting.
+//
+// Note what is NOT asserted here: everChanged staying false through the window.
+// It is false in this very fixture -- the repaint at window poll 2 differs from
+// poll 1's capture, and a differing capture sets everChanged, so at the
+// settling poll the classifier does stamp its own finishedAt = now
+// (state.go:123). That stamp is not what the row carries: while the report is
+// in force the row's FinishedAt is the report's derivation.
+func TestTheFirstWindowPollIsAFirstSight(t *testing.T) {
+	now := time.Now()
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	screens := map[string]string{"%1": "mid-run, frame 1"}
+	reports := map[string]string{}
+	var captured []string
+	connected := true
+	p := reportPoller(&rows, reports, screens, &captured, &connected)
+	ctx := context.Background()
+
+	// A classifier run with a real change in it, left one poll short of
+	// settling. If this baseline survived into the window, window poll 1 would
+	// compare equal, settle on the spot and verify the report against a settle
+	// count taken before the window ever opened.
+	p.refresh(ctx)
+	screens["%1"] = "mid-run, frame 2"
+	p.refresh(ctx)
+	for i := 0; i < settleAfter-1; i++ {
+		p.refresh(ctx)
+	}
+	if got := stateOf(t, p, "%1"); got.AgentState != StateWorking {
+		t.Fatalf("setup: %+v, want a run one poll short of settling", got)
+	}
+
+	// The turn's working report: the capture is skipped, so this pane is not
+	// passed to Retain and the classifier entry goes.
+	reports["%1"] = FormatReport(StateWorking, now.Add(-time.Second).UnixMilli(), "run go")
+	p.refresh(ctx)
+	base := len(captured)
+	if base != settleAfter+1 {
+		t.Fatalf("setup: %d captures before the window, want settleAfter+1 = %d", base, settleAfter+1)
+	}
+
+	// The turn end, on a screen byte-identical to the last one the classifier
+	// saw. A retained baseline settles on window poll 1; a first sight takes
+	// settleAfter+1 polls to settle.
+	reportTS := now.UnixMilli()
+	reports["%1"] = FormatReport(StateIdle, reportTS, "")
+	var row Row
+	for polls := 0; row.FinishedAt == 0; {
+		polls++
+		if polls > maxWindowPolls {
+			t.Fatalf("the window never closed in %d polls", maxWindowPolls)
+		}
+		p.refresh(ctx)
+		row = stateOf(t, p, "%1")
+	}
+	if got := len(captured) - base; got != settleAfter+1 {
+		t.Fatalf("the window took %d captures, want settleAfter+1 = %d: window poll 1 must be a "+
+			"FIRST SIGHT, so a capture-skipped pane must not be passed to Retain", got, settleAfter+1)
+	}
+	if row.FinishedAt != reportTS {
+		t.Errorf("finishedAt = %d, want the report's own timestamp %d", row.FinishedAt, reportTS)
 	}
 }

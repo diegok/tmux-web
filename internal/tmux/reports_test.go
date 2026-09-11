@@ -147,3 +147,76 @@ func TestReportsRetain(t *testing.T) {
 		t.Errorf("%%1 after Retain(nil) = %+v, %v; want a first sight", got, ok)
 	}
 }
+
+// The verification window belongs to the REPORT, not to the pane: a newer
+// report is a new claim and gets a fresh window. Without the reset, a second
+// turn's idle would inherit the first turn's verdict and be believed without
+// ever being checked.
+func TestANewerReportOpensAFreshWindow(t *testing.T) {
+	now := time.UnixMilli(1789075200000)
+	r := NewReports()
+
+	if _, ok := r.Observe("%1", FormatReport(StateIdle, now.UnixMilli(), ""), "claude", now); !ok {
+		t.Fatal("setup: the first report was not accepted")
+	}
+	if !r.NeedsScreen("%1") {
+		t.Fatal("a resting idle with an open window must be checked against the screen")
+	}
+	if r.Confirmed("%1", true) {
+		t.Fatal("confirmed with a client connected and the window still open")
+	}
+	if !r.Corroborate("%1", true) {
+		t.Fatal("an idle verdict must leave the report standing")
+	}
+	if r.NeedsScreen("%1") {
+		t.Error("the window stayed open after the verdict: the captures must stop")
+	}
+	if !r.Confirmed("%1", true) {
+		t.Error("a corroborated report may derive finishedAt")
+	}
+
+	// A second turn in the same pane.
+	later := now.Add(time.Minute)
+	if _, ok := r.Observe("%1", FormatReport(StateIdle, later.UnixMilli(), ""), "claude", later); !ok {
+		t.Fatal("setup: the second report was not accepted")
+	}
+	if !r.NeedsScreen("%1") || r.Confirmed("%1", true) {
+		t.Error("the second report inherited the first one's verdict")
+	}
+}
+
+// The window is for resting idles only. A working report is re-asserted by its
+// own writer and expires on a clock; blocked is rules 1 and 2 (Task 8), and
+// neither is checked here.
+func TestOnlyARestingIdleNeedsTheScreen(t *testing.T) {
+	now := time.UnixMilli(1789075200000)
+	for _, state := range []string{StateWorking, StateBlocked} {
+		r := NewReports()
+		if _, ok := r.Observe("%1", FormatReport(state, now.UnixMilli(), ""), "claude", now); !ok {
+			t.Fatalf("setup: the %s report was not accepted", state)
+		}
+		if r.NeedsScreen("%1") {
+			t.Errorf("a %s report asked for a capture", state)
+		}
+	}
+}
+
+// With nobody connected there is no screen to check and the derivation is
+// immediate; a pane with no report in force has nothing to derive from either
+// way.
+func TestConfirmedWithoutAClientOrWithoutAReport(t *testing.T) {
+	now := time.UnixMilli(1789075200000)
+	r := NewReports()
+	if _, ok := r.Observe("%1", FormatReport(StateIdle, now.UnixMilli(), ""), "claude", now); !ok {
+		t.Fatal("setup: the report was not accepted")
+	}
+	if !r.Confirmed("%1", false) {
+		t.Error("with no client connected the derivation must be immediate")
+	}
+	if r.Confirmed("%2", true) || r.Confirmed("%2", false) {
+		t.Error("a pane with no report in force confirmed one")
+	}
+	if r.Corroborate("%2", true) {
+		t.Error("a verdict for a pane with no report in force was accepted")
+	}
+}

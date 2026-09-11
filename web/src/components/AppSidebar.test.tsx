@@ -20,6 +20,7 @@ import { describe, expect, it } from 'vitest'
 
 import { AGENT_TITLE_PREFIXES, AppSidebar } from './AppSidebar'
 import { SidebarProvider } from '@/components/ui/sidebar'
+import { rowMenu, rowTargetForWindow } from '@/lib/manage'
 import { groupRows, readSeen, viewedSeen } from '@/lib/useSnapshot'
 import type { SnapshotRow, SnapshotState } from '@/lib/useSnapshot'
 
@@ -1106,6 +1107,177 @@ describe('the session row', () => {
     })
     // The active session's label is the emphasised one.
     expect(markup).toMatch(/text-sidebar-foreground"[^>]*>(<[^>]*>)*<span class="truncate">api</)
+  })
+})
+
+/**
+ * A window still wearing the name of the shell that created it.
+ *
+ * `automatic-rename off` stops tmux overwriting a name you chose, which is why
+ * it is set; the side effect is that every window never named by hand keeps its
+ * shell's name forever, so the line whose job is to identify a window running
+ * an agent reads `0: zsh`.
+ *
+ * What is pinned below is mostly the *narrowness* of the rule, because that is
+ * the half that can do damage: a false positive silently replaces a name
+ * somebody chose on purpose.
+ */
+describe('a window named after its shell', () => {
+  /** Each window row's first line, `index: name`, in document order. */
+  const windowNames = (markup: string) =>
+    [...markup.matchAll(/<span class="truncate">(\d+: [^<]*)<\/span>/g)].map((m) => m[1])
+
+  /** A two-pane window named after its shell, one pane of which tmux calls active. */
+  const split = (active: 0 | 1 | null) => [
+    row({
+      windowIndex: 1,
+      windowName: 'zsh',
+      paneId: '%4',
+      paneIndex: 0,
+      command: 'vim',
+      paneActive: active === 0,
+    }),
+    row({
+      windowIndex: 1,
+      windowName: 'zsh',
+      paneId: '%2',
+      paneIndex: 1,
+      command: 'claude',
+      paneActive: active === 1,
+    }),
+  ]
+
+  it('shows what the window is running in place of the shell that named it', () => {
+    const markup = render(
+      fromRows([row({ windowName: 'zsh', command: 'claude', activity: 'run go test ./...' })]),
+    )
+    expect(windowNames(markup)).toEqual(['0: claude'])
+    expect(markup).not.toContain('0: zsh')
+    // And it borrowed the command, not the second line: the activity is still
+    // the activity, where it was.
+    expect(rowText(markup)).toEqual([
+      expect.objectContaining({ kind: 'title', text: 'run go test ./...' }),
+    ])
+  })
+
+  it('covers every shell a window can end up named after', () => {
+    // The set is the whole rule. Emptied, or short by one, the row it was
+    // written for goes back to identifying nothing -- and says so nowhere.
+    for (const shell of ['zsh', 'bash', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh']) {
+      const markup = render(fromRows([row({ windowName: shell, command: 'claude' })]))
+      expect(windowNames(markup), shell).toEqual(['0: claude'])
+    }
+  })
+
+  it('leaves a name a human chose exactly alone', () => {
+    // Matching is equality on the whole name, not a search inside it, and it is
+    // case-sensitive and untrimmed: every one of these is a name somebody typed,
+    // and replacing one would be this feature doing the damage it exists to
+    // undo.
+    for (const name of [
+      'api',
+      'zsh-notes',
+      'my zsh',
+      'bashful',
+      'fish tank',
+      'Zsh',
+      'ZSH',
+      'zsh ',
+    ]) {
+      const markup = render(fromRows([row({ windowName: name, command: 'claude' })]))
+      expect(windowNames(markup), name).toEqual([`0: ${name}`])
+      expect(markup, name).not.toContain('0: claude')
+    }
+  })
+
+  it('accepts the one case it cannot tell apart', () => {
+    // A window a human deliberately named `zsh` is indistinguishable from one
+    // tmux named that way, because tmux keeps no record of which. It loses its
+    // name. Documented and accepted: the machinery to tell the two apart does
+    // not exist, and the row it costs is one the user can rename back.
+    const markup = render(fromRows([row({ windowName: 'zsh', command: 'vim' })]))
+    expect(windowNames(markup)).toEqual(['0: vim'])
+  })
+
+  it('changes nothing about a window that really is a shell', () => {
+    // The name and the command are the same word, so there is nothing new to
+    // say and the row is exactly the row it was -- capsule included.
+    const markup = render(fromRows([row({ windowName: 'zsh', command: 'zsh', title: 'devbox' })]))
+    expect(windowNames(markup)).toEqual(['0: zsh'])
+    expect(rowText(markup)).toEqual([expect.objectContaining({ kind: 'command', text: 'zsh' })])
+  })
+
+  it('does not say the same word twice on one line', () => {
+    // The capsule on the right of the first line is there to say which program
+    // this is. Once the name is saying it, the capsule is that word again, an
+    // inch away.
+    const markup = render(fromRows([row({ windowName: 'zsh', command: 'vim', title: 'devbox' })]))
+    expect(windowNames(markup)).toEqual(['0: vim'])
+    expect(rowText(markup)).toEqual([])
+    // Control: a window with a name of its own keeps its capsule, because there
+    // the name and the capsule are two different answers.
+    const named = render(fromRows([row({ windowName: 'edit', command: 'vim', title: 'devbox' })]))
+    expect(rowText(named)).toEqual([expect.objectContaining({ kind: 'command', text: 'vim' })])
+  })
+
+  it('keeps the shell name when there is no command to put in its place', () => {
+    const markup = render(fromRows([row({ windowName: 'zsh', command: '' })]))
+    expect(windowNames(markup)).toEqual(['0: zsh'])
+  })
+
+  it('shows the pane a click on the row would land on when the window is split', () => {
+    // A split window's row is not a pane, and its panes have rows of their own
+    // directly underneath -- naming them all here would print that list twice.
+    // The pane the row's own click selects is the one answer that cannot
+    // disagree with what the row does, because it is the same call that decides
+    // it.
+    expect(windowNames(render(fromRows(split(1))))).toEqual(['1: claude'])
+    // Not "take the first pane": the active one is second here.
+    expect(windowNames(render(fromRows(split(0))))).toEqual(['1: vim'])
+    // And the panes still say what they are, underneath.
+    expect(render(fromRows(split(1)))).toContain('pane 1')
+  })
+
+  it('falls back to the first pane when tmux calls none of them active', () => {
+    expect(windowNames(render(fromRows(split(null))))).toEqual(['1: vim'])
+  })
+
+  it('is gone the moment the window has a name of its own', () => {
+    // Keyed off the name in this poll and on nothing else, so the poll that
+    // reports the rename is the poll that drops the fallback. Nothing is
+    // remembered and nothing has to be cleared.
+    expect(windowNames(render(fromRows([row({ windowName: 'zsh', command: 'claude' })])))).toEqual([
+      '0: claude',
+    ])
+    expect(windowNames(render(fromRows([row({ windowName: 'api', command: 'claude' })])))).toEqual([
+      '0: api',
+    ])
+  })
+
+  it('renames the window tmux has, not the word the row shows', () => {
+    // Display only. A Radix menu is portalled and never mounts in a static
+    // render -- see `management affordances` -- so what the menu would offer is
+    // asked of `rowMenu` directly, over the very tree the sidebar just
+    // rendered: a rename that targeted the displayed name would offer `claude`
+    // as the initial value and rename the window to what it is running. What
+    // this reaches is the tree and `rowMenu` over it, which is where a fallback
+    // written one layer too low would show up; that the *component* hands the
+    // menu this node and not a doctored copy of it is e2e's to see, and
+    // `manage.spec.ts` says so in its own header.
+    const snapshot = fromRows(split(1))
+    expect(windowNames(render(snapshot))).toEqual(['1: claude'])
+
+    const session = snapshot.groups[0]
+    const entry = rowMenu(rowTargetForWindow(session, session.windows[0]), 'work').find(
+      (e) => e.id === 'rename-window',
+    )
+    if (entry?.intent.kind !== 'prompt') throw new Error('no rename-window prompt on the row')
+    expect(entry.label).toBe('Rename window "zsh"…')
+    expect(entry.intent.prompt.fields[0].initial).toBe('zsh')
+    // And the tree the row was drawn from still carries the real name, so
+    // everything else addressed off it -- the kill dialog, the palette -- is
+    // addressing the window tmux has.
+    expect(session.windows[0].name).toBe('zsh')
   })
 })
 

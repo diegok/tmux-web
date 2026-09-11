@@ -47,6 +47,17 @@
  * one recognised prefix comes off before the title is shown. That is display
  * only and it is per agent: see `AGENT_TITLE_PREFIXES`.
  *
+ * ## A window named after its shell
+ *
+ * `automatic-rename off` is a deliberate setting -- it stops tmux overwriting a
+ * name you chose -- and its side effect is that a window you never named by
+ * hand keeps the name of the shell that created it for good. So the row whose
+ * job is to identify a window running Claude reads `0: zsh`, spending its first
+ * line on the least informative string available. `windowDisplay` puts the
+ * window's own pane command there instead, and only there: the name tmux holds
+ * is untouched, and every rename, kill and menu heading goes on reading it off
+ * the node. See `SHELL_WINDOW_NAMES` for how narrow that rule is and why.
+ *
  * ## Blocks
  *
  * A session group is ruled off from the one above it. A rule is 1px of height
@@ -372,7 +383,10 @@ function WindowItem({
   const split = window.panes.length > 1
   const target = windowTarget(window)
   const holdsActive = window.panes.some((p) => p.paneId === activePane)
-  const label = `${window.index}: ${window.name}`
+  // The name, or what the window is running where tmux only ever wrote down a
+  // shell. Display only -- `window.name` is what everything else addresses.
+  const shown = windowDisplay(window)
+  const label = `${window.index}: ${shown.name}`
   // The window's own roll-up. On a single-pane window that is the pane's state,
   // which is why the pane below it gets no second dot of its own.
   const state = windowState(window, serverStart, seen)
@@ -426,7 +440,15 @@ function WindowItem({
               }
             />
             {lone ? (
-              <PaneLines pane={lone} name={label} commandWidth="max-w-32" />
+              <PaneLines
+                pane={lone}
+                name={label}
+                commandWidth="max-w-32"
+                // The capsule says which program this is. Where the name above
+                // has just borrowed that same word, saying it twice on one line
+                // is the row repeating itself -- see `windowDisplay`.
+                nameCommand={shown.command}
+              />
             ) : (
               // A split window has no pane of its own to describe, so it is the
               // row it always was: one line, one name.
@@ -728,6 +750,75 @@ function RetryButton({ onRefresh }: { onRefresh: () => void }) {
 }
 
 /**
+ * The window names tmux hands out for free, which identify nothing.
+ *
+ * tmux names a new window after the command that created it, and with
+ * `automatic-rename off` -- a common, deliberate setting, since it is what
+ * stops tmux overwriting a name you *did* choose -- that first name is the name
+ * forever. Every window started from a shell and never renamed therefore reads
+ * `zsh`, whatever has been running in it since.
+ *
+ * **Exact, case-sensitive, untrimmed equality against this set, and nothing
+ * looser.** Not `includes`, not a prefix, not a lowercased compare: a false
+ * positive silently replaces a name somebody chose on purpose, and `zsh-notes`,
+ * `fish tank` and `Zsh` are all names somebody chose. The cost of the rule
+ * being too narrow is a row that looks exactly as it does today.
+ *
+ * Conservative for the same reason: the eight below are the shells a login
+ * shell realistically is. A shell wrapper, a `-zsh` login spelling or anything
+ * else can be added when it is *seen*, not because it is plausible.
+ *
+ * **The one case this cannot tell apart** is a window a human deliberately
+ * named `zsh`. tmux keeps no record of who set a window name, so nothing here
+ * can distinguish it, and it loses the name it was given. Accepted rather than
+ * worked around: the machinery to tell the two apart does not exist on either
+ * side of the wire, and the row it costs is one rename away from being right.
+ */
+const SHELL_WINDOW_NAMES = new Set(['zsh', 'bash', 'fish', 'sh', 'dash', 'ksh', 'tcsh', 'csh'])
+
+/**
+ * What a window row's first line calls this window, and whether it had to
+ * borrow the answer.
+ *
+ * The name tmux holds, unless that name is nothing but a shell's -- in which
+ * case the row shows the **command of the pane a click on it would land in**,
+ * which for the single-pane window this mostly happens to is exactly what the
+ * window is.
+ *
+ * A split window shows that same pane's command and not a list of all of them:
+ * the panes have rows of their own directly underneath, so listing them here
+ * prints that list twice, and no summary of two programs fits in the width a
+ * name has. The row and the click agreeing is worth more than either
+ * alternative -- which is why the pane is looked up by the id `windowTarget`
+ * answers with, the very call the click sends, rather than by re-deriving
+ * "tmux's active pane, else the first" a second time beside it. Two spellings
+ * of that rule is one more than can ever disagree.
+ *
+ * Deliberately *not* the activity or the title. Both already have a line of
+ * their own on the row below the name, and the agent's mark beside it already
+ * says which agent this is; the first line's job is identity, and the command
+ * is the one piece of identity nothing else on the row is carrying.
+ *
+ * **`command` is set only when the name was actually replaced**, which is what
+ * suppresses the duplicate capsule -- and why a window named `zsh` that really
+ * is running `zsh` renders exactly as it always has: there is nothing new to
+ * say, so nothing changes. An empty command is nothing new either.
+ *
+ * Display only, and keyed on nothing but the name in this poll: rename the
+ * window and the very next snapshot drops the fallback, with no memory to
+ * clear. What the menus, the kill dialog and the palette act on is
+ * `window.name` off the node, which this never touches -- so a window renamed
+ * *to* `zsh` is still renameable, and renaming it targets `zsh`.
+ */
+function windowDisplay(window: WindowNode): { name: string; command?: string } {
+  if (!SHELL_WINDOW_NAMES.has(window.name)) return { name: window.name }
+  const clicked = windowTarget(window)
+  const command = window.panes.find((p) => p.paneId === clicked)?.command.trim() ?? ''
+  if (command === '' || command === window.name) return { name: window.name }
+  return { name: command, command }
+}
+
+/**
  * A pane title that is only a hostname: one token of the characters a hostname
  * is made of, and nothing else.
  *
@@ -986,6 +1077,7 @@ function PaneLines({
   name,
   commandWidth,
   afterName,
+  nameCommand,
 }: {
   pane: PaneNode
   name: string
@@ -993,8 +1085,16 @@ function PaneLines({
   commandWidth: string
   /** The tmux-active marker, on a split window's pane rows. */
   afterName?: ReactNode
+  /**
+   * The command the row's *name* has already borrowed, when the window was
+   * named after a shell -- see `windowDisplay`. The capsule is dropped when it
+   * would be that same word again, and only then: the two are otherwise
+   * different answers and both are worth their space.
+   */
+  nameCommand?: string
 }) {
   const { text, label, fromCommand, tooltip } = paneText(pane)
+  const showCommand = fromCommand && text !== nameCommand
   return (
     <span className="flex min-w-0 flex-1 flex-col justify-center gap-0.5">
       <span className="flex min-w-0 items-center gap-2">
@@ -1013,7 +1113,7 @@ function PaneLines({
           </span>
         )}
         {afterName}
-        {fromCommand && (
+        {showCommand && (
           // Unchanged, deliberately: a command is a program's name, and a row
           // running `zsh` should go on looking exactly like a row running
           // `zsh`. The distinction between "this is a process" and "this is

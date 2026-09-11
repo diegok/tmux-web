@@ -26,6 +26,16 @@ type Poller struct {
 	// from a bare snapshot function has no tmux server to ask, and reports an
 	// empty generation rather than inventing one.
 	startFn func(context.Context) (string, error)
+	// nowFn is the poll's clock, and the only one either authority ever gets:
+	// Classifier and Reports are both pure, and `now` reaches them as a
+	// parameter from here.
+	//
+	// Never nil -- NewPollerWith fills it with time.Now -- and not in Options,
+	// because no caller outside this package has a reason to move the clock.
+	// The tests do: workingTTL expires because TIME passed, and a report
+	// already in force can only be replaced by a NEWER one, so there is no
+	// value a test could write to a fixture that would make it stale instead.
+	nowFn func() time.Time
 
 	// The poller's second, narrower job: for panes running a known agent, and
 	// only while a browser is holding a terminal socket, each poll also
@@ -106,7 +116,7 @@ func NewPollerWith(o Options) *Poller {
 			return rows, nil, err
 		}
 	}
-	p := &Poller{interval: o.Interval, fn: fn, startFn: o.ServerStart}
+	p := &Poller{interval: o.Interval, fn: fn, startFn: o.ServerStart, nowFn: time.Now}
 	if o.Capture != nil {
 		p.capture, p.connected = o.Capture, o.Connected
 		// Built here rather than taken from the caller: it is the poll
@@ -269,7 +279,7 @@ func (p *Poller) classify(ctx context.Context, rows []Row, reports map[string]st
 	// everChanged, and the next settle stamps a finish edge for an agent that
 	// has only just started.
 	var agents, captured []string
-	now := time.Now()
+	now := p.nowFn()
 	for i := range rows {
 		agent := KnownAgent(rows[i].Command)
 		if agent == "" {

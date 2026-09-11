@@ -469,3 +469,43 @@ func TestAfterARestartAStandingIdleEntersTheWindow(t *testing.T) {
 		t.Error("with no client connected the derivation must still be immediate")
 	}
 }
+
+// The derivation's own half, one layer below the poller: a resting idle needs
+// no previous report to be in force, and its timestamp is carried through
+// unchanged, because that timestamp is the whole of finishedAt.
+//
+// An implementation that remembered the previous report and fired on the
+// working -> idle EDGE would need daemon memory this Reports does not have. It
+// would answer nothing here -- and nothing again after every daemon restart, on
+// every pane whose turn ended while the daemon was down, which is most of them.
+func TestARestingIdleNeedsNoPreviousReport(t *testing.T) {
+	now := time.UnixMilli(1789075200000)
+	// Dated well before this Reports existed, and past workingTTL: a resting
+	// report is not re-asserted and does not expire on a clock, so an agent
+	// that finished an hour ago still says so.
+	finished := now.Add(-workingTTL - 10*time.Minute).UnixMilli()
+	raw := FormatReport(StateIdle, finished, "")
+
+	r := NewReports()
+	got, ok := r.Observe("%1", raw, "claude", now)
+	if !ok {
+		t.Fatalf("a resting idle with no working report before it is not in force")
+	}
+	if got.State != StateIdle || got.Timestamp != finished {
+		t.Errorf("in force: %+v, want idle at the report's own timestamp %d", got, finished)
+	}
+	if !r.Confirmed("%1", false) {
+		t.Error("with nobody connected the derivation must be immediate: there is no screen to " +
+			"check and the report is the only authority there is")
+	}
+
+	// The restart. A Reports that has seen nothing reads the same standing
+	// value and answers identically, because the fact lives in tmux and not in
+	// here -- which is what makes it survive a daemon restart, a poller restart
+	// and a wterm-web upgrade.
+	r2 := NewReports()
+	got2, ok2 := r2.Observe("%1", raw, "claude", now)
+	if !ok2 || got2 != got {
+		t.Errorf("after a restart: %+v, %v, want the identical report %+v back", got2, ok2, got)
+	}
+}

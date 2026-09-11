@@ -1608,3 +1608,395 @@ func TestAServerRestartEmptiesTheReportMemory(t *testing.T) {
 			row, reportTS)
 	}
 }
+
+// --- finishedAt, and the switch between authorities --------------------------
+//
+// The two authorities date a finish differently and that difference is the
+// whole of this section. A REPORT carries the time the agent actually finished,
+// so it can be believed on sight. The CLASSIFIER has no clock of its own: its
+// only way to date a finish is time.Now() at the moment it first noticed, so a
+// first sight there must stamp nothing -- everChanged -- or every restart lights
+// a done badge on every pane that happens to be sitting still.
+//
+// Which is why the guard is asymmetric, and why that reads like a contradiction
+// until the dates are compared: the classifier's first sight of a pane idle
+// since yesterday invents finishedAt = now, which beats every browser's stored
+// `seen` and lights every device for a fiction. A report's first sight says
+// "this agent finished at 21:20", and the browser badges only if that device has
+// not looked since 21:20 -- which is exactly what the badge is supposed to mean.
+
+// The derivation is STATELESS: a pane whose accepted report is a resting idle
+// carries that report's own timestamp, read back out of tmux, with no memory of
+// a previous report and no edge anywhere in it.
+//
+// The restart is the assertion revision 1 of the design claimed and revision 1's
+// mechanism could not have satisfied. An implementation that remembered the
+// previous report and stamped on the working -> idle EDGE answers 0 here, on
+// both pollers: neither has ever seen a working report for this pane, and after
+// a restart neither ever will.
+func TestFinishedAtIsDerivedFromTheReportWithNoDaemonMemory(t *testing.T) {
+	// Dated long before this daemon started, and past workingTTL -- a resting
+	// report is not re-asserted and does not expire on a clock. It is also what
+	// makes the assertion below able to tell the report's timestamp from a
+	// clock read at the poll.
+	reportTS := time.Now().Add(-workingTTL - 7*time.Minute).UnixMilli()
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	screens := map[string]string{"%1": "a screen nobody is connected to see"}
+	reports := map[string]string{"%1": FormatReport(StateIdle, reportTS, "")}
+	connected := false
+
+	var captured []string
+	p := reportPoller(&rows, reports, screens, &captured, &connected)
+	p.refresh(context.Background())
+	row := stateOf(t, p, "%1")
+	if row.AgentState != StateIdle || row.StateSource != SourceEvent {
+		t.Fatalf("a standing resting idle = %+v, want idle from the event source", row)
+	}
+	if row.FinishedAt != reportTS {
+		t.Errorf("finishedAt = %d, want the report's own timestamp %d exactly: the report carries "+
+			"the time the agent finished, and a clock read at the poll would date a run this "+
+			"daemon never watched to the moment it first looked", row.FinishedAt, reportTS)
+	}
+	if len(captured) != 0 {
+		t.Errorf("captured %v with no client connected", captured)
+	}
+
+	// The daemon restarts -- a brand new Reports and a brand new Classifier over
+	// the same standing option -- and answers identically, because the fact
+	// lives in tmux.
+	var captured2 []string
+	p2 := reportPoller(&rows, reports, screens, &captured2, &connected)
+	p2.refresh(context.Background())
+	restarted := stateOf(t, p2, "%1")
+	if restarted.AgentState != StateIdle || restarted.StateSource != SourceEvent {
+		t.Fatalf("after a restart = %+v, want idle from the event source", restarted)
+	}
+	if restarted.FinishedAt != reportTS {
+		t.Errorf("finishedAt = %d after a restart, want the report's own timestamp %d: an edge "+
+			"needs daemon memory, and a fresh Reports has none, so a badge derived from an edge "+
+			"would not survive this", restarted.FinishedAt, reportTS)
+	}
+}
+
+// Both directions, because they are deliberately asymmetric and the next reader
+// will assume they are not.
+func TestAuthoritySwitchStamping(t *testing.T) {
+	t.Run("report to classifier stamps no edge", func(t *testing.T) {
+		rows := []Row{{PaneID: "%1", Command: "claude"}}
+		screens := map[string]string{"%1": "mid-run, frame 1"}
+		reports := map[string]string{}
+		var captured []string
+		connected := true
+		p := reportPoller(&rows, reports, screens, &captured, &connected)
+		// A frozen clock, advanced by hand: the working report ages out because
+		// TIME passed, and a report already in force can only be replaced by a
+		// NEWER one, so there is no value the test could write that would make
+		// it stale instead.
+		clock := time.Now()
+		p.nowFn = func() time.Time { return clock }
+		ctx := context.Background()
+
+		// A classifier run with a real change in it -- so the entry carries
+		// everChanged, the flag that licenses a finish stamp -- left one poll
+		// short of settling. Built from settleAfter, which no mutant in this
+		// task retargets.
+		p.refresh(ctx)
+		screens["%1"] = "mid-run, frame 2"
+		p.refresh(ctx)
+		for i := 0; i < settleAfter-1; i++ {
+			p.refresh(ctx)
+		}
+		if got := stateOf(t, p, "%1"); got.AgentState != StateWorking || got.StateSource != SourceScreen {
+			t.Fatalf("setup: %+v, want a classifier run one poll short of settling", got)
+		}
+
+		// The turn's working report lands and takes the pane. The capture is
+		// skipped, so this pane is not passed to Retain and the classifier's
+		// entry -- hash, still count and everChanged together -- goes with it.
+		reports["%1"] = FormatReport(StateWorking, clock.UnixMilli(), "run go")
+		before := len(captured)
+		p.refresh(ctx)
+		if got := stateOf(t, p, "%1"); got.StateSource != SourceEvent {
+			t.Fatalf("setup: %+v, want the working report in force", got)
+		}
+		if len(captured) != before {
+			t.Fatalf("setup: a capture was taken under a fresh working report")
+		}
+
+		// The integration dies mid-turn. Nothing re-asserts, the report ages
+		// out past workingTTL, and the pane goes back to the authority with no
+		// clock -- on a screen byte-identical to the last one the classifier
+		// saw, which is the shape that makes this dangerous.
+		clock = clock.Add(workingTTL + time.Second)
+		p.refresh(ctx)
+		row := stateOf(t, p, "%1")
+		if row.StateSource != SourceScreen {
+			t.Fatalf("%+v, want the aged-out report handed back to the classifier", row)
+		}
+		if row.AgentState != StateWorking || row.FinishedAt != 0 {
+			t.Fatalf("the first capture after the switch = %+v, want a FIRST SIGHT: working, no "+
+				"edge. A retained entry compares equal on this very poll, against a hash taken "+
+				"before the report ever stood, and stamps a finish for a run it never saw start",
+				row)
+		}
+
+		// And it settles, from nothing. everChanged is false on a first sight,
+		// so the settle stamps nothing either: this authority's run began when
+		// it first looked, and it has no way to date anything before that.
+		for i := 1; i <= settleAfter; i++ {
+			p.refresh(ctx)
+		}
+		row = stateOf(t, p, "%1")
+		if row.AgentState != StateIdle || row.StateSource != SourceScreen {
+			t.Fatalf("%+v, want the classifier settled after settleAfter = %d identical captures",
+				row, settleAfter)
+		}
+		if row.FinishedAt != 0 {
+			t.Errorf("finishedAt = %d after a report -> classifier switch: the classifier can only "+
+				"date a finish `now`, so a run it did not watch start must earn no edge -- "+
+				"otherwise every integration that dies mid-turn lights a done badge on every "+
+				"device ~3s later", row.FinishedAt)
+		}
+	})
+
+	t.Run("classifier to report does produce one", func(t *testing.T) {
+		rows := []Row{{PaneID: "%1", Command: "claude"}}
+		screens := map[string]string{"%1": "mid-run, frame 1"}
+		reports := map[string]string{}
+		var captured []string
+		connected := true
+		p := reportPoller(&rows, reports, screens, &captured, &connected)
+		clock := time.Now()
+		p.nowFn = func() time.Time { return clock }
+		ctx := context.Background()
+
+		// The classifier owns the pane and sees real work, so everChanged is
+		// set and this authority is licensed to stamp -- with the only date it
+		// has, which is now.
+		p.refresh(ctx)
+		screens["%1"] = "mid-run, frame 2"
+		p.refresh(ctx)
+		if got := stateOf(t, p, "%1"); got.StateSource != SourceScreen || got.AgentState != StateWorking {
+			t.Fatalf("setup: %+v, want the classifier watching a run", got)
+		}
+
+		// The turn ends. The integration's event fires 7-52 ms BEFORE the last
+		// repaint -- measured, over 88 turns on three agents -- so the report is
+		// dated slightly earlier than the screen that follows it, and the two
+		// dates are distinguishable for exactly that reason.
+		reportTS := clock.Add(-50 * time.Millisecond).UnixMilli()
+		reports["%1"] = FormatReport(StateIdle, reportTS, "")
+		screens["%1"] = "the turn has ended"
+		var row Row
+		for polls := 0; row.FinishedAt == 0; {
+			polls++
+			if polls > maxWindowPolls {
+				t.Fatalf("no stamp in %d polls: a classifier -> report switch must produce one, "+
+					"and the report is the authority that can date it", maxWindowPolls)
+			}
+			p.refresh(ctx)
+			row = stateOf(t, p, "%1")
+		}
+		if row.AgentState != StateIdle || row.StateSource != SourceEvent {
+			t.Fatalf("%+v, want idle from the event source", row)
+		}
+		if row.FinishedAt != reportTS {
+			t.Errorf("finishedAt = %d, want the REPORT's own timestamp %d. The classifier settled "+
+				"inside this very window and stamped its own finishedAt = %d; the row must carry "+
+				"the agent's date for the finish, not the daemon's date for noticing it",
+				row.FinishedAt, reportTS, clock.UnixMilli())
+		}
+	})
+}
+
+// A mid-install badge storm is not possible, and the reason is the difference
+// between the two authorities rather than a guard.
+//
+// The install lands in the middle of a run, which is the worst case: the first
+// report this daemon ever sees for the pane comes from the middle of a turn
+// whose start it never saw. A `working` report derives nothing -- only a RESTING
+// one does -- and when the turn really ends the badge it produces is dated by
+// the agent. One badge, for a run that really finished, at the time it really
+// finished.
+func TestInstallingMidRunProducesOneTrueBadgeAtMost(t *testing.T) {
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	screens := map[string]string{"%1": "mid-run, frame 0"}
+	reports := map[string]string{}
+	var captured []string
+	connected := true
+	p := reportPoller(&rows, reports, screens, &captured, &connected)
+	clock := time.Now()
+	p.nowFn = func() time.Time { return clock }
+	ctx := context.Background()
+
+	// Every distinct non-zero finishedAt this pane ever shows. A storm is
+	// several of them; a badge for a run nobody watched is one with the wrong
+	// date on it. Counting distinct values sees both.
+	stamps := map[int64]bool{}
+	poll := func() Row {
+		p.refresh(ctx)
+		row := stateOf(t, p, "%1")
+		if row.FinishedAt != 0 {
+			stamps[row.FinishedAt] = true
+		}
+		return row
+	}
+
+	// Before the install: an agent mid-run, watched by the classifier alone. It
+	// never settles, so it never stamps -- and everChanged is true throughout,
+	// so nothing below is protected by the flag being false.
+	for i := 1; i <= settleAfter+2; i++ {
+		clock = clock.Add(time.Second)
+		screens["%1"] = "mid-run, frame " + strconv.Itoa(i)
+		if row := poll(); row.StateSource != SourceScreen || row.AgentState != StateWorking {
+			t.Fatalf("poll %d before the install = %+v, want the classifier watching a run", i, row)
+		}
+	}
+
+	// The integration is installed and the agent's next event lands: a working
+	// report from the middle of a turn. It takes the pane and stamps nothing.
+	clock = clock.Add(time.Second)
+	reports["%1"] = FormatReport(StateWorking, clock.UnixMilli(), "run go")
+	if row := poll(); row.StateSource != SourceEvent || row.AgentState != StateWorking {
+		t.Fatalf("the first report after the install = %+v, want working from the event source", row)
+	}
+
+	// The turn ends for real. The report is dated by the agent, just before the
+	// final repaint.
+	clock = clock.Add(2 * time.Second)
+	finish := clock.Add(-50 * time.Millisecond).UnixMilli()
+	reports["%1"] = FormatReport(StateIdle, finish, "")
+	screens["%1"] = "the turn has ended"
+	var row Row
+	for polls := 0; row.FinishedAt == 0; {
+		polls++
+		if polls > maxWindowPolls {
+			t.Fatalf("the turn end earned no badge in %d polls", maxWindowPolls)
+		}
+		row = poll()
+	}
+	// And it is not re-dated afterwards: a badge that moved forward on every
+	// poll could never be cleared by looking at the pane.
+	for i := 0; i < settleAfter+2; i++ {
+		clock = clock.Add(time.Second)
+		poll()
+	}
+
+	if len(stamps) != 1 || !stamps[finish] {
+		t.Errorf("finishedAt took %d distinct values %v across the install, want exactly one: the "+
+			"agent's own %d", len(stamps), stamps, finish)
+	}
+}
+
+// The full precedence table: report present/absent x fresh/stale x screen
+// available/unavailable, asserting AgentState, StateSource AND FinishedAt
+// together.
+//
+// Asserting the state alone cannot see a precedence bug at all -- it is how v2's
+// blocked override hid a finish stamp for a run that never finished -- and
+// FinishedAt is the field the badge is actually made of. "Screen available" is a
+// connected client: the capture is what a resting report is checked against, and
+// with nobody connected there is no screen to have an opinion.
+//
+// Every row builds its own poller. The derivation is stateless, so a table
+// sharing one would be testing a sequence instead of a precedence.
+func TestPrecedenceTable(t *testing.T) {
+	now := time.Now()
+	fresh := now.Add(-time.Second).UnixMilli()
+	// Past the working window, written against the constant.
+	stale := now.Add(-workingTTL - time.Minute).UnixMilli()
+
+	for _, tc := range []struct {
+		name       string
+		report     string // "" for an unset option
+		connected  bool
+		state      string
+		source     string
+		finishedAt int64
+	}{
+		{
+			name: "no report, screen available", connected: true,
+			state: StateWorking, source: SourceScreen,
+		},
+		{
+			// Not frozen at a last value: state that is minutes old presented
+			// as current is worse than none.
+			name: "no report, no screen",
+		},
+		{
+			name:   "a fresh working report, screen available",
+			report: FormatReport(StateWorking, fresh, "run go"), connected: true,
+			state: StateWorking, source: SourceEvent,
+		},
+		{
+			name:   "a fresh working report, no screen",
+			report: FormatReport(StateWorking, fresh, "run go"),
+			state:  StateWorking, source: SourceEvent,
+		},
+		{
+			// The classifier's first sight, and no edge with it.
+			name:   "a stale working report, screen available",
+			report: FormatReport(StateWorking, stale, "run go"), connected: true,
+			state: StateWorking, source: SourceScreen,
+		},
+		{
+			// Nothing left: the report has expired and there is no screen.
+			name:   "a stale working report, no screen",
+			report: FormatReport(StateWorking, stale, "run go"),
+		},
+		{
+			// The derivation is SUPPRESSED while the verification window is
+			// open, not stamped and retracted: a done badge that has landed on
+			// three devices does not un-land.
+			name:   "a fresh idle report, screen available",
+			report: FormatReport(StateIdle, fresh, ""), connected: true,
+			state: StateIdle, source: SourceEvent,
+		},
+		{
+			name:   "a fresh idle report, no screen",
+			report: FormatReport(StateIdle, fresh, ""),
+			state:  StateIdle, source: SourceEvent, finishedAt: fresh,
+		},
+		{
+			// A resting report does not expire on a clock: the agent said it
+			// has stopped, and nothing further happens until the user acts. An
+			// hour-old idle is still in force, and still dates its own finish.
+			name:   "an hour-old idle report, no screen",
+			report: FormatReport(StateIdle, stale, ""),
+			state:  StateIdle, source: SourceEvent, finishedAt: stale,
+		},
+		{
+			// Resting, in force, and deriving nothing. An agent waiting at a
+			// dialog has not finished.
+			name:   "a fresh blocked report, screen available",
+			report: FormatReport(StateBlocked, fresh, "Approve?"), connected: true,
+			state: StateBlocked, source: SourceEvent,
+		},
+		{
+			name:   "a fresh blocked report, no screen",
+			report: FormatReport(StateBlocked, fresh, "Approve?"),
+			state:  StateBlocked, source: SourceEvent,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rows := []Row{{PaneID: "%1", Command: "claude"}}
+			// No registered form on it, so a blocked report is neither
+			// corroborated nor dropped on this first poll.
+			screens := map[string]string{"%1": "a screen with no dialog on it"}
+			reports := map[string]string{}
+			if tc.report != "" {
+				reports["%1"] = tc.report
+			}
+			var captured []string
+			connected := tc.connected
+			p := reportPoller(&rows, reports, screens, &captured, &connected)
+			p.refresh(context.Background())
+
+			row := stateOf(t, p, "%1")
+			if row.AgentState != tc.state || row.StateSource != tc.source || row.FinishedAt != tc.finishedAt {
+				t.Errorf("%+v\nwant state %q, source %q, finishedAt %d",
+					row, tc.state, tc.source, tc.finishedAt)
+			}
+		})
+	}
+}

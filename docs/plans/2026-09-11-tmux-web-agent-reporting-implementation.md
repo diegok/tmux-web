@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.26 (stdlib only), React 19 + shadcn/ui, vitest, Playwright. Integrations: one TypeScript file (pi), one JavaScript file (opencode), one `settings.json` block plus one shell line (Claude Code).
 
-**Design document:** `docs/plans/2026-09-10-tmux-web-agent-reporting-design.md`, revision 5, at commit `201fa3d`. **Read all of it before starting.** It is long because it records five revisions and three adversarial review rounds; the revision sections at the top are the fastest way to learn which plausible-looking simplifications have already been tried and are wrong.
+**Design document:** `docs/plans/2026-09-10-tmux-web-agent-reporting-design.md`, **revision 6**. Revision 5 is the version this plan was written against, pinned at commit `201fa3d`; revision 6 landed after it and moves no mechanism — it withdraws the exposure argument that revisions 1–5 used to justify the label rules, keeps the decisions, and **deletes the first-word reduction of shell commands** (Task 15 below carries the corrected version). **Read all of it before starting.** It is long because it records six revisions and three adversarial review rounds; the revision sections at the top are the fastest way to learn which plausible-looking simplifications have already been tried and are wrong.
 
 **It supersedes part of v2.** `docs/plans/2026-09-10-tmux-web-v2-design.md` Decision 1 (the title as a description of current work) and v2's rule that `AgentState` is empty whenever no browser is connected. Everything else in v2 stands — the churn classifier, the blocked grammars, `finishedAt` on the server and `done` in the browser, and the rule that only a positive match sets `blocked`.
 
@@ -136,7 +136,7 @@ Every task is independently committable and reviewable. Where a task changes the
 | 12 | Recorded hook payloads as fixtures | One file per agent per event, captured from your own content; the two that matter most are a real `agent_settled` and a real `session.idle` taken while a subagent runs |
 | 13 | The event tables and the `notification_type` whitelist | Twelve documented types plus invented ones; an unknown one writes **nothing**; every `blocked` entry names a registered form |
 | 14 | Edge versus re-assertion | The criterion, the per-(event, state) table, one `show-options` read before a re-assertion write, and the turn-start invariant test |
-| 15 | Activity text and the subagent filters | Basename, first word, tool name alone; per-agent filters with their failure directions stated and tested |
+| 15 | Activity text and the subagent filters | Basename for a path, a shell command whole, tool name alone; per-agent filters with their failure directions stated and tested |
 | 16 | The single-slot queue | A pure TypeScript module with the spawn injected, under `web/`'s vitest |
 | 17 | The pi extension | `session_start`, `input`, `tool_execution_start`, `ui_prompt_start`, `agent_settled` |
 | 18 | The opencode plugin | `chat.message`, `session.status`, tool events, `permission.asked`, `todo.updated`, `session.idle` |
@@ -156,7 +156,7 @@ The design's open questions are open, and several of them are open because measu
 | 8 | **3 — `N_blocked`.** `N_idle` is measured and closed; `N_blocked` is a derived floor with an unmeasured value, and measuring it needs the real dialog screens question 10 is also waiting on | `settleAfter + 1`, expressed against `settleAfter`. **Do not carry `4` across from `N_idle`** |
 | 13 | **10 — four screen captures the whitelist is waiting on.** An 88-turn, 3-agent run met none of them and did not provoke them, so nobody will capture one by accident | Those four types stay *ignored*. Each promotes the day somebody manufactures the screen **and writes a grammar** — a code change, not a data change |
 | 18, 20 | **5, 6, 8 — opencode's global plugin directory, how often the todo rung is empty, nested project installs** | `--global` is **not** offered for opencode. The todo rung is written as rung 2 with the tool-call rung underneath it, which is correct either way |
-| 15, 17 | **7 — what pi's `tool_execution_start.args` actually contains, per tool** | Task 12 captures it. The reduction rules are written against what the fixture shows, not against the guess in the design |
+| 15, 17 | **7 — what pi's `tool_execution_start.args` actually contains, per tool** | Task 12 captures it. The basename default — and whether pi hands a shell command over as one string or as a structured object — is written against what the fixture shows, not against the guess in the design |
 | 21 | **13 — how late a late repaint can be.** Two observations, 5.0 s and 9.0 s, both on one claude prompt shape. A bound, not a distribution | `lateRepaintDwell = 15 * time.Second`, biased long, flagged in the comment as a guess of the same standing as the 60-second window |
 
 ---
@@ -3110,15 +3110,23 @@ git commit -m "feat: a re-assertion reads the standing report before writing one
 3. **The current tool call, verb plus object.**
 4. **Nothing — an empty text field, not an absent report.** At turn end the integration reports `idle` with no text; the row falls back to the title and then to the command, and the *state* is still the agent's own.
 
-**The object of a tool call is not the whole argument.** A tool's arguments are not a safe thing to publish: `Bash`'s is a command line, which routinely contains paths and occasionally a token, and `Read`'s is an absolute path — and v1 and v2 both deliberately keep `pane_current_path` out of the snapshot. That exclusion was about parsing, and our sanitizer covers parsing; but widening a web UI from "no paths" to "every path the agent touches" is a change of kind nobody asked for. So:
+**How much of a tool call the label carries.** This is the one rule the design's revision 6 changed, and it changed because the reason under it was false. The old rule reduced a `Bash` command to its first word on the grounds that "a tool's arguments are not a safe thing to publish" — a command line contains paths and occasionally a token, and the label lands in a tmux option and a web UI. **That is not a boundary.** Anything that can talk to the tmux server can already `capture-pane` the whole screen, and the browser at the other end is the owner's, over HTTPS, behind device enrolment. Do not reintroduce it. (v1 and v2 do keep `pane_current_path` out of the snapshot, and that rule is real, but its reason is **parsing**: tmux does not sanitise a path, so a raw newline in one forges a sidebar row and a raw `0x1f` swallows the next pane's record. `SanitizeActivity` is the answer to that, and it is already written.)
 
-- A **path** argument is reduced to its **basename**: `read snapshot.go`, never `read /home/…/clients/…/snapshot.go`.
-- A **shell command** is reduced to its **first word**: `run go`, never the command line.
-- **Anything else is the tool name alone.**
+The rules, on display and budget grounds:
 
-This is deliberately lossy, and it is allowed to be: the window name and the session name above the row already say which repo this is. **The second line describes; the first line identifies.**
+- A **path** argument is reduced to its **basename**: `read snapshot.go`, not `read /home/…/clients/…/snapshot.go`. The reason is the row, not secrecy — a full path eats most of the 128-rune budget and wraps badly in a 16rem sidebar, and its leading components repeat the window and session names above it. A **default for display**, not a boundary.
+- A **shell command goes through whole**, bounded by `SanitizeActivity` and the `MaxActivity` cap and by nothing else. **There is no first-word reduction.** Under one, `rm -rf build` and `git push origin main` both render as a bare verb — and when the pane is sitting on a permission prompt, **the command is the question**, so reducing it destroys the one thing that row exists to answer.
+- **Anything else is the tool name alone**, because there is no field here we recognise.
+- **opencode's edit tool `metadata.diff` is not sent — on size.** It is unbounded, it would blow `MaxReportBytes`, and an over-cap value is discarded *whole* in `ParseReport`, so sending it costs the pane its entire report and drops it back to the classifier. Size, not secrecy.
 
-**The user's raw prompt is never the label.** It answers the wrong question — twenty minutes into a task, a prompt is history — it publishes the user's own words about private client work into an option anything on the box can read, and it truncates into a sentence fragment. `pi-subagents` already refuses this in almost these words: *"raw prompts never enter pane metadata."* `--label-from-prompt` exists as a flag in the integration and nothing else, default off, for an owner who wants it on their own machine.
+The basename default is deliberately lossy and is allowed to be: the window name and the session name above the row already say which repo this is. **The second line describes; the first line identifies.**
+
+**The user's raw prompt is never the label**, and for two reasons, neither of them about exposure:
+
+- **Utility.** It answers the wrong question. Twenty minutes into a task a prompt is history — which is exactly the complaint about opencode's and claude's frozen titles that this whole feature exists to answer.
+- **The budget.** `MaxActivity` is 128 runes. A long prompt arrives cut in half and says nothing, where a truncated tool call is still a tool call.
+
+Revisions 1–5 of the design gave a third reason — that a prompt publishes the user's own words into an option anything on the box can read — and cited `pi-subagents` for it (*"raw prompts never enter pane metadata"*). **Revision 6 withdrew it as false; the decision stood, its stated reason did not.** Do not restate it in a comment here. `--label-from-prompt` exists as a flag in the integration and nothing else, default off, for an owner who wants it on their own machine.
 
 **The subagent filters, and the honest version of what they buy.** `TMUX_PANE` is the same for a root session and its children on all three agents, so an unfiltered child event overwrites the root's state — and the specific damage is a child's turn end firing while the root is still working, which becomes a false `done` badge. **A report must only ever describe the root session in its pane.**
 
@@ -3146,11 +3154,19 @@ func TestActivityFromToolCall(t *testing.T) {
 	for _, tc := range []struct{ name, tool, want string; input map[string]any }{
 		{"a read becomes its basename", "Read", "read snapshot.go",
 			map[string]any{"file_path": "/home/x/clients/acme/internal/tmux/snapshot.go"}},
-		{"a bash command becomes its first word", "Bash", "run go",
+		// A command line is carried WHOLE. There is no first-word reduction:
+		// on a permission prompt the command is the question, and "run rm"
+		// cannot answer "shall I run rm -rf build?".
+		{"a bash command is carried whole", "Bash", "run go test ./internal/tmux -run TestX",
 			map[string]any{"command": "go test ./internal/tmux -run TestX"}},
-		// A token in a command line must never reach the option, let alone the DOM.
-		{"a bash command with a secret in it keeps only the verb", "Bash", "run curl",
-			map[string]any{"command": "curl -H 'Authorization: Bearer sk-live-REDACTED' https://x"}},
+		{"a destructive command keeps its arguments", "Bash", "run rm -rf build",
+			map[string]any{"command": "rm -rf build"}},
+		// The ONLY bound on a command line, and the reason SanitizeActivity
+		// and tmux.MaxActivity exist. Written against the constant, never a
+		// literal 128.
+		{"a long command line is bounded by the cap and nothing else", "Bash",
+			"run " + strings.Repeat("x", tmux.MaxActivity-len("run ")),
+			map[string]any{"command": strings.Repeat("x", 4<<10)}},
 		{"an unknown tool is its own name", "SomeMcpTool", "SomeMcpTool",
 			map[string]any{"whatever": "..."}},
 		{"a tool with no recognised field is its own name", "Read", "Read", map[string]any{}},
@@ -3176,15 +3192,15 @@ func TestSubagentFilters(t *testing.T) {
 }
 ```
 
-**Steps 2–4:** run, implement against **the recorded fixtures from Task 12** — particularly pi's `tool_execution_start.args`, whose shape is open question 7 and which the reduction rules were designed against a guess about — run again.
+**Steps 2–4:** run, implement against **the recorded fixtures from Task 12** — particularly pi's `tool_execution_start.args`, whose shape is open question 7 and which the basename default was designed against a guess about — run again.
 
 **Step 5: Mutation testing**
 
 | Mutant | Killed by |
 | --- | --- |
 | Publish `file_path` whole | `a read becomes its basename` |
-| Publish `command` whole | `a bash command with a secret in it` |
-| First word taken with `strings.Fields(cmd)[0]` after a leading `env FOO=1` | add a row for it and decide; the rule is "the first word", and `env` is an honest answer |
+| **Reduce `command` to its first word** — the rule revision 6 deleted, and the one a reader who half-remembers the design will re-add | `a bash command is carried whole` **and** `a destructive command keeps its arguments`. Two rows, because the first alone is also killed by unrelated mutants and the second names the case that matters |
+| Drop the `MaxActivity` cap on the command path, or apply it before the `run ` prefix is added | `a long command line is bounded by the cap and nothing else` — with the cap gone this is the only bound left, so no other row sees it |
 | Fall back to the raw argument for an unknown tool | `an unknown tool is its own name` |
 | Publish the prompt by default | `TestThePromptIsNotTheLabel` |
 | Invert the claude filter to "report only when `agent_id` is present" | `claude: a payload with no agent_id is the root` — **this is the fails-closed mutant, and it silences the whole integration** |
@@ -3195,7 +3211,7 @@ func TestSubagentFilters(t *testing.T) {
 
 ```bash
 git add cmd/wterm-web/activity.go cmd/wterm-web/activity_test.go cmd/wterm-web/events.go cmd/wterm-web/report.go
-git commit -m "feat: verb plus object, reduced, and never a raw prompt or a whole path"
+git commit -m "feat: verb plus object, a basename for a path, and never a raw prompt"
 ```
 
 ---
@@ -3491,6 +3507,22 @@ git commit -m "feat: an opencode plugin whose only state is which sessions are c
 ```
 
 ---
+
+> **Carried from Task 18's implementer, measured and not yet fixed.** opencode's `session.idle` fired
+> **twice inside one resting period** on a turn that died at the provider: idle, `message.updated`, idle,
+> about a second apart, with no `busy` between them. By this design's own criterion -- any event that can
+> recur within one resting period and maps to a resting state is a re-assertion -- that makes it a
+> re-assertion, not the edge `events.go` currently classifies it as. Cost is small and bounded: a finish
+> re-dated by roughly a second, on failed turns only. The fix is one row in `events.go`'s kind table
+> (Tasks 13/14's surface), not in the plugin. **Do not fix it inside Task 19** -- it is recorded here
+> because this is the next task anyone reads, and it needs its own commit and its own mutant.
+
+> **Also from Task 18, a real coverage loss rather than a defect.** A subagent's `permission.asked` is
+> filtered out with the rest of the child's traffic -- but that dialog is drawn on the **root's** screen and
+> a human has to answer it. Root-only is what this plan specifies and it is the fail-safe direction, since
+> a wrongly-claimed `blocked` never expires. The cost is that the badge is gone unless a client is
+> connected for evidence rule 2 to find the dialog on screen. Belongs on the feature backlog beside the
+> four uncaptured `notification_type` screens.
 
 ### Task 19: The Claude Code hooks
 

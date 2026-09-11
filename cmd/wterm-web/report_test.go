@@ -47,22 +47,81 @@ func TestTmuxTarget(t *testing.T) {
 // Exit 0, whatever happens. The one nonzero code that matters is 2, which
 // blocks a Claude PreToolUse tool call; keeping every path at 0 means nobody
 // has to remember which.
+//
+// Every refusal is also asserted to have written NOTHING. Exit 0 on its own
+// does not distinguish "refused" from "wrote something wrong and said nothing",
+// and a wrong resting state written in silence is the failure this whole
+// feature is most exposed to. The rows that carry a full $TMUX are the ones
+// where that assertion means something: with TMUX masked no write is possible
+// anyway, so a zero-write assertion there would be vacuous.
 func TestReportAlwaysExitsZero(t *testing.T) {
-	for _, args := range [][]string{
-		{"report", "--state", "working"},       // no TMUX in the environment
-		{"report", "--state", "nonsense"},      // not a state
-		{"report"},                             // no state at all
-		{"report", "--nosuchflag"},             // a malformed command line
-		{"report", "--state", "idle", "extra"}, // a stray operand
-		{"report", "-h"},                       // help, which the rest of the CLI answers on stderr
+	full := map[string]string{"TMUX": "/tmp/sock,7,0", "TMUX_PANE": "%1"}
+	for _, tc := range []struct {
+		name string
+		args []string
+		// stderr, when set, must appear in the commentary. It is what
+		// distinguishes two refusals that write nothing for different reasons
+		// -- "you forgot a flag" reads very differently from "nobody has ever
+		// heard of that event", and only one of them is the reader's fault.
+		stderr string
+		stdin  string
+		env    func(string) string
+	}{
+		// Task 6's rows.
+		{"no TMUX in the environment", []string{"--state", "working"}, "", "", envWithout("TMUX")},
+		{"not a state", []string{"--state", "nonsense"}, "unknown state", "", mapEnv(full)},
+		{"no state at all", []string{}, "unknown state", "", mapEnv(full)},
+		{"a malformed command line", []string{"--nosuchflag"}, "", "", mapEnv(full)},
+		// A stray operand is ignored rather than refused -- parseFlags hands
+		// the operands back and report has no use for them. This row is here
+		// as Task 6 left it, and the missing $TMUX is what makes it write
+		// nothing, not a refusal.
+		{"a stray operand", []string{"--state", "idle", "extra"}, "", "", envWithout("TMUX")},
+		{"help, which the rest of the CLI answers on stderr", []string{"-h"}, "Usage:", "", mapEnv(full)},
+
+		// Task 13's mode matrix. Neither half of the integration form means
+		// anything alone, and neither may be combined with the manual form:
+		// a precedence is a rule somebody has to remember, and the wrong
+		// branch of it writes a state from a hook that thought it was passing
+		// something else.
+		{"--agent without --event", []string{"--agent", "claude"}, "meaningless apart", "", mapEnv(full)},
+		{"--event without --agent", []string{"--event", "Stop"}, "meaningless apart", "", mapEnv(full)},
+		{"--state with the integration form", []string{"--state", "idle", "--agent", "claude", "--event", "Stop"},
+			"two different callers", "", mapEnv(full)},
+		{"--text with the integration form", []string{"--text", "hi", "--agent", "claude", "--event", "Stop"},
+			"two different callers", "", mapEnv(full)},
+		{"an agent nothing knows", []string{"--agent", "nosuchagent", "--event", "Stop"},
+			"nothing known about", "{}", mapEnv(full)},
+		{"an event that agent does not have", []string{"--agent", "claude", "--event", "NoSuchEvent"},
+			"nothing known about", "{}", mapEnv(full)},
+		// Silent on purpose: claude fires Notification for things that are
+		// none of our business often enough that a line each would be a log
+		// of nothing, and a line here would make a routine event look like a
+		// misconfiguration.
+		{"an ignored notification_type", []string{"--agent", "claude", "--event", "Notification"},
+			"", `{"notification_type":"auth_success"}`, mapEnv(full)},
 	} {
-		var out, errb bytes.Buffer
-		if code := runReport(args[1:], &out, &errb, envWithout("TMUX"), dialReal); code != 0 {
-			t.Errorf("%v exited %d, want 0 (stderr: %s)", args, code, errb.String())
-		}
-		if out.Len() != 0 {
-			t.Errorf("%v wrote to stdout: %q -- stdout carries the answer and there is none", args, out.String())
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recordingRunner{}
+			var out, errb bytes.Buffer
+			code := runReport(tc.args, strings.NewReader(tc.stdin), &out, &errb, tc.env,
+				func(string) tmuxRunner { return rec })
+			if code != 0 {
+				t.Errorf("exited %d, want 0 (stderr: %s)", code, errb.String())
+			}
+			if out.Len() != 0 {
+				t.Errorf("wrote to stdout: %q -- stdout carries the answer and there is none", out.String())
+			}
+			if len(rec.calls) != 0 {
+				t.Errorf("ran %v; a refused command line must leave the option exactly as it found it", rec.calls)
+			}
+			if tc.stderr != "" && !strings.Contains(errb.String(), tc.stderr) {
+				t.Errorf("stderr = %q, want %q in it", errb.String(), tc.stderr)
+			}
+			if tc.stderr == "" && errb.Len() != 0 && len(tc.args) > 0 && tc.args[0] == "--agent" {
+				t.Errorf("stderr = %q, want silence: the table ignoring an event it knows is not a complaint", errb.String())
+			}
+		})
 	}
 }
 
@@ -90,7 +149,8 @@ func TestReportWritesThroughTheInjectedDial(t *testing.T) {
 
 	var out, errb bytes.Buffer
 	code := runReport([]string{"--state", "blocked", "--text", "may I run rm -rf"},
-		&out, &errb, mapEnv(map[string]string{"TMUX": "/tmp/sock,7,0", "TMUX_PANE": "%12"}), dial)
+		strings.NewReader(""), &out, &errb,
+		mapEnv(map[string]string{"TMUX": "/tmp/sock,7,0", "TMUX_PANE": "%12"}), dial)
 	if code != 0 {
 		t.Fatalf("exited %d: %s", code, errb.String())
 	}
@@ -120,7 +180,7 @@ func TestReportWritesThroughTheInjectedDial(t *testing.T) {
 func TestATmuxFailureIsStillExitZero(t *testing.T) {
 	rec := &recordingRunner{err: errTmuxFailed}
 	var out, errb bytes.Buffer
-	code := runReport([]string{"--state", "idle"}, &out, &errb,
+	code := runReport([]string{"--state", "idle"}, strings.NewReader(""), &out, &errb,
 		mapEnv(map[string]string{"TMUX": "/tmp/sock,7,0", "TMUX_PANE": "%12"}),
 		func(string) tmuxRunner { return rec })
 	if code != 0 {

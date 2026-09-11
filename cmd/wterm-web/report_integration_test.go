@@ -49,7 +49,7 @@ func TestReportReachesTheSnapshot(t *testing.T) {
 	// dialReal, because this test is the end-to-end one: a real client against
 	// the real server testutil started.
 	if code := runReport([]string{"--state", "working", "--text", "running go test"},
-		&out, &errb, paneEnv(srv, paneID), dialReal); code != 0 {
+		strings.NewReader(""), &out, &errb, paneEnv(srv, paneID), dialReal); code != 0 {
 		t.Fatalf("report exited %d: %s", code, errb.String())
 	}
 
@@ -119,7 +119,7 @@ func TestAStateOnlyReportIsThreeFields(t *testing.T) {
 	srv, paneID, _ := twoAgentPanes(t)
 
 	var out, errb bytes.Buffer
-	if code := runReport([]string{"--state", "idle"}, &out, &errb, paneEnv(srv, paneID), dialReal); code != 0 {
+	if code := runReport([]string{"--state", "idle"}, strings.NewReader(""), &out, &errb, paneEnv(srv, paneID), dialReal); code != 0 {
 		t.Fatalf("report exited %d: %s", code, errb.String())
 	}
 
@@ -149,7 +149,7 @@ func TestAnUnknownStateWritesNothing(t *testing.T) {
 	srv, paneID, _ := twoAgentPanes(t)
 
 	var out, errb bytes.Buffer
-	if code := runReport([]string{"--state", "nonsense", "--text", "something"},
+	if code := runReport([]string{"--state", "nonsense", "--text", "something"}, strings.NewReader(""),
 		&out, &errb, paneEnv(srv, paneID), dialReal); code != 0 {
 		t.Fatalf("report exited %d: %s", code, errb.String())
 	}

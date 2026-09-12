@@ -24,15 +24,15 @@ const outputBuffer = 256
 // with a reader still waiting to learn the session ended.
 const killTimeout = 5 * time.Second
 
-// How long CurrentPane waits for a freshly spawned attach to have created its
-// session, and how often it asks. The wait is generous because losing it is
-// permanent for that socket -- nothing asks again -- and cheap because the
-// normal answer arrives on the first or second attempt; it is bounded well
-// inside the caller's own tmux timeout so that a session which never appears
-// fails as a warning rather than as a stalled read loop.
+// How long a call addressed to this tab's session waits for a freshly spawned
+// attach to have created it, and how often it asks. The wait is generous
+// because losing it is permanent for that socket -- nothing asks again -- and
+// cheap because the normal answer arrives on the first or second attempt; it is
+// bounded well inside the caller's own tmux timeout so that a session which
+// never appears fails as a warning rather than as a stalled read loop.
 const (
-	currentPaneWait  = 2 * time.Second
-	currentPaneRetry = 25 * time.Millisecond
+	attachWait  = 2 * time.Second
+	attachRetry = 25 * time.Millisecond
 )
 
 // hyperlinkTimeout bounds the one tmux call Open makes before the browser has a
@@ -195,41 +195,69 @@ func (s *Session) Resize(cols, rows uint16) error {
 // windowID is the hint tmux.Client.SelectPane documents: the window the caller's
 // last snapshot saw the pane in, which turns the click into a single tmux
 // invocation. "" is always allowed and costs one extra fork.
+//
+// Through awaitSession, because the browser sends this the instant a socket
+// opens -- before the attach has created the session to address. See there.
 func (s *Session) SelectPane(ctx context.Context, paneID, windowID string) error {
-	return s.tm.SelectPane(ctx, s.name, paneID, windowID)
+	return s.awaitSession(ctx, func(ctx context.Context) error {
+		return s.tm.SelectPane(ctx, s.name, paneID, windowID)
+	})
 }
 
 // CurrentPane is the pane this tab is looking at right now: the active pane of
 // its own session's current window.
-//
-// It waits for the session to exist rather than failing on it, and that is the
-// whole reason this method is not one line. Open returns as soon as
-// pty.StartWithSize has forked -- the tmux client has not connected to the
-// server or created the session yet -- and the WebSocket handshake was answered
-// *before* Open was even called, so the browser can and does ask this question
-// before there is anything to answer it with. Measured on this machine the gap
-// is a few milliseconds; it is a race either way, and losing it would leave the
-// tab with no idea which pane it landed on, which is the bug this exists to
-// fix.
-//
-// Only "can't find session" is waited out. Any other failure is returned at
-// once: a wedged server or an unreadable socket does not get better by being
-// asked again, and this runs on the read goroutine, where waiting costs the
-// user's keystrokes.
 func (s *Session) CurrentPane(ctx context.Context) (string, error) {
-	deadline := time.Now().Add(currentPaneWait)
+	var pane string
+	err := s.awaitSession(ctx, func(ctx context.Context) error {
+		var err error
+		pane, err = s.tm.CurrentPane(ctx, s.name)
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	return pane, nil
+}
+
+// awaitSession runs one tmux call addressed to this tab's session, waiting out
+// the window in which that session does not exist yet.
+//
+// That window is not an edge case, it is the normal state of a socket that has
+// only just opened. Open returns as soon as pty.StartWithSize has forked -- the
+// tmux client has not connected to the server or created the session yet -- and
+// the WebSocket handshake was answered *before* Open was even called. Both
+// messages the browser sends the instant a socket opens arrive in that gap: the
+// pane it remembered, and the "where am I?" right behind it. Measured on this
+// machine the gap is a few milliseconds, and under any load at all the browser
+// wins the race more often than not.
+//
+// Losing it is silent and permanent for that socket, because nothing asks
+// twice. A select that fails leaves the tab on the window its group attached
+// to, and the "where" behind it then reports that window as the answer -- so a
+// reconnect or a cross-session click lands on window 0, with the only trace a
+// WARN in the daemon log. Both failures the end-to-end suite kept reporting as
+// order-dependent were this.
+//
+// Only "can't find session" is waited out, which is why it is a tmux predicate
+// and not a string here. A pane or a window that has died fails with its own
+// message and is returned at once -- tmux.Client.SelectPane reads the pane
+// first precisely so that stays true -- and so is a wedged server or an
+// unreadable socket, which does not get better by being asked again. This runs
+// on the read goroutine, where waiting costs the user's keystrokes.
+func (s *Session) awaitSession(ctx context.Context, call func(context.Context) error) error {
+	deadline := time.Now().Add(attachWait)
 	for {
-		pane, err := s.tm.CurrentPane(ctx, s.name)
+		err := call(ctx)
 		if err == nil {
-			return pane, nil
+			return nil
 		}
 		if !tmux.IsMissingSession(err) || !time.Now().Before(deadline) {
-			return "", err
+			return err
 		}
 		select {
 		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(currentPaneRetry):
+			return ctx.Err()
+		case <-time.After(attachRetry):
 		}
 	}
 }

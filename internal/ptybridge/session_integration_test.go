@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -221,6 +223,109 @@ func TestSelectPaneMovesOnlyThisTabsSession(t *testing.T) {
 	if now := currentWindow(t, srv, "work"); now != before {
 		t.Fatalf("the user's own session moved from window %s to %s", before, now)
 	}
+}
+
+// The select the browser sends is asked in exactly the same gap CurrentPane is,
+// and by the same `#opened` in Terminal.tsx -- the select goes out first, the
+// `where` right behind it.
+//
+// Open returns as soon as the fork has happened, so the session the select
+// names may not exist yet. Losing that race is not a lost frame: the tab's
+// remembered pane is never selected, the `where` behind it answers with the
+// window the group attached to, and the tab adopts that answer -- so a
+// reconnect or a cross-session click silently lands on window 0, with the only
+// trace a WARN in the daemon log. Both end-to-end failures that were being read
+// as cross-spec contamination were this.
+//
+// The gap is widened rather than raced for. Measured against a build without
+// the wait, an unaided attempt loses about seven times in ten on a loaded
+// machine and none at all on an idle one -- a test that only fails under load
+// is a test that reports the machine, not the code. slowTmux delays the attach
+// alone, so the window this asks inside is always open and the assertion below
+// is about the wait or nothing.
+func TestSelectPaneLandsBeforeTheAttachHasSettled(t *testing.T) {
+	slowTmux(t, 500*time.Millisecond)
+
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+	// A second window, so "the select worked" names a window a fresh attach
+	// does not land on by itself and cannot pass on the default.
+	srv.Run(t, "new-window", "-t", "=work", "-d")
+	panes := strings.Split(srv.Run(t, "list-panes", "-s", "-t", "=work", "-F", "#{pane_id}"), "\n")
+	if len(panes) != 2 {
+		t.Fatalf("want two panes to choose between, got %q", panes)
+	}
+	other := panes[1]
+	otherWindow := srv.Run(t, "display-message", "-p", "-t", other, "#{window_id}")
+
+	s, err := ptybridge.Open(context.Background(), ptybridge.Config{
+		TmuxArgs: srv.Args(), Base: "work", Cols: 80, Rows: 24,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	// No waitFor: selecting into the gap is the point.
+	if err := s.SelectPane(context.Background(), other, ""); err != nil {
+		t.Fatalf("SelectPane into the attach gap: %v", err)
+	}
+	if got := currentWindow(t, srv, s.SessionName()); got != otherWindow {
+		t.Fatalf("tab is on window %s, want %s", got, otherWindow)
+	}
+}
+
+// A pane that has died is still an error, immediately. The wait above is for
+// one message tmux has -- "can't find session" -- and widening it to "retry
+// anything" would turn a click on a pane the sidebar is 1.5s stale about into a
+// two-second stall on the read goroutine, with the same failure at the end of
+// it. It would also break the "where" reply, which depends on a failed select
+// leaving the tab where it was.
+func TestSelectPaneDoesNotWaitOutADeadPane(t *testing.T) {
+	slowTmux(t, 500*time.Millisecond)
+
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+
+	s, err := ptybridge.Open(context.Background(), ptybridge.Config{
+		TmuxArgs: srv.Args(), Base: "work", Cols: 80, Rows: 24,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+
+	// %99 is a well-formed pane id that no server here has, so it fails on the
+	// pane and not on the shape.
+	start := time.Now()
+	if err := s.SelectPane(context.Background(), "%99", ""); err == nil {
+		t.Fatal("SelectPane on a pane that does not exist: want an error, got nil")
+	}
+	if waited := time.Since(start); waited > time.Second {
+		t.Fatalf("SelectPane sat on a dead pane for %v; only a missing session is waited out", waited)
+	}
+}
+
+// slowTmux puts a `tmux` on PATH that delays `new-session` by d and passes
+// everything else straight through, so the window between Open forking the
+// attach and that attach having created its session is wide enough to assert
+// inside of rather than raced for.
+//
+// Only new-session: the calls made *into* the gap have to be as fast as they
+// are in production, or the delay would close the very window it opens.
+func slowTmux(t *testing.T, d time.Duration) {
+	t.Helper()
+	real, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Fatalf("tmux not found in PATH: %v", err)
+	}
+	dir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\ncase \" $* \" in *\" new-session \"*) sleep %.3f ;; esac\nexec %s \"$@\"\n",
+		d.Seconds(), real)
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write tmux shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 // CurrentPane is asked before anything has waited for the attach, which is the

@@ -115,7 +115,7 @@ Every task is independently committable and reviewable. Where a task changes the
 | 1 | The invariant moves | `where` is asked once per **outstanding question**, not once per socket; `Terminal.test.tsx:792` and both `ws.go` comments move together, with no behaviour change |
 | 2 | `lastRecvAt`, and the three constants | Every inbound frame stamps it — pongs are invisible to JavaScript and anchor nothing; `LIVENESS_SLACK_MS`, `PROBE_TIMEOUT_MS`, `CONNECT_STALL_MS` land as named guesses |
 | 3 | The wake handler, cases (a) and (c) | One handler on `visibilitychange` **and** `pageshow`; no transport → `retryNow()`; `CONNECTING` past `CONNECT_STALL_MS` → `discard()`, which `retryNow()` cannot do |
-| 4 | The probe, case (b) | `select` then `where` on an OPEN quiet socket, single-flighted through `#wakeProbe`; the idempotency test asserts one probe frame **and** one timer |
+| 4 | The probe, case (b) | `select` then `where` on an OPEN quiet socket, single-flighted through `#wakeProbe`; the idempotency test asserts one probe frame **and** one timer. Costs two forks, not the design's three — see the task |
 | 5 | `CaptureRange` and the byte cap | A new bounded call beside `Capture`, `-S -<N>`, `MaxCaptureBytes = 256 KiB`, truncated **from the top** on a rune boundary |
 | 6 | `GET /api/panes/{id}/capture` | Percent-decoded id, `ValidatePaneID`, `lines` validated as an integer before it reaches tmux, behind `Auth.Protect` |
 | 7 | The panel | Full-height `Dialog`, `<pre>` and not a `<textarea>`, `onOpenAutoFocus` prevented, capture time aged, Recapture, copy-all from memory |
@@ -677,7 +677,9 @@ git commit -m "feat: a foregrounded tab reconnects a socket that is stalled or w
 
 So the probe does what reconnect does — and `#landed` needs no change at all.
 
-**Cost, stated rather than discovered:** the probe is **three forks**, not one. `select` is `Client.SelectPane`, which runs `list-panes` and then `select-window` chained with `select-pane`; `where` is `CurrentPane`, which runs `list-panes`. And **waking the phone now moves the owner's active pane**, because `select-pane` is what pulls it back. That is v1's already-accepted shared-active-pane cost reached through a new occasion, and it is the price of the app agreeing with itself about which pane it is on.
+**Cost, stated rather than discovered — and the design's figure is one too high.** The design prices the probe at **three forks**. Read against the source it is **two in the common case**: `Client.SelectPane` (`internal/tmux/client.go:355`) sends `list-panes ; select-window ; select-pane` as **one** `;`-joined invocation when the window-id hint is valid and returns immediately if the hint matched (`selectWindowPaneArgs`, `:396`), so that is one fork, not two; `CurrentPane` (`:432`) is a second. It becomes **three only when the window-id hint was stale**, which costs a corrective second `Run`. Cheaper than the design says, so nothing decided on it changes — but write two, not three, in the comment, and say where the third comes from. **Verify this by reading `SelectPane` before you write the comment; do not take it from here.**
+
+And **waking the phone now moves the owner's active pane**, because `select-pane` is what pulls it back. That is v1's already-accepted shared-active-pane cost reached through a new occasion, and it is the price of the app agreeing with itself about which pane it is on.
 
 **Step 1: Write the failing tests**
 
@@ -788,11 +790,13 @@ And add the half Task 1 could not write:
     // slept -- and an adopted answer feeds `#pane`, which feeds `useSeenPanes`,
     // which would clear a finish badge on a pane nobody read.
     //
-    // It costs three tmux forks (SelectPane: list-panes, then select-window
-    // chained with select-pane; CurrentPane: list-panes) and it pulls the
-    // owner's active pane back to this tab's. Both are the price of the two
-    // wake paths ending in the same state, and the `lastRecvAt` gate above is
-    // what keeps it off the common case of a tab hidden for a moment.
+    // It costs two tmux forks -- SelectPane sends `list-panes ; select-window
+    // ; select-pane` as one invocation and returns when the window-id hint
+    // matched, and CurrentPane is the second -- rising to three when that hint
+    // was stale. And it pulls the owner's active pane back to this tab's. Both
+    // are the price of the two wake paths ending in the same state, and the
+    // `lastRecvAt` gate above is what keeps it off the common case of a tab
+    // hidden for a moment.
     if (this.#pane) this.#transport.select(this.#pane)
     this.#awaitingWhere = this.#transport.where()
     this.#wakeProbe = setTimeout(() => {

@@ -49,16 +49,30 @@ import { useTabBadge } from '@/lib/tabBadge'
 import {
   attachTarget,
   findPane,
+  isSessionId,
+  parseRememberedTarget,
   landedLabel,
   resolveSession,
   succeedPane,
   useSeenPanes,
   useSnapshot,
 } from '@/lib/useSnapshot'
-import type { PaneLocation } from '@/lib/useSnapshot'
+import type { PaneLocation, RememberedTarget } from '@/lib/useSnapshot'
 
 /** Where this tab remembers its base session, so a reload lands where it was. */
 const SESSION_KEY = 'tmux-web:session'
+
+/**
+ * Where it remembers the *address* of that session, which is not the same value.
+ *
+ * The key above is `session_group`, an identity; this is the `$N` the socket
+ * actually attached with. Kept so the first mount after a reload is already
+ * right -- see `attachTarget`, which explains what the second address costs.
+ * Written as one JSON object rather than a second bare key so a memory can
+ * never be read against the wrong session: the two halves arrive together or
+ * not at all.
+ */
+const TARGET_KEY = 'tmux-web:target'
 
 function readStoredSession(): string | null {
   try {
@@ -72,6 +86,27 @@ function readStoredSession(): string | null {
 function storeSession(session: string): void {
   try {
     globalThis.sessionStorage?.setItem(SESSION_KEY, session)
+  } catch {
+    /* see above */
+  }
+}
+
+/**
+ * The address this tab last attached with, or null. The checking is in
+ * `parseRememberedTarget`, where it can be tested without a browser.
+ */
+function readStoredTarget(): RememberedTarget | null {
+  try {
+    return parseRememberedTarget(globalThis.sessionStorage?.getItem(TARGET_KEY) ?? null)
+  } catch {
+    // Storage refused. The tab attaches by key, as it did before this existed.
+    return null
+  }
+}
+
+function storeTarget(remembered: RememberedTarget): void {
+  try {
+    globalThis.sessionStorage?.setItem(TARGET_KEY, JSON.stringify(remembered))
   } catch {
     /* see above */
   }
@@ -139,6 +174,11 @@ export default function App() {
   const [forced] = useState(forcedSession)
   const [picked, setPicked] = useState<string | null>(() => forced ?? readStoredSession())
 
+  // Read once, for the same reason `forced` is: this is what the *first* render
+  // attaches with, and a value that arrived later would be a value that arrived
+  // after the socket it exists to address.
+  const [remembered] = useState(readStoredTarget)
+
   /**
    * A pane clicked in a session this tab is not attached to. It drives the
    * highlight immediately, so the click is acknowledged now rather than when
@@ -166,7 +206,7 @@ export default function App() {
   // What `/ws?session=` carries: the session id, or a hand-typed name passed
   // through. Derived here and nowhere else, so there is exactly one place where
   // identity becomes an address.
-  const target = attachTarget(groups, session)
+  const target = attachTarget(groups, session, remembered)
 
   // And the third thing the key is not: a display name. The header has to say
   // what the sidebar says, and both read the live `session_name` off the group
@@ -177,7 +217,12 @@ export default function App() {
 
   useEffect(() => {
     if (session) storeSession(session)
-  }, [session])
+    // Only an id is worth remembering. `target` is the session key passed
+    // through whenever the snapshot has no address for it -- storing that would
+    // remember the value this exists to replace, and the next load would attach
+    // by name all over again.
+    if (session && target && isSessionId(target)) storeTarget({ key: session, id: target })
+  }, [session, target])
 
   /**
    * Replay a cross-session click once the new socket is up, and let the

@@ -18,6 +18,7 @@ import {
   markSeen,
   mostUrgent,
   paneState,
+  parseRememberedTarget,
   parseSnapshot,
   readSeen,
   resolveSession,
@@ -29,7 +30,14 @@ import {
   windowTarget,
   writeSeen,
 } from './useSnapshot'
-import type { PaneNode, SeenMap, SnapshotPayload, SnapshotRow, SnapshotState } from './useSnapshot'
+import type {
+  PaneNode,
+  SeenMap,
+  SessionNode,
+  SnapshotPayload,
+  SnapshotRow,
+  SnapshotState,
+} from './useSnapshot'
 
 // --- fixtures ---------------------------------------------------------------
 
@@ -796,6 +804,138 @@ describe('attachTarget', () => {
       row({ groupKey: 'work', sessionName: '_web-abcd', sessionId: '$9', appOwned: true }),
     ])
     expect(attachTarget(orphan, 'work')).toBe('$9')
+  })
+
+  // --- the remembered address ------------------------------------------------
+
+  it('uses the address the tab remembers while the snapshot has nothing to say', () => {
+    // The whole point: on a reload the tab knows the group key it was on, and
+    // the key is not an address. Without this it attaches by name, the first
+    // poll turns the name into "$4", and the socket is thrown away and reopened.
+    expect(attachTarget([], 'work3', { key: 'work3', id: '$4' })).toBe('$4')
+  })
+
+  it('prefers the snapshot to the memory, always', () => {
+    // The remembered id is a tab-lifetime old and tmux restarts its ids at $0
+    // with the server, so it can name a different session entirely. It is only
+    // ever the answer while nothing better exists; the moment a poll lands, the
+    // poll is right.
+    expect(attachTarget(renamed, 'work3', { key: 'work3', id: '$99' })).toBe('$4')
+  })
+
+  it('ignores a memory of a different session', () => {
+    // `?session=api` typed by hand on a tab that last sat on "work3". The pin
+    // means that session and no other, so a remembered address filed under
+    // another key must not become the target.
+    expect(attachTarget([], 'api', { key: 'work3', id: '$4' })).toBe('api')
+  })
+
+  it('ignores a memory that is not a session id', () => {
+    // sessionStorage is not a trusted input: it survives reloads, and anything
+    // that reaches this return value goes into `/ws?session=` -- where tmux
+    // resolves a great many strings to "whatever is current".
+    for (const bad of ['work', '$', '', '$4;kill-server', '4']) {
+      expect(attachTarget([], 'work3', { key: 'work3', id: bad })).toBe('work3')
+    }
+  })
+
+  it('has nothing to address when no session resolved, memory or not', () => {
+    expect(attachTarget([], null, { key: 'work3', id: '$4' })).toBeNull()
+  })
+})
+
+describe('parseRememberedTarget', () => {
+  it('reads back what the tab wrote', () => {
+    expect(parseRememberedTarget('{"key":"work3","id":"$4"}')).toEqual({ key: 'work3', id: '$4' })
+  })
+
+  it('is a miss for anything that is not one', () => {
+    // sessionStorage survives reloads and is editable, and this runs on the
+    // app's very first render -- so every one of these has to be a null, not a
+    // throw and not a half-built object that reaches `/ws?session=`.
+    for (const bad of [
+      null,
+      '',
+      'not json',
+      'null',
+      '"work3"',
+      '42',
+      '[]',
+      '{}',
+      '{"key":"work3"}',
+      '{"id":"$4"}',
+      '{"key":"","id":"$4"}',
+      '{"key":"work3","id":""}',
+      '{"key":1,"id":"$4"}',
+      '{"key":"work3","id":4}',
+    ]) {
+      expect(parseRememberedTarget(bad)).toBeNull()
+    }
+  })
+
+  it('keeps only the two fields it knows', () => {
+    // Whatever else is in there is not carried forward: the object goes into
+    // render state, and a field nothing validated is a field something later
+    // reads.
+    expect(parseRememberedTarget('{"key":"work3","id":"$4","pane":"%9"}')).toEqual({
+      key: 'work3',
+      id: '$4',
+    })
+  })
+})
+
+// --- what one page load costs ------------------------------------------------
+
+/**
+ * Every address a page load hands the terminal, in order.
+ *
+ * `<Terminal>` opens one socket per address: the effect that builds the
+ * `TerminalSession` is keyed on the url, so a second distinct address is a
+ * second socket -- and on the daemon that is a second `has-session`, a second
+ * `ptybridge.Open`, and a `_web-*` tmux session created and destroyed. Every
+ * behavioural assertion in this suite stays green when that happens, because
+ * both addresses name the same session and the tab ends up in the right place
+ * either way. Counting is the only assertion that can see it.
+ */
+function addressesDuringAPageLoad(
+  remembered: { key: string; id: string } | null,
+  groups: readonly SessionNode[],
+  forced: string | null = null,
+): string[] {
+  const picked = remembered?.key ?? null
+  const seen: string[] = []
+  // Render one: the tab has its memory and no snapshot. Render two: the first
+  // poll has landed. Those are the two renders a reload produces.
+  for (const loaded of [false, true]) {
+    const g = loaded ? groups : []
+    const session = resolveSession(g, { picked, forced, loaded })
+    const target = attachTarget(g, session, remembered)
+    if (target !== null && target !== seen.at(-1)) seen.push(target)
+  }
+  return seen
+}
+
+describe('one page load, one socket', () => {
+  const live = groupRows([row({ groupKey: 'work3', sessionName: 'api', sessionId: '$4' })])
+
+  it('hands the terminal one address across the first poll', () => {
+    const got = addressesDuringAPageLoad({ key: 'work3', id: '$4' }, live)
+    expect(got).toEqual(['$4'])
+  })
+
+  it('hands the terminal one address for a hand-typed ?session= too', () => {
+    // A person types a name, and a name is what the daemon gets -- before and
+    // after the poll, so the socket is not rebuilt underneath it. The pin also
+    // survives the poll, which is what makes both renders agree.
+    expect(addressesDuringAPageLoad(null, live, 'api')).toEqual(['api'])
+  })
+
+  it('remembers where the pane it was looking at is filed', () => {
+    // The pane memory is keyed on the address (`paneStorageKey`), so a second
+    // address is also a second `sessionStorage` key -- the tab re-selects
+    // nothing on the reload it was supposed to land on, and leaves a key behind.
+    const got = addressesDuringAPageLoad({ key: 'work3', id: '$4' }, live)
+    expect(new Set(got).size).toBe(1)
   })
 })
 

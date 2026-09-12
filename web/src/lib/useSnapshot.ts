@@ -962,6 +962,49 @@ export function resolveSession(
 }
 
 /**
+ * The address a tab was last attached with, filed under the session it belongs
+ * to.
+ *
+ * Both halves are needed and neither is the other. The key is the identity --
+ * `session_group`, which is what a sidebar click carries and what the tab
+ * remembers across a reload -- and the id is the address tmux answers to. A
+ * remembered id without its key would be applied to whatever session the tab
+ * resolved to this time, which after a `?session=` typed by hand is a different
+ * one.
+ */
+export interface RememberedTarget {
+  /** The group key the address belongs to. */
+  key: string
+  /** The `$N` the tab attached with. */
+  id: string
+}
+
+/**
+ * A `RememberedTarget` out of storage, or null for anything that is not one.
+ *
+ * Pure, and separate from the read that produces the string, because
+ * `sessionStorage` is not a trusted input: it survives reloads, it is editable,
+ * and what comes out of here becomes `/ws?session=`. Everything is checked --
+ * that it parses, that it is an object, that both halves are non-empty strings
+ * -- so a value left by an older build, or by hand, is a miss rather than a
+ * crash on the app's very first render. `attachTarget` checks the id itself as
+ * well; this is the shape, that is the meaning.
+ */
+export function parseRememberedTarget(raw: string | null): RememberedTarget | null {
+  if (!raw) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null
+  const { key, id } = parsed as { key?: unknown; id?: unknown }
+  if (typeof key !== 'string' || typeof id !== 'string' || !key || !id) return null
+  return { key, id }
+}
+
+/**
  * The address to put in `?session=` for a resolved session.
  *
  * This is the seam between identity and address, and the two are not the same
@@ -981,16 +1024,59 @@ export function resolveSession(
  * name is the only thing a person could write, and a tab pinned that way must
  * still attach while the poll is failing. The daemon accepts both and tells
  * them apart by the `$` -- see `wsSessionTarget` in `internal/front/ws.go`.
+ *
+ * ## What `remembered` is for
+ *
+ * Between those two cases sits the one a reload lands in: the tab knows which
+ * session it was on, and what it knows is the *key*. Attaching by key and then
+ * re-addressing when the first poll turns it into `$N` costs a whole extra
+ * socket per page load -- a second `has-session`, a second `ptybridge.Open`,
+ * and a `_web-*` tmux session created and immediately destroyed -- and it files
+ * the remembered pane under two `sessionStorage` keys on the way past. It is
+ * also often simply wrong: the key is frozen at the name the group was created
+ * under, so after a rename the first socket 404s and the tab reports
+ * `Session "work3" is gone` until the poll rescues it.
+ *
+ * So the tab remembers the address beside the key, and hands it back here. It
+ * is the answer only while the snapshot has none -- the poll is always
+ * preferred, because a remembered id is up to a tab lifetime old and tmux
+ * restarts its ids at `$0` with the server, so it can name a different session
+ * after a restart. When it does, the first loaded snapshot maps the key to the
+ * real id, the address changes, and the socket is rebuilt: the same correction
+ * a stale remembered *key* has always relied on, and no worse than what the key
+ * alone would have done.
+ *
+ * Holding the terminal back until `loaded` would also remove the second socket,
+ * and was rejected: it delays the terminal on every load by a whole poll, in an
+ * app whose `TROUBLE_BEFORE_STALE` exists precisely because polls can be slow.
+ * Making the first mount correct costs nothing on screen.
  */
 export function attachTarget(
   groups: readonly SessionNode[],
   session: string | null,
+  remembered?: RememberedTarget | null,
 ): string | null {
   if (!session) return null
   // `||` and not `??`: a group built from rows carrying no `sessionId` -- a
   // daemon too old to send the field -- has "" here, and "" addresses whatever
   // tmux considers current.
-  return groups.find((g) => g.key === session)?.sessionId || session
+  const known = groups.find((g) => g.key === session)?.sessionId
+  if (known) return known
+  if (remembered?.key === session && isSessionId(remembered.id)) return remembered.id
+  return session
+}
+
+/**
+ * Whether s is a tmux session id, e.g. "$4". Mirrors `ValidateSessionID` in
+ * `internal/tmux/target.go`.
+ *
+ * Applied to what comes back out of `sessionStorage`, which is not a trusted
+ * input: it survives reloads, the user can edit it, and what passes here goes
+ * straight into `/ws?session=`, where tmux resolves a great many strings to
+ * "whatever is current" and exits 0.
+ */
+export function isSessionId(s: string): boolean {
+  return /^\$\d+$/.test(s)
 }
 
 /**

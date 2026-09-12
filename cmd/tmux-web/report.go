@@ -51,13 +51,33 @@ const reportTimeout = 5 * time.Second
 
 // maxPayloadBytes bounds what the integration form reads from stdin.
 //
-// The payload is a hook's own JSON and is normally a few hundred bytes, but
-// opencode's permission.asked for an edit carries a full unified diff and one
-// captured sample is already over the 1 KiB report cap on its own. There is no
-// upper bound on a file, so there is no upper bound on that field, and a hook
-// process that buffers whatever it is handed is a hook process that can be made
-// to buffer a gigabyte. Nothing here needs more than the first few keys.
-const maxPayloadBytes = 1 << 20
+// WHAT IT IS FOR. A hook process that buffers whatever it is handed is a hook
+// process that can be made to buffer a gigabyte, and this one runs inside
+// something the agent is waiting on. So there is a ceiling. What the ceiling is
+// NOT is a bound on a real payload: everything over it is refused (see
+// readPayload), and a refusal is a badge that never appears.
+//
+// THE MEASUREMENT. Of the thirty-six recorded payloads in testdata/hooks the
+// largest is 1253 bytes; the median is under 550. The one unbounded field is
+// opencode's permission.asked `metadata.diff` for an edit, a full unified diff,
+// and the recorded sample of that is 775 bytes whole. The field's real ceiling
+// is not the file's size but the MODEL'S OUTPUT: an edit's diff is the changed
+// hunks plus context, so a whole-file rewrite at the top of a 64k-token output
+// budget is on the order of 256 KB of text, and a diff carrying both the - and
+// the + side of it perhaps twice that. Half a megabyte is therefore the largest
+// payload anything here can honestly claim to have reasoned about.
+//
+// THE NUMBER. 4 MiB: eight times that worst case, three thousand times the
+// largest payload ever recorded, and the same cap cli.go already puts on the
+// admin socket's JSON. The old 1 MiB was inside the range a real edit can
+// reach, which is what made the hole reachable rather than theoretical.
+//
+// WHAT IT COSTS. Nothing in the ordinary case -- the cap is a ceiling on
+// allocation, not a reservation, and a 550-byte payload allocates 550 bytes.
+// In the pathological case a short-lived process buffers 4 MiB and the parsers
+// copy the big string once or twice more; tens of megabytes, for milliseconds,
+// on a path that is already refusing the payload.
+const maxPayloadBytes = 4 << 20
 
 // runReport is cmdReport with the environment and the tmux client injected, so
 // a test can drive it without setting process-wide variables -- which would
@@ -109,7 +129,7 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 	reassert := false
 
 	if integration {
-		payload := readPayload(stdin)
+		payload, overCap := readPayload(stdin)
 		// The subagent filter, before the table. A report must only ever
 		// describe the ROOT session in its pane: TMUX_PANE is the same for a
 		// root session and its children on all three agents, so an unfiltered
@@ -122,11 +142,12 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 		// about the event: a payload this subcommand could not read is not
 		// evidence that anything happened, whatever event name the caller put
 		// on the command line.
-		if root, why := payloadIsRoot(payload); !root {
-			// Worth a line, unlike an ignored notification_type. This one is
-			// either a subagent whose integration should not have spawned us
-			// or a payload that did not arrive, and both are things somebody
-			// debugging a missing badge needs to see.
+		if usable, why := payloadIsUsable(payload, overCap); !usable {
+			// Worth a line, unlike an ignored notification_type. This is a
+			// subagent whose integration should not have spawned us, a payload
+			// that did not arrive, or one that did not fit -- and all three are
+			// things somebody debugging a missing badge needs to see, which is
+			// why `why` says which.
 			fmt.Fprintf(stderr, "tmux-web report: refusing this %s %s payload: %s\n", *agent, *event, why)
 			return 0
 		}
@@ -257,18 +278,57 @@ func tmuxTarget(getenv func(string) string) (socket, pane string, ok bool) {
 	return socket, pane, true
 }
 
-// readPayload reads the hook's JSON from stdin, bounded.
+// readPayload reads the hook's JSON from stdin, bounded, and says whether
+// stdin had more to give.
 //
-// Errors are dropped on purpose. A payload that cannot be read is a payload
-// whose discriminator reads as "", which is on no whitelist and so writes
-// nothing -- the same fail-closed answer an unknown notification_type gets.
-// Whatever arrived before the error is still parsed, because a truncated read
-// that happens to contain the key is more useful than a refusal, and one that
-// does not contain it is already handled.
-func readPayload(r io.Reader) []byte {
+// THE EXTRA BYTE. The read is maxPayloadBytes+1, and the byte past the cap is
+// the whole point: a LimitReader that comes back with exactly cap bytes cannot
+// say whether stdin held one more, so a payload of exactly the cap and the
+// first cap bytes of something longer arrive identical. They are not the same
+// fact. The first is a whole hook payload; the second is a prefix, and every
+// parser downstream will refuse it for a reason that has nothing to do with
+// what went wrong.
+//
+// An earlier comment here claimed a truncated read "is still parsed, because a
+// truncated read that happens to contain the key is more useful than a
+// refusal". That was false in both halves. A truncated JSON object does not
+// parse at all, so no key in it is reachable; and payloadIsRoot then refuses
+// the payload wholesale -- deliberately, since a payload nobody could read is
+// one where agent_id is absent for the worst possible reason. The net effect
+// was that an oversized payload was refused in silence and looked exactly like
+// garbage. See payloadIsUsable for what it looks like now.
+//
+// Read errors are still dropped on purpose: whatever arrived is handed on, and
+// an empty or partial object is refused by the parse requirement anyway.
+func readPayload(r io.Reader) (payload []byte, overCap bool) {
 	if r == nil {
-		return nil
+		return nil, false
 	}
-	b, _ := io.ReadAll(io.LimitReader(r, maxPayloadBytes))
-	return b
+	b, _ := io.ReadAll(io.LimitReader(r, maxPayloadBytes+1))
+	return b, len(b) > maxPayloadBytes
+}
+
+// payloadIsUsable is payloadIsRoot plus the one fact only the reader knows:
+// whether stdin ran past the cap.
+//
+// BOTH ANSWERS ARE STILL A REFUSAL, and that is the fail-safe direction this
+// project takes everywhere. A truncated payload is exactly the one in which
+// agent_id or parentID may lie past the cut, and the state at stake on the
+// event that gets big -- opencode's permission.asked -- is blocked, which never
+// expires on its own. Writing it on evidence nobody has is the worse trade.
+//
+// What changes is that the two facts stop being one sentence. "It ran past the
+// cap" is a fact about this process's own limit and is actionable: the number
+// is in the message and it is one constant away. "It is not the JSON object
+// every hook sends" is a fact about the caller. Sending the reader of a missing
+// badge to look for a JSON bug that is not there is the part that was wrong.
+//
+// It lives here rather than beside payloadIsRoot because the cap is this
+// subcommand's, not the filter's: payloadIsRoot is a judgement about a payload
+// and this is a judgement about a read.
+func payloadIsUsable(payload []byte, overCap bool) (ok bool, why string) {
+	if overCap {
+		return false, fmt.Sprintf("it ran past this hook's %d-byte cap on stdin, so what arrived is a truncated prefix", maxPayloadBytes)
+	}
+	return payloadIsRoot(payload)
 }

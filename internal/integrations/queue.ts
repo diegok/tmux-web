@@ -145,6 +145,25 @@ export function spawnReport(agent, spawnProcess = spawnChildProcess) {
       child.on('error', settle)
       child.on('close', settle)
       try {
+        // The stdin socket gets a listener of its own, and it is not
+        // decoration. MEASURED, node v24.11.1: a child that exits before it
+        // has read all of stdin makes this write fail with EPIPE, Node emits
+        // 'error' ON THE SOCKET, and an 'error' with no listener is an
+        // uncaught exception -- which here is the plugin host's, which is the
+        // AGENT's process. `child.on('error')` above does not cover it (a
+        // socket's error is the socket's) and neither does this try/catch (the
+        // emit is a tick later).
+        //
+        // The case is reachable rather than theoretical: `tmux-web report`
+        // bounds stdin and stops reading at its cap, so any payload past the
+        // cap is exactly this. Losing a badge over an oversized diff is a
+        // coverage hole; taking the agent down over one is not something an
+        // optional reporting integration may do.
+        //
+        // Swallowed rather than settled: the child exited, so its own 'close'
+        // is coming, and settling twice would release the queue's one slot
+        // early -- the ordering guarantee makeQueue exists to give.
+        child.stdin.on('error', () => {})
         child.stdin.end(JSON.stringify(item.payload ?? {}))
       } catch (err) {
         // A child that died between spawn and write reports itself on 'error'.

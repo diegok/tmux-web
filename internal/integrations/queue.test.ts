@@ -159,6 +159,9 @@ describe('spawnReport', () => {
   function fakeProcessSpawn() {
     const calls: { file: string; args: string[] }[] = []
     const stdin: string[] = []
+    // The listeners registered on the stdin SOCKET, kept apart from the
+    // child's own: an EPIPE on the write arrives on this one and on no other.
+    const stdinHandlers: Record<string, (err: unknown) => void> = {}
     let exit: (() => void) | undefined
     const spawn = (file: string, args: string[]) => {
       calls.push({ file, args })
@@ -169,13 +172,16 @@ describe('spawnReport', () => {
           handlers[name] = fn
         },
         stdin: {
+          on(name: string, fn: (err: unknown) => void) {
+            stdinHandlers[name] = fn
+          },
           end(chunk: string) {
             stdin.push(chunk)
           },
         },
       }
     }
-    return { calls, stdin, spawn, exit: () => exit?.() }
+    return { calls, stdin, stdinHandlers, spawn, exit: () => exit?.() }
   }
 
   it('builds the report argv, once, for both integrations', async () => {
@@ -217,6 +223,36 @@ describe('spawnReport', () => {
     await expect(spawn({ event: 'input' })).resolves.toBeUndefined()
   })
 
+  it('listens for the write failing, because an unhandled EPIPE takes the agent down with it', async () => {
+    // MEASURED, node v24.11.1: a child that exits before it has read all of
+    // stdin makes the parent's pending write fail with EPIPE; Node emits
+    // 'error' on the stdin SOCKET, and an 'error' event with no listener is an
+    // uncaught exception. Here the parent is the plugin host -- opencode's or
+    // pi's process, which is to say the AGENT -- so the whole agent dies.
+    //
+    // It is not hypothetical: `tmux-web report` bounds stdin and stops reading
+    // at its cap, so any payload past the cap produces exactly this. The Go
+    // side of that is a missing badge; this side is worse. The child's own
+    // 'error' listener does not cover it -- a socket's error is the socket's --
+    // and neither does the try/catch around the write, because the emit is a
+    // tick later.
+    const fake = fakeProcessSpawn()
+    const settled = vi.fn()
+    spawnReport('opencode', fake.spawn as never)({ event: 'permission.asked' }).then(settled)
+    expect(fake.stdinHandlers.error).toBeTypeOf('function')
+
+    // Swallowed, not settled. The child is still going to close -- it exited,
+    // which is why the write failed -- and settling here as well would release
+    // the queue's one slot early, which is the ordering guarantee makeQueue
+    // exists to give.
+    expect(() => fake.stdinHandlers.error(new Error('write EPIPE'))).not.toThrow()
+    await settle()
+    expect(settled).not.toHaveBeenCalled()
+    fake.exit()
+    await settle()
+    expect(settled).toHaveBeenCalledTimes(1)
+  })
+
   it('settles on the error event a failed exec reports asynchronously', async () => {
     // spawn() returns a child and reports ENOENT on the 'error' event; no
     // 'close' follows on some platforms, so a promise waiting only for close
@@ -226,7 +262,7 @@ describe('spawnReport', () => {
       on(name: string, fn: () => void) {
         handlers[name] = fn
       },
-      stdin: { end() {} },
+      stdin: { on() {}, end() {} },
     }
     const settled = vi.fn()
     spawnReport('pi', (() => child) as never)({ event: 'input' }).then(settled)

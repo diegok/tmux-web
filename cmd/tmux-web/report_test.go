@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -266,4 +269,186 @@ func envWithout(keys ...string) func(string) string {
 		}
 		return os.Getenv(k)
 	}
+}
+
+// -- the stdin cap ----------------------------------------------------------
+
+// The cap's boundary, which is the only place a cap can be wrong. A test that
+// feeds a small payload proves nothing about it.
+//
+// The read is maxPayloadBytes+1 rather than maxPayloadBytes, and that one extra
+// byte is the whole mechanism: an io.LimitReader(r, cap) that comes back with
+// exactly cap bytes cannot say whether stdin held one more, so "a payload of
+// exactly the cap" and "the first cap bytes of something longer" arrive
+// identical. One is a whole hook payload and the other is a prefix of one, and
+// this subcommand answers them differently -- so the difference has to survive
+// the read.
+func TestReadPayloadKnowsWhenStdinRanPastTheCap(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		n        int
+		wantLen  int
+		wantOver bool
+	}{
+		{"one byte under the cap", maxPayloadBytes - 1, maxPayloadBytes - 1, false},
+		// The row the off-by-one lives on: a payload of exactly the cap is a
+		// whole payload, not a truncated one.
+		{"exactly the cap", maxPayloadBytes, maxPayloadBytes, false},
+		{"one byte over it", maxPayloadBytes + 1, maxPayloadBytes + 1, true},
+		// The probe byte bounds what is buffered however much is offered.
+		{"far over it", 4 * maxPayloadBytes, maxPayloadBytes + 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, over := readPayload(io.LimitReader(filler{}, int64(tc.n)))
+			if len(b) != tc.wantLen || over != tc.wantOver {
+				t.Errorf("read %d bytes, over=%v; want %d bytes, over=%v", len(b), over, tc.wantLen, tc.wantOver)
+			}
+		})
+	}
+}
+
+// No stdin at all is not a crash and not a truncation: it is an empty payload,
+// which payloadIsRoot already refuses for the ordinary reason.
+func TestReadPayloadOnNoStdin(t *testing.T) {
+	if b, over := readPayload(nil); b != nil || over {
+		t.Errorf("readPayload(nil) = %q, %v; want nil, false", b, over)
+	}
+}
+
+// The coverage the cap exists to preserve: an ordinary opencode edit permission
+// whose diff is far bigger than anything recorded still badges the pane.
+//
+// This is the case the old 1 MiB cap dropped in silence -- an approval prompt
+// on a big diff produced no badge at all, and the fresh working report that
+// preceded it had already suppressed the screen capture that would have caught
+// it. The two guards below are what stop this fixture being true by accident:
+// it must be bigger than the cap that used to fail, and smaller than the one
+// that must not.
+func TestALargeEditPermissionStillReportsBlocked(t *testing.T) {
+	payload := editPermissionWithDiff(t, 1_500_000)
+	if len(payload) <= 1<<20 {
+		t.Fatalf("payload is %d bytes: it has to exceed the 1 MiB cap that dropped it to prove anything", len(payload))
+	}
+	if len(payload) >= maxPayloadBytes {
+		t.Fatalf("payload is %d bytes, which is over the cap: this test is about the case UNDER it", len(payload))
+	}
+
+	rec := &recordingTmux{}
+	var out, errb bytes.Buffer
+	code := runReport([]string{"--agent", "opencode", "--event", "permission.asked"},
+		strings.NewReader(payload), &out, &errb,
+		mapEnv(map[string]string{"TMUX": "/tmp/sock,7,0", "TMUX_PANE": "%12"}),
+		func(string) tmuxRunner { return rec })
+	if code != 0 {
+		t.Fatalf("exited %d: %s", code, errb.String())
+	}
+	set := rec.lastSet()
+	if set == nil {
+		t.Fatalf("wrote nothing (stderr: %s); a permission prompt with a big diff is exactly the badge this feature is for", errb.String())
+	}
+	value := set[len(set)-1]
+	rep, ok := tmux.ParseReport(value, time.Now())
+	if !ok || rep.State != tmux.StateBlocked {
+		t.Fatalf("wrote %q -> %+v, %v; want a blocked report", value, rep, ok)
+	}
+	// The diff is read past, never published. A reader that took "metadata,
+	// serialised" would write a value the daemon then refuses to parse at all.
+	if strings.Contains(rep.Activity, "padding") {
+		t.Errorf("activity %q carries the diff; only the filepath's basename belongs in it", rep.Activity)
+	}
+}
+
+// "It ran past the cap" and "it is not JSON" are different facts about a
+// payload, and until now they were the same sentence and the same silence.
+//
+// Both still refuse, and that is deliberate: a truncated payload is precisely
+// the one where agent_id or parentID may lie past the cut, so accepting it
+// would write a state -- blocked, which never expires -- on evidence nobody
+// has. What changes is that the refusal says which of the two happened, so the
+// reader of a missing badge is not sent looking for a JSON bug that is not
+// there.
+func TestATruncatedPayloadAndGarbageAreRefusedForDifferentReasons(t *testing.T) {
+	over := editPermissionWithDiff(t, maxPayloadBytes)
+	if len(over) <= maxPayloadBytes {
+		t.Fatalf("payload is %d bytes, which is not over the %d-byte cap", len(over), maxPayloadBytes)
+	}
+	for _, tc := range []struct {
+		name, stdin, want, notWant string
+	}{
+		{
+			name:    "a whole payload that is not JSON",
+			stdin:   "this is not JSON at all",
+			want:    "not the JSON object every hook sends",
+			notWant: "cap",
+		},
+		{
+			name:  "a real edit permission cut off by the cap",
+			stdin: over,
+			want:  "cap",
+			// The parse did fail, but saying so is the wrong diagnosis: the
+			// payload is fine and the reader is what gave out.
+			notWant: "not the JSON object every hook sends",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &recordingTmux{}
+			var out, errb bytes.Buffer
+			code := runReport([]string{"--agent", "opencode", "--event", "permission.asked"},
+				strings.NewReader(tc.stdin), &out, &errb,
+				mapEnv(map[string]string{"TMUX": "/tmp/sock,7,0", "TMUX_PANE": "%12"}),
+				func(string) tmuxRunner { return rec })
+			if code != 0 {
+				t.Errorf("exited %d, want 0", code)
+			}
+			if len(rec.calls) != 0 {
+				t.Errorf("ran %v; a payload this subcommand could not read is not evidence that anything happened", rec.calls)
+			}
+			if !strings.Contains(errb.String(), tc.want) {
+				t.Errorf("stderr = %q, want %q in it", errb.String(), tc.want)
+			}
+			if strings.Contains(errb.String(), tc.notWant) {
+				t.Errorf("stderr = %q, and %q in it is the other refusal's words", errb.String(), tc.notWant)
+			}
+		})
+	}
+}
+
+// editPermissionWithDiff is the recorded opencode edit permission with its
+// unified diff padded out to roughly n bytes.
+//
+// Built from the real fixture rather than hand-written, so the payload that
+// exercises the cap is the same shape as the one the subagent filter, the event
+// table and the text reader all run on -- a synthetic `{"diff": "..."}` would
+// pass the cap and prove nothing about the path behind it.
+func editPermissionWithDiff(t *testing.T, n int) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", "hooks", "opencode", "permission_asked_edit.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var top map[string]any
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := top["properties"].(map[string]any)["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s no longer carries properties.metadata; this helper pads its diff", "permission_asked_edit.json")
+	}
+	meta["diff"] = meta["diff"].(string) + strings.Repeat("+padding\n", n/9)
+	out, err := json.Marshal(top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(out)
+}
+
+// filler is an endless reader of one repeated byte, so a test can offer stdin
+// more than the cap without holding it in memory first.
+type filler struct{}
+
+func (filler) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	return len(p), nil
 }

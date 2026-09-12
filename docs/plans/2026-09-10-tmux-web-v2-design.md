@@ -306,10 +306,27 @@ ids restart at `%0` when the tmux server restarts. Without it, a stale
 `seen["%3"]` from a previous server would silently suppress the badge on an
 unrelated new pane.
 
-One consequence of choosing a badge over push: a hidden tab's polling is
-throttled by the browser, and a locked phone stops entirely. The badge is
-therefore late or absent exactly while you are away — which is the trade accepted
-by not shipping push.
+One consequence of choosing a badge over push: a hidden tab is at the mercy of
+the browser's timers. It keeps polling while hidden, at a minute rather than the
+visible 1.5s — a minute because that is what Chromium's intensive throttling
+aligns a background tab's timers to once it has been hidden five minutes, so a
+shorter ask is rounded up rather than honoured. The badge is therefore late
+while you are away, by up to a minute of cadence plus a minute of grid skew, and
+absent entirely on a device that is not running timers at all: a locked phone,
+or a tab the browser discarded. Becoming visible polls immediately rather than
+waiting out the slow interval, so the first frame on the way back is current
+either way.
+
+**Corrected 2026-09-12.** This paragraph originally blamed browser throttling
+alone. The client had gone further than throttling on its own: `SnapshotPoller`
+parked the loop outright while `document.hidden`, so the count could not change
+in the background at all and the badge could not fire in the only situation it
+exists for. Throttling would have delivered a late badge; parking delivered
+none, and the README meanwhile claimed the feature worked. The client now polls
+slowly instead, which makes throttling the real and only limit — and `wake()`
+on return is what pays for the reason parking was chosen in the first place,
+that a throttled interval would leave the first visible frame showing a
+minute-old tree.
 
 ## Management
 

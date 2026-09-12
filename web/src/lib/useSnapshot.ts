@@ -7,7 +7,9 @@
  * not a tmux fork. Polling faster than the daemon refreshes would only burn
  * requests to re-read the same bytes; polling slower would add lag to a number
  * the design already accepts as the cost of not running a control-mode sidecar.
- * Hence exactly `POLL_INTERVAL_MS`.
+ * Hence exactly `POLL_INTERVAL_MS` -- and `HIDDEN_POLL_INTERVAL_MS` once the
+ * tab is in the background, where the tab badge is the only reader left and a
+ * minute is all the browser will run a timer at anyway.
  *
  * ## What this file will not do
  *
@@ -49,6 +51,34 @@ export const SNAPSHOT_URL = '/api/snapshot'
  * lag on top of tmux's.
  */
 export const POLL_INTERVAL_MS = 1500
+
+/**
+ * Poll period while the tab is in the background.
+ *
+ * A hidden tab keeps polling, slowly, because that is the only way the tab
+ * badge can fire: it is the answer to "do I need to go back to it?", and the
+ * tab it is asked about is by definition not the one being looked at. A loop
+ * that parked while hidden could never change the count in the one situation
+ * the count is for.
+ *
+ * **A minute, because a minute is what the browser will actually deliver.**
+ * Chromium throttles a hidden page's timers to roughly one a second after ten
+ * seconds, and after five minutes hidden switches to intensive throttling,
+ * where timers are aligned to a one-minute wall-clock grid; Firefox and Safari
+ * clamp to about one a second and suspend outright when the device sleeps. So
+ * anything under 60s is a number the browser rounds up rather than a cadence:
+ * 30s would ask for twice the requests and, past the five-minute mark, still
+ * arrive once a minute. What to expect in practice is one poll a minute, up to
+ * a minute late where the grid falls, and nothing at all on a locked phone or a
+ * discarded tab -- see `SnapshotPoller.wake`, which is what covers the gap the
+ * moment you look.
+ *
+ * Not an option on the poller, unlike `POLL_INTERVAL_MS`: the visible cadence
+ * tracks the daemon's refresh and a caller can reasonably know better, while
+ * this one tracks what the browser is willing to run, which no caller knows
+ * better than this module.
+ */
+export const HIDDEN_POLL_INTERVAL_MS = 60_000
 
 /**
  * How long one poll may take before it is abandoned.
@@ -1085,18 +1115,30 @@ export interface SnapshotPollerOptions {
  *
  * Two behaviours are worth stating out loud:
  *
- * **A hidden tab does not poll.** Not to save the daemon a fork -- it polls
- * tmux on its own schedule regardless of whether anyone is looking -- but
- * because a phone in a pocket has no use for a sidebar it is not showing, and
- * browsers throttle background timers to something between "one a minute" and
- * "never" anyway. Stopping deliberately and refreshing on the way back is
- * honest about that, where a throttled interval would leave the first visible
- * frame showing a minute-old tree. Nothing is queued while hidden: the next
- * poll is a fresh read of a cache the daemon has been keeping current.
+ * **A hidden tab polls slowly rather than not at all.** It once parked
+ * entirely, on the reasoning that a phone in a pocket has no use for a sidebar
+ * it is not showing -- but the tab badge is not the sidebar, and a parked loop
+ * made the badge unable to fire in the only situation it exists for. So the
+ * cadence switches to `HIDDEN_POLL_INTERVAL_MS` instead, which is what a
+ * background tab's timers are throttled to anyway.
+ *
+ * The objection that parking answered was that a throttled interval leaves the
+ * first visible frame showing a minute-old tree. `wake()` is what answers it
+ * now: coming back cuts the long wait short and polls immediately, so what you
+ * see on the way back is fresh whether the loop was slow or stopped.
+ *
+ * It costs the daemon nothing to speak of. `/api/snapshot` is served from the
+ * poller's in-memory cache, so a hidden tab's request is a read of bytes that
+ * already exist, not a tmux fork -- and the fork cadence that produces them is
+ * gated on a live terminal socket (`Registry.Live`), which a hidden tab is
+ * holding open either way. Ten hidden tabs are ten reads a minute; nothing here
+ * needs coalescing.
  *
  * **Only one request is ever in flight.** The next poll is scheduled after the
  * previous one settles, not on a fixed interval, so a slow response cannot
- * stack requests behind it.
+ * stack requests behind it -- and that is also what keeps a wake from racing a
+ * hidden request already on the wire, since two answers can never land out of
+ * order and put an older tree on screen than the one already there.
  */
 export class SnapshotPoller {
   readonly #opts: SnapshotPollerOptions
@@ -1108,7 +1150,18 @@ export class SnapshotPoller {
   #state: SnapshotState = EMPTY_STATE
   #timer: ReturnType<typeof setTimeout> | null = null
   #inFlight: AbortController | null = null
-  #waitingForVisible = false
+  /**
+   * The pending timer is the hidden cadence's, so `wake()` may cut it short.
+   *
+   * Written only by `#schedule`, read only by `wake`, and deliberately not
+   * cleared when the timer fires or is cancelled -- because it cannot be read
+   * while stale. Every path that leaves a timer behind either stops the poller
+   * or reaches `#poll`, which claims `#inFlight` synchronously, and `wake`
+   * answers that case before it ever looks here.
+   */
+  #armedHidden = false
+  /** A `wake()` that arrived mid-request, owed a poll once it settles. */
+  #wakePending = false
   #stopped = false
 
   constructor(opts: SnapshotPollerOptions) {
@@ -1140,10 +1193,30 @@ export class SnapshotPoller {
     this.#inFlight = null
   }
 
-  /** The tab became visible again. Polls immediately if the loop was parked. */
+  /**
+   * The tab became visible again: don't make it wait out the hidden cadence.
+   *
+   * This is the whole reason a slow hidden poll is allowed to exist -- without
+   * it the first visible frame could be a minute old. Three cases, and the
+   * third is the one worth stating:
+   *
+   * - A hidden-cadence timer is pending: cancel it and poll now.
+   * - Already on the visible cadence: nothing to cut short, so nothing happens.
+   *   A spurious wake cannot turn into an extra request.
+   * - A request is in flight: it went out before you looked, so its answer is
+   *   not the fresh frame this promises -- but a second request alongside it
+   *   would let two answers land in either order. The wake is remembered and
+   *   honoured the instant the first one settles instead.
+   */
   wake(): void {
-    if (this.#stopped || !this.#waitingForVisible) return
-    this.#waitingForVisible = false
+    if (this.#stopped) return
+    if (this.#inFlight) {
+      this.#wakePending = true
+      return
+    }
+    if (!this.#armedHidden) return
+    if (this.#timer) clearTimeout(this.#timer)
+    this.#timer = null
     void this.#poll()
   }
 
@@ -1152,21 +1225,11 @@ export class SnapshotPoller {
     if (this.#stopped) return
     if (this.#timer) clearTimeout(this.#timer)
     this.#timer = null
-    this.#waitingForVisible = false
     void this.#poll()
   }
 
   async #poll(): Promise<void> {
     if (this.#stopped || this.#inFlight) return
-    // Checked here rather than where the timer is armed, because the tab is
-    // usually hidden *after* the next poll was already scheduled -- switching
-    // away is the whole event. Parking without a timer is what makes the loop
-    // stop rather than run at whatever rate the browser throttles it to; wake()
-    // restarts it.
-    if (this.#isHidden()) {
-      this.#waitingForVisible = true
-      return
-    }
     const controller = new AbortController()
     this.#inFlight = controller
     const timeout = setTimeout(() => controller.abort(), this.#timeoutMs)
@@ -1223,12 +1286,30 @@ export class SnapshotPoller {
     if (unauthorized) this.stop()
   }
 
+  /**
+   * Arm the next poll, at whichever cadence the tab is owed right now.
+   *
+   * Visibility is read here, when the timer is armed, and there is nowhere else
+   * to read it: the delay has to be chosen before the wait starts. But the tab
+   * is usually hidden *after* the next poll was scheduled -- switching away is
+   * the whole event -- so going away costs one last poll at the visible cadence
+   * before the loop settles onto the slow one. That is one request, once. The
+   * other direction is the one that would be felt, a minute of waiting on a tab
+   * you are looking at, and `wake()` is what answers it.
+   */
   #schedule(): void {
     if (this.#stopped || this.#timer || this.#inFlight) return
-    this.#timer = setTimeout(() => {
-      this.#timer = null
-      void this.#poll()
-    }, this.#intervalMs)
+    const owed = this.#wakePending
+    this.#wakePending = false
+    const hidden = this.#isHidden()
+    this.#armedHidden = hidden
+    this.#timer = setTimeout(
+      () => {
+        this.#timer = null
+        void this.#poll()
+      },
+      owed ? 0 : hidden ? HIDDEN_POLL_INTERVAL_MS : this.#intervalMs,
+    )
   }
 
   #emit(state: SnapshotState): void {

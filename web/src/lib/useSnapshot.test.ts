@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  HIDDEN_POLL_INTERVAL_MS,
   POLL_INTERVAL_MS,
   SNAPSHOT_URL,
   SnapshotFetchError,
@@ -952,25 +953,131 @@ describe('SnapshotPoller', () => {
     expect(h.states).toHaveLength(seen)
   })
 
-  it('does not poll while the tab is hidden, and catches up on wake', async () => {
-    let hidden = false
+  it('asks for the one cadence a background tab is actually given', () => {
+    // Pinned as a number rather than derived, because every timing assertion
+    // below is written in terms of this constant and would follow it anywhere.
+    // The two bounds are two different arguments:
+    //
+    // Not below a minute -- Chromium's intensive throttling aligns a hidden
+    // page's timers to a one-minute wall-clock grid after five minutes hidden,
+    // so anything shorter is rounded up to a minute anyway and only buys extra
+    // requests in the first five minutes, which is exactly when the tab is most
+    // likely to come back and be woken instead.
+    //
+    // Not above it either -- the worst case a user sees is one interval plus a
+    // full minute of grid skew, so 60s is a badge up to two minutes late and
+    // anything slower makes that worse for nothing: the requests it saves are
+    // one HTTP read of an already-computed cache.
+    expect(HIDDEN_POLL_INTERVAL_MS).toBeGreaterThanOrEqual(60_000)
+    expect(HIDDEN_POLL_INTERVAL_MS).toBeLessThanOrEqual(60_000)
+    // And slower than the visible one, which is the entire point of having two.
+    expect(HIDDEN_POLL_INTERVAL_MS).toBeGreaterThan(POLL_INTERVAL_MS)
+  })
+
+  it('keeps polling while the tab is hidden, on the hidden cadence', async () => {
+    // The badge exists to answer "do I need to go back to it?" for a tab you
+    // are *not* looking at. A loop that parked while hidden could never change
+    // the count in the only situation the count is for.
+    let hidden = true
     const h = harness({ hidden: () => hidden })
     h.answerWith(() => ok({ panes: scrambled }))
     h.poller.start()
     await h.tick(0)
     expect(h.states).toHaveLength(1)
 
-    hidden = true
+    // Not the visible cadence: five of those pass with nothing sent.
     await h.tick(POLL_INTERVAL_MS * 5)
+    expect(h.states).toHaveLength(1)
+
+    await h.tick(HIDDEN_POLL_INTERVAL_MS - POLL_INTERVAL_MS * 5 - 1)
+    expect(h.states).toHaveLength(1) // not a millisecond early
+    h.answerWith(() =>
+      ok({ panes: scrambled.map((r) => (r.paneId === '%4' ? { ...r, agentState: 'blocked' } : r)) }),
+    )
+    await h.tick(1)
+    expect(h.states).toHaveLength(2)
+    // And the answer actually reached the state, which is what the badge reads.
+    expect(h.last.rows.find((r) => r.paneId === '%4')?.agentState).toBe('blocked')
+
+    // Still hidden: the next one is a hidden interval away, not a visible one.
+    await h.tick(POLL_INTERVAL_MS * 5)
+    expect(h.states).toHaveLength(2)
+    await h.tick(HIDDEN_POLL_INTERVAL_MS - POLL_INTERVAL_MS * 5)
+    expect(h.states).toHaveLength(3)
+  })
+
+  it('goes back to the visible cadence once the tab is looked at again', async () => {
+    let hidden = true
+    const h = harness({ hidden: () => hidden })
+    h.answerWith(() => ok({ panes: scrambled }))
+    h.poller.start()
+    await h.tick(0)
     expect(h.states).toHaveLength(1)
 
     hidden = false
     h.poller.wake()
     await h.tick(0)
     expect(h.states).toHaveLength(2)
-    // And the loop is running again rather than parked.
-    await h.tick()
+
+    await h.tick(POLL_INTERVAL_MS - 1)
+    expect(h.states).toHaveLength(2)
+    await h.tick(1)
     expect(h.states).toHaveLength(3)
+  })
+
+  it('wake() cuts the hidden wait short rather than leaving a stale first frame', async () => {
+    // The reason the loop used to park: a throttled interval would leave the
+    // first visible frame showing a minute-old tree. The hidden cadence is a
+    // minute, so wake() is the whole answer to that -- it must not merely queue
+    // behind the timer it found armed.
+    let hidden = true
+    const h = harness({ hidden: () => hidden })
+    h.answerWith(() => ok({ panes: scrambled }))
+    h.poller.start()
+    await h.tick(0)
+    await h.tick(5_000)
+    expect(h.states).toHaveLength(1)
+
+    hidden = false
+    h.poller.wake()
+    await h.tick(0)
+    expect(h.states).toHaveLength(2)
+    // The minute-long timer it interrupted is gone rather than still pending,
+    // so it cannot fire a spare poll 55s from now: exactly one timer is armed,
+    // and it is the visible-cadence one asserted above.
+    expect(vi.getTimerCount()).toBe(1)
+  })
+
+  it('a wake mid-flight polls again as soon as the hidden request settles, without racing it', async () => {
+    // A hidden request that is already out was asked before you looked, so its
+    // answer is not the fresh frame wake() promises -- but firing a second
+    // request alongside it would let two answers land in either order and put
+    // an older tree on screen than the one already there. So: never two in
+    // flight, and the wake is honoured the moment the first one settles.
+    let hidden = true
+    const h = harness({ hidden: () => hidden })
+    h.poller.start()
+    await h.tick(0)
+    expect(h.calls).toHaveLength(1)
+
+    hidden = false
+    h.poller.wake()
+    await h.tick(0)
+    expect(h.calls).toHaveLength(1) // the wake did not open a second one
+    expect(h.states).toHaveLength(0)
+
+    const older = scrambled.map((r) => (r.paneId === '%4' ? { ...r, command: 'zsh' } : r))
+    h.calls[0].resolve(ok({ panes: older }))
+    await h.tick(0)
+    expect(h.states).toHaveLength(1)
+    // Immediately, not a visible interval later: the wake was owed a poll.
+    expect(h.calls).toHaveLength(2)
+
+    h.calls[1].resolve(ok({ panes: scrambled }))
+    await h.tick(0)
+    expect(h.states).toHaveLength(2)
+    // And the newer answer is the one on screen, in that order.
+    expect(h.last.rows.find((r) => r.paneId === '%4')?.command).toBe('claude')
   })
 
   it('ignores a wake while the loop is already running', async () => {

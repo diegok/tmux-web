@@ -10,14 +10,19 @@
  *
  * ## What this badge cannot do, and why it is still the choice
  *
- * **A hidden tab is throttled, and a locked phone is stopped.** Browsers cut
- * background timers to roughly one a minute and suspend them outright when the
- * screen locks or the tab is discarded -- and `SnapshotPoller` goes further on
- * purpose, parking the loop entirely while `document.hidden` (see its class
- * comment). So the count is computed from the last snapshot the tab managed to
- * take: it is late by however long the tab has been in the background, and on a
- * pocketed phone it does not move at all until you look. The badge is right the
- * moment you glance at the tab, and silent while you are away.
+ * **A hidden tab is throttled, and a locked phone is stopped.** The count is
+ * computed from snapshots, so it moves only as often as the tab manages to take
+ * one -- and `SnapshotPoller` keeps taking them in the background, at
+ * `HIDDEN_POLL_INTERVAL_MS` rather than the visible cadence. That is a minute,
+ * because a minute is what browsers will actually run a hidden tab's timers at:
+ * Chromium aligns them to a one-minute grid once the tab has been hidden five
+ * minutes. So a blocked agent lights the tab up about a minute later, up to two
+ * in the worst case, which is the badge doing its job while you are away.
+ *
+ * What it cannot survive is a device that is not running timers at all. A
+ * locked phone or a discarded tab shows nothing until you look -- and then
+ * shows the truth at once, because becoming visible wakes the poller instead of
+ * making it wait out the slow interval (see `SnapshotPoller.wake`).
  *
  * That is the accepted cost of choosing a badge over Web Push. Push would
  * survive a locked phone -- it is the only thing that would -- and it costs a

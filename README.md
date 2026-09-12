@@ -135,7 +135,12 @@ daemon classifies, and the mark says only which program this is. It is a
 generic editor glyph rather than a Vim logo, because only a project's own mark
 is ever drawn here, never one from memory. A tab you are not looking at puts
 the count in its title and a dot on its favicon, for the agents that are
-blocked or that have finished since this device last looked.
+blocked or that have finished since this device last looked. It keeps polling
+while it is in the background to do that, once a minute — the fastest a browser
+will actually run a hidden tab's timers — so the count is up to a couple of
+minutes behind. A device that has stopped running timers altogether, a locked
+phone or a tab the browser discarded, shows nothing at all until you look at
+it, and then shows the truth immediately.
 
 All of that is read off the screen, and reading the screen has two limits. It
 cannot say *what* an agent is doing: the pane title looks like it should and

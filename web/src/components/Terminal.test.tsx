@@ -197,6 +197,7 @@ function makeSession(
     storage?: PaneStorage | null
     onStatus?: (s: TerminalStatus) => void
     probe?: () => Promise<SessionPresence>
+    now?: () => number
   } = {},
 ) {
   const statuses: TerminalStatus[] = []
@@ -215,6 +216,9 @@ function makeSession(
     storage,
     // Neutral jitter, so delays are exactly the exponential schedule.
     random: () => 0.5,
+    // Undefined leaves the session on Date.now, which is what almost every
+    // test here wants; the wake tests hand in a clock they can step by hand.
+    now: opts.now,
     probe: opts.probe ?? probe.probe,
   })
   return { term, statuses, received, storage, probe }
@@ -905,6 +909,131 @@ describe('reconnect', () => {
     first.readyState = 1
     first.receive(new Uint8Array([FRAME_DATA, 0x78]))
     expect(received).toEqual([])
+  })
+})
+
+describe('wake', () => {
+  // Every test here calls `term.wake()` directly. There is no `document` under
+  // this file's node environment, so the two listeners that call it in a
+  // browser are asserted in TerminalWake.dom.test.ts and nowhere else.
+  //
+  // Every duration below is a LITERAL, never `CONNECT_STALL_MS ± 1`. The
+  // mutant that retargets the constant to 0 SURVIVES a fixture derived from
+  // the constant: `now += CONNECT_STALL_MS - 1` becomes `now += -1`, elapsed
+  // is -1ms, and -1 is inside every window there is. Fixture from a literal,
+  // assertion against the constant -- never both from the same number.
+
+  it('case (a): a pending backoff timer is cancelled and the connect happens now', () => {
+    const { term } = makeSession()
+    term.start()
+    MockWebSocket.last.emitClose(1006)
+    expect(term.status.phase).toBe('reconnecting')
+    // The fixture must not already satisfy the assertion: one socket so far.
+    expect(MockWebSocket.instances).toHaveLength(1)
+
+    term.wake()
+    expect(MockWebSocket.instances).toHaveLength(2)
+
+    // And the cancelled timer must not later open a third. This is the half a
+    // test written as "wake reconnects" would miss, and `retryNow` only gets it
+    // right because it calls `#clearTimers`.
+    vi.advanceTimersByTime(BACKOFF_MAX_MS * 2)
+    expect(MockWebSocket.instances).toHaveLength(2)
+  })
+
+  it('case (c): a socket stuck in CONNECTING past CONNECT_STALL_MS is dropped and replaced', () => {
+    let now = 1_000
+    const { term } = makeSession({ now: () => now })
+    term.start()
+
+    // A prior failed attempt, so the attempt assertion at the end is a RESET
+    // and not the value the fixture already had. `term.start()` alone leaves
+    // attempt at 0, which makes `toBe(0)` true before the action -- the
+    // "fixture true by accident" shape, and this is where it hides.
+    MockWebSocket.last.emitClose(1006)
+    expect(term.status.attempt).toBe(1)
+    // Let the backoff open the socket this test is about, keeping the injected
+    // clock in step with the fake timers so `connectStartedAt` is coherent.
+    now += BACKOFF_MAX_MS
+    vi.advanceTimersByTime(BACKOFF_MAX_MS)
+    expect(MockWebSocket.instances).toHaveLength(2)
+
+    const stalled = MockWebSocket.last
+    // Never opened: readyState stays 0, which is CONNECTING.
+    expect(stalled.readyState).toBe(0)
+    expect(stalled.closedWith).toBeNull()
+
+    now += 10_001
+    term.wake()
+
+    expect(stalled.closedWith).toEqual({ code: 4001, reason: 'socket did not answer' })
+    expect(MockWebSocket.instances).toHaveLength(3)
+    // Reset from 1 to 0, so the pill says "connecting" rather than climbing the
+    // ladder from wherever it was.
+    expect(term.status.attempt).toBe(0)
+    expect(term.status.phase).toBe('connecting')
+
+    // Nothing is left armed behind the discard.
+    vi.advanceTimersByTime(BACKOFF_MAX_MS * 2)
+    expect(MockWebSocket.instances).toHaveLength(3)
+  })
+
+  it('case (c), the negative control: a CONNECTING socket inside the window is left alone', () => {
+    let now = 1_000
+    const { term } = makeSession({ now: () => now })
+    term.start()
+    const first = MockWebSocket.last
+
+    now += 9_999
+    term.wake()
+
+    expect(first.closedWith).toBeNull()
+    expect(MockWebSocket.instances).toHaveLength(1)
+  })
+
+  it('case (c), the boundary: exactly CONNECT_STALL_MS is inside the window', () => {
+    let now = 1_000
+    const { term } = makeSession({ now: () => now })
+    term.start()
+    const first = MockWebSocket.last
+
+    now += 10_000
+    term.wake()
+
+    // `<=` and `<` agree everywhere except here, which is the only place the
+    // operator mutant can be caught.
+    expect(first.closedWith).toBeNull()
+    expect(MockWebSocket.instances).toHaveLength(1)
+  })
+
+  it('does nothing once stopped, or from ended, or from gone', async () => {
+    const stopped = makeSession()
+    stopped.term.start()
+    MockWebSocket.last.open()
+    stopped.term.stop()
+    MockWebSocket.reset()
+    stopped.term.wake()
+    expect(MockWebSocket.instances).toHaveLength(0)
+
+    const ended = makeSession()
+    ended.term.start()
+    MockWebSocket.last.open()
+    MockWebSocket.last.emitClose(1000, 'session ended', true)
+    expect(ended.term.status.phase).toBe('ended')
+    MockWebSocket.reset()
+    ended.term.wake()
+    expect(MockWebSocket.instances).toHaveLength(0)
+
+    // `gone` in particular: `retryNow()` is deliberately allowed from `gone`
+    // because the user asked. A wake is not the user asking.
+    const gone = makeSession()
+    gone.term.start()
+    MockWebSocket.last.emitClose(1006)
+    await gone.probe.answer('gone')
+    expect(gone.term.status.phase).toBe('gone')
+    MockWebSocket.reset()
+    gone.term.wake()
+    expect(MockWebSocket.instances).toHaveLength(0)
   })
 })
 

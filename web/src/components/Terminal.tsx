@@ -456,6 +456,14 @@ export class TerminalSession {
 
   #resizeTimer: ReturnType<typeof setTimeout> | null = null
   #retryTimer: ReturnType<typeof setTimeout> | null = null
+  /**
+   * The wake probe's answer deadline. Declared here, and cleared by
+   * `#discard()`, so that the discard is whole in the commit that introduces
+   * it; only the probe (Task 4) ever arms it, and it owns the rest of this
+   * field's lifecycle -- `#clearTimers()` and `#closed()` -- because nothing
+   * here can arm it and so nothing here can leak it.
+   */
+  #wakeProbe: ReturnType<typeof setTimeout> | null = null
   #stopped = false
 
   readonly #probe: () => Promise<SessionPresence>
@@ -488,9 +496,41 @@ export class TerminalSession {
     }
   }
 
+  /**
+   * The tab came back to the foreground; see `wake`. Stored so that `stop()`
+   * can hand `removeEventListener` the same reference -- a fresh arrow there
+   * removes nothing, and the listener would keep this whole session, its
+   * socket and its callbacks alive for the life of the page.
+   */
+  readonly #onVisible = () => {
+    // The event fires on hide as well as on show, and probing a tab that is
+    // going away is two forks nobody will see the result of.
+    if (globalThis.document?.visibilityState === 'hidden') return
+    this.wake()
+  }
+  readonly #onPageShow = () => this.wake()
+
   /** Open the first socket and report the initial status. */
   start(): void {
     if (this.#stopped || this.#transport) return
+    // There are now two visibilitychange listeners in this app: this one and
+    // SnapshotPoller's, in web/src/lib/useSnapshot.ts. That is the decision and
+    // not an accident. The poller owning its own listener is the existing
+    // convention, the two objects share no state, and they can both hit
+    // /api/snapshot on the same wake -- harmlessly, because `s.snapshot` reads
+    // the poller's in-memory cache and forks nothing. Do not hoist them into
+    // App.tsx to make an ordering guarantee neither of them needs.
+    //
+    // And note what the poll waking does *not* tell you: the poll is HTTP
+    // against a cache, the socket is a PTY. A wake where the sidebar comes back
+    // current and the terminal stays dead is exactly the bug this handler
+    // exists for, and it is the most confusing possible symptom because the
+    // sidebar looks fine.
+    //
+    // Optional throughout because this class is constructed under vitest's
+    // node environment, where neither global exists.
+    globalThis.document?.addEventListener('visibilitychange', this.#onVisible)
+    globalThis.addEventListener?.('pageshow', this.#onPageShow)
     this.#connect()
   }
 
@@ -502,6 +542,8 @@ export class TerminalSession {
   stop(): void {
     if (this.#stopped) return
     this.#stopped = true
+    globalThis.document?.removeEventListener('visibilitychange', this.#onVisible)
+    globalThis.removeEventListener?.('pageshow', this.#onPageShow)
     this.#clearTimers()
     this.#transport?.close(1000, 'tab closed')
     this.#transport = null
@@ -582,6 +624,68 @@ export class TerminalSession {
    */
   retryNow(): void {
     if (this.#stopped || this.#transport) return
+    this.#clearTimers()
+    this.#attempt = 0
+    this.#connect()
+  }
+
+  /**
+   * The tab came back to the foreground. Decide whether this socket is worth
+   * keeping, and reconnect if it is not.
+   *
+   * Registered on both `visibilitychange` and `pageshow`, and written to
+   * tolerate firing twice: a bfcache restore on iOS may fire `pageshow` with
+   * `persisted: true` and no `visibilitychange` at all -- documented behaviour,
+   * not verified here -- so the handler depends on neither arriving rather than
+   * on which one does.
+   *
+   * `online` is deliberately not a trigger. It tracks interface transitions
+   * rather than wake-ups, it lies on a captive portal, and every case it would
+   * catch this already catches.
+   */
+  wake(): void {
+    if (this.#stopped || this.#phase === 'ended' || this.#phase === 'gone') return
+
+    // (a) No transport: a backoff timer is pending and may be arbitrarily late,
+    // because it is a timer and timers are what a suspend suspends.
+    if (!this.#transport) {
+      this.retryNow()
+      return
+    }
+
+    // (c) Stuck mid-handshake. `retryNow()` cannot do this -- it returns early
+    // while a transport exists -- and no close event is coming.
+    //
+    // Not written as "anything that is not open", deliberately: `state` returns
+    // 'closed' both for a socket the caller already closed and for one that is
+    // CLOSING, and neither wants a discard. Case (b), which Task 4 adds below,
+    // is gated on `state === 'open'` and on nothing weaker.
+    if (this.#transport.state === 'connecting') {
+      if (this.#now() - this.#transport.connectStartedAt <= CONNECT_STALL_MS) return
+      this.#discard()
+      return
+    }
+
+    // (b) is Task 4.
+  }
+
+  /**
+   * Throw this socket away and start a new one, now.
+   *
+   * `Transport.close()` sets `#closedByCaller` and suppresses its own
+   * `onClose`, so closing and waiting for the reconnect path to fire would
+   * wait forever. The transport is detached first so that a callback which
+   * somehow still arrives fails its `transport !== this.#transport` check.
+   */
+  #discard(): void {
+    if (this.#wakeProbe) {
+      clearTimeout(this.#wakeProbe)
+      this.#wakeProbe = null
+    }
+    const dead = this.#transport
+    this.#transport = null
+    this.#awaitingWhere = false
+    dead?.close(4001, 'socket did not answer')
     this.#clearTimers()
     this.#attempt = 0
     this.#connect()

@@ -980,11 +980,14 @@ func newDaemon(cfg Config) (*daemon, error) {
 		enroller: auth.NewEnroller(store),
 		registry: registry,
 		poller: tmux.NewPollerWith(tmux.Options{
-			Interval:            interval,
-			SnapshotWithReports: tm.SnapshotAndReports,
-			ServerStart:         tm.ServerStart,
-			Capture:             tm.Capture,
-			Connected:           registry.Live,
+			Interval: interval,
+			// One fork per poll, carrying the rows, every pane's report, every
+			// pane's working directory and the server's generation. No
+			// ServerStart beside it: that is the fork the batch removed, and
+			// NewPollerWith refuses both.
+			Poll:      tm.Poll,
+			Capture:   tm.Capture,
+			Connected: registry.Live,
 		}),
 		tmux:      tm,
 		baseURL:   baseURL(cfg),

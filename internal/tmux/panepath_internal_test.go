@@ -207,7 +207,7 @@ func TestAPollerFedCacheCarriesThePathToASplit(t *testing.T) {
 	pane := srv.Run(t, "list-panes", "-t", "work", "-F", "#{pane_id}")
 
 	c := NewClient(srv.Args())
-	p := NewPollerWith(Options{Interval: time.Hour, SnapshotWithReports: c.SnapshotAndReports})
+	p := NewPollerWith(Options{Interval: time.Hour, Poll: c.Poll})
 	p.refresh(context.Background())
 	c.UsePathCache(p.PathFor)
 

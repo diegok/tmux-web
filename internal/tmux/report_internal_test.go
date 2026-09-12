@@ -14,11 +14,11 @@ import (
 // is the reflex, and here the reflex trades a degraded feature for a blank
 // sidebar.
 //
-// THE SEAM IS THE POINT OF THIS TEST. SnapshotAndReports takes no arguments and
+// THE SEAM IS THE POINT OF THIS TEST. Poll takes no arguments and
 // calls batchArgs() itself, so there is no way in from outside: a test that
 // drove runKeepingOutput directly with a broken argv would assert that
 // runKeepingOutput keeps its output -- which it plainly does -- and would NOT
-// kill the mutant this test exists for, "SnapshotAndReports returns early on
+// kill the mutant this test exists for, "Poll returns early on
 // err != nil". So batchArgs is declared as a package-level var holding a func,
 // and this test replaces it for the duration.
 //
@@ -38,7 +38,8 @@ func TestABrokenReportReadStillYieldsTheSnapshot(t *testing.T) {
 		}
 	}
 
-	rows, reports, err := NewClient(srv.Args()).SnapshotAndReports(context.Background())
+	got, err := NewClient(srv.Args()).Poll(context.Background())
+	rows, reports := got.Rows, got.Reports
 	if err != nil {
 		t.Fatalf("err = %v; a failed report read must not fail the poll", err)
 	}
@@ -77,7 +78,8 @@ func TestABatchWithNothingUsableOnStdoutIsAnError(t *testing.T) {
 		}
 	}
 
-	rows, reports, err := NewClient(srv.Args()).SnapshotAndReports(context.Background())
+	got, err := NewClient(srv.Args()).Poll(context.Background())
+	rows, reports := got.Rows, got.Reports
 	if err == nil {
 		t.Fatalf("err = nil with rows %+v and reports %v; a batch that produced "+
 			"nothing usable is a failed poll, not a degraded one", rows, reports)

@@ -13,8 +13,8 @@ import (
 // unsafe because window names may contain one.
 const Sep = "\x1f"
 
-// snapshotTag, reportTag and pathTag label the three blocks of the one batched
-// read.
+// snapshotTag, reportTag, pathTag and startTag label the four blocks of the one
+// batched read.
 //
 // A literal constant in each format string, so nothing a writer controls can
 // forge one: a report or a directory name containing a newline would have to
@@ -26,6 +26,9 @@ const (
 	snapshotTag = "S"
 	reportTag   = "A"
 	pathTag     = "P"
+	// The generation's block, which is one line for the whole server rather
+	// than one per pane; see StartFormat.
+	startTag = "G"
 )
 
 // fieldCount is how many fields a record must have to be read. It is a
@@ -305,11 +308,11 @@ func ParseRows(out string) (rows []Row, dropped int, err error) {
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Split(line, Sep)
 		// The other blocks of the batched read. Skipped rather than counted:
-		// ParseReports and ParsePaths own those lines, and counting them as
-		// malformed would log "skipped malformed rows" once per pane per poll
-		// forever -- which teaches the operator to ignore the one warning that
-		// means a pane really is missing.
-		if len(fields) > 0 && (fields[0] == reportTag || fields[0] == pathTag) {
+		// ParseReports, ParsePaths and ParseServerStart own those lines, and
+		// counting them as malformed would log "skipped malformed rows" once
+		// per pane per poll forever -- which teaches the operator to ignore the
+		// one warning that means a pane really is missing.
+		if len(fields) > 0 && (fields[0] == reportTag || fields[0] == pathTag || fields[0] == startTag) {
 			continue
 		}
 		// The tag is the discriminator, not the field count. A line that is

@@ -120,8 +120,10 @@ func TestBatchArgsReadsThePathInTheSameFork(t *testing.T) {
 		t.Errorf("batchArgs runs %d list-panes commands, want 3 in the one invocation: %q",
 			commands, args)
 	}
-	if got := strings.Count(strings.Join(args, " "), " ; "); got != 2 {
-		t.Errorf("batchArgs has %d command separators, want 2: %q", got, args)
+	// Three, since the generation block joined them: four commands, one
+	// invocation. TestBatchArgsReadsTheGenerationInTheSameFork owns that one.
+	if got := strings.Count(strings.Join(args, " "), " ; "); got != 3 {
+		t.Errorf("batchArgs has %d command separators, want 3: %q", got, args)
 	}
 }
 
@@ -489,7 +491,7 @@ func TestSnapshotHostilePaneDirectoryCannotRemoveAPane(t *testing.T) {
 // Same rule and same seam as TestABrokenReportReadStillYieldsTheSnapshot: the
 // earlier commands' output is complete on stdout before the error, so the
 // daemon parses stdout on its own terms and does not gate on the exit status.
-// The mutant this exists for is "SnapshotAndReports returns early on err != nil"
+// The mutant this exists for is "Poll returns early on err != nil"
 // -- with a third block, that is one more way for a whole sidebar to go blank.
 func TestABrokenPathReadStillYieldsTheSnapshot(t *testing.T) {
 	srv := testutil.NewServer(t)
@@ -506,7 +508,8 @@ func TestABrokenPathReadStillYieldsTheSnapshot(t *testing.T) {
 		}
 	}
 
-	rows, reports, err := NewClient(srv.Args()).SnapshotAndReports(context.Background())
+	got, err := NewClient(srv.Args()).Poll(context.Background())
+	rows, reports := got.Rows, got.Reports
 	if err != nil {
 		t.Fatalf("err = %v; a failed path read must not fail the poll", err)
 	}
@@ -561,17 +564,19 @@ func sanitizedPath(p string) string {
 // row-for-row comparison strict instead of dropping the fields that flicker.
 func settledRows(t *testing.T, c *Client) []Row {
 	t.Helper()
-	prev, _, err := c.SnapshotAndReports(context.Background())
+	first, err := c.Poll(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
+	prev := first.Rows
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		time.Sleep(20 * time.Millisecond)
-		cur, _, err := c.SnapshotAndReports(context.Background())
+		got, err := c.Poll(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
+		cur := got.Rows
 		if slices.Equal(prev, cur) {
 			return cur
 		}

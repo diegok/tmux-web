@@ -35,10 +35,11 @@ func TestReportFormatRoundTripsThroughRealTmux(t *testing.T) {
 	const wantBenign = "running go test in the second window next line"
 
 	srv.Run(t, "set", "-p", "-t", "probe", tmux.AgentOption, benign)
-	_, reports, err := c.SnapshotAndReports(context.Background())
+	got, err := c.Poll(context.Background())
 	if err != nil {
-		t.Fatalf("SnapshotAndReports: %v", err)
+		t.Fatalf("Poll: %v", err)
 	}
+	reports := got.Reports
 	// Exactly one pane, so the map has exactly one entry. Asserted rather than
 	// assumed: every check below is inside a range, so an empty map would make
 	// the whole test vacuous -- which is what dropping the ";" from batchArgs
@@ -58,10 +59,11 @@ func TestReportFormatRoundTripsThroughRealTmux(t *testing.T) {
 	// Two substitutions in one value: tmux's s/// modifier replaces every
 	// match, not the first -- measured on 3.7b on an isolated socket.
 	srv.Run(t, "set", "-p", "-t", "probe", tmux.AgentOption, "EV\x1fIL\nMORE")
-	_, reports, err = c.SnapshotAndReports(context.Background())
+	got, err = c.Poll(context.Background())
 	if err != nil {
-		t.Fatalf("SnapshotAndReports: %v", err)
+		t.Fatalf("Poll: %v", err)
 	}
+	reports = got.Reports
 	if len(reports) != 1 {
 		t.Fatalf("reports = %v, want exactly one entry for the one pane", reports)
 	}
@@ -99,14 +101,16 @@ func TestHostileAgentReportCannotRemoveAPane(t *testing.T) {
 	// has nothing to do with reports. Same helper, same reason, as
 	// TestSnapshotHostileLabelCannotRemoveAPane.
 	settledSnapshot(t, c)
-	before, _, err := c.SnapshotAndReports(context.Background())
+	first, err := c.Poll(context.Background())
+	before := first.Rows
 	if err != nil || len(before) != 2 {
 		t.Fatalf("baseline: %d rows, err %v", len(before), err)
 	}
 	srv.Run(t, "set", "-p", "-t", "probe", tmux.AgentOption, "X\x1fY\nZ\x1fW")
-	after, _, err := c.SnapshotAndReports(context.Background())
+	second, err := c.Poll(context.Background())
+	after := second.Rows
 	if err != nil {
-		t.Fatalf("SnapshotAndReports: %v", err)
+		t.Fatalf("Poll: %v", err)
 	}
 	if len(after) != len(before) {
 		t.Fatalf("a hostile report changed the pane count: %d -> %d", len(before), len(after))

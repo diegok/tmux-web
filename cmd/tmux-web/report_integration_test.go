@@ -54,10 +54,11 @@ func TestReportReachesTheSnapshot(t *testing.T) {
 	}
 
 	c := tmux.NewClient(srv.Args())
-	rows, reports, err := c.SnapshotAndReports(context.Background())
+	polled, err := c.Poll(context.Background())
 	if err != nil {
-		t.Fatalf("SnapshotAndReports: %v", err)
+		t.Fatalf("Poll: %v", err)
 	}
+	rows, reports := polled.Rows, polled.Reports
 	// The value, parsed. Not the key.
 	rep, ok := tmux.ParseReport(reports[paneID], time.Now())
 	if !ok || rep.State != tmux.StateWorking || rep.Activity != "running go test" {
@@ -84,11 +85,10 @@ func TestReportReachesTheSnapshot(t *testing.T) {
 	// refuses half-wired classification; with nobody connected it is never
 	// called.)
 	p := tmux.NewPollerWith(tmux.Options{
-		Interval:            time.Hour, // Start polls once synchronously; nothing here needs a second poll
-		SnapshotWithReports: c.SnapshotAndReports,
-		ServerStart:         c.ServerStart,
-		Capture:             c.Capture,
-		Connected:           func() bool { return false },
+		Interval:  time.Hour, // Start polls once synchronously; nothing here needs a second poll
+		Poll:      c.Poll,
+		Capture:   c.Capture,
+		Connected: func() bool { return false },
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -155,10 +155,11 @@ func TestAnUnknownStateWritesNothing(t *testing.T) {
 	}
 
 	c := tmux.NewClient(srv.Args())
-	_, reports, err := c.SnapshotAndReports(context.Background())
+	polled, err := c.Poll(context.Background())
 	if err != nil {
-		t.Fatalf("SnapshotAndReports: %v", err)
+		t.Fatalf("Poll: %v", err)
 	}
+	reports := polled.Reports
 	if reports[paneID] != "" {
 		t.Fatalf("@tmux_web_agent = %q after an unknown state; want nothing written at all", reports[paneID])
 	}

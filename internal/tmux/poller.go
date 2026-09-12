@@ -19,14 +19,16 @@ import (
 // are checked rather than assumed.
 type Poller struct {
 	interval time.Duration
-	// fn produces the rows and, when reporting is on, every pane's raw
-	// @tmux_web_agent value from the same tmux invocation. A poller built from a
-	// bare Snapshot has that half wrapped away: a nil map is no report for
-	// every pane, which is what the v1 path means anyway.
-	fn func(context.Context) ([]Row, map[string]string, error)
-	// startFn reads the tmux server's generation. It is optional: a poller built
-	// from a bare snapshot function has no tmux server to ask, and reports an
-	// empty generation rather than inventing one.
+	// fn produces one poll's worth of tmux state: the rows, and -- when the
+	// poller was built over a batched read -- every pane's raw @tmux_web_agent
+	// value and the server's generation from the same tmux invocation. A poller
+	// built from a bare Snapshot has those halves wrapped away: a nil map is no
+	// report for every pane, and no generation is what the v1 path means
+	// anyway.
+	fn func(context.Context) (Poll, error)
+	// startFn reads the tmux server's generation in a fork of its own, and is
+	// the fallback for a poller whose read does not carry one. It is optional,
+	// and mutually exclusive with a batched Poll: see NewPollerWith.
 	startFn func(context.Context) (string, error)
 	// nowFn is the poll's clock, and the only one either authority ever gets:
 	// Classifier and Reports are both pure, and `now` reaches them as a
@@ -92,15 +94,18 @@ type Poller struct {
 // poll now has a second job.
 type Options struct {
 	Interval time.Duration
-	// Snapshot produces the rows. Exactly one of Snapshot and
-	// SnapshotWithReports is required.
+	// Snapshot produces the rows. Exactly one of Snapshot and Poll is required.
 	Snapshot func(context.Context) ([]Row, error)
-	// SnapshotWithReports produces the rows AND, from the same tmux
-	// invocation, every pane's raw @tmux_web_agent value keyed by pane id. Set
-	// this INSTEAD of Snapshot to turn agent reporting on.
-	SnapshotWithReports func(context.Context) ([]Row, map[string]string, error)
-	// ServerStart reads the tmux server's generation, once per poll. Optional:
-	// without it the poller reports no generation rather than inventing one.
+	// Poll produces the rows AND, from the same tmux invocation, every pane's
+	// raw @tmux_web_agent value keyed by pane id and the tmux server's
+	// generation. Set this INSTEAD of Snapshot: it is the batched read, it
+	// turns agent reporting on, and it makes ServerStart both unnecessary and
+	// refused.
+	Poll func(context.Context) (Poll, error)
+	// ServerStart reads the tmux server's generation in a fork of its own, once
+	// per poll. Optional, and only for a Snapshot poller: without it such a
+	// poller reports no generation rather than inventing one, and beside Poll
+	// it is a wiring mistake rather than an option -- see NewPollerWith.
 	ServerStart func(context.Context) (string, error)
 	// Capture and Connected turn on agent classification, and must be given
 	// together -- see NewPollerWith.
@@ -124,19 +129,28 @@ func NewPollerWith(o Options) *Poller {
 	if (o.Capture == nil) != (o.Connected == nil) {
 		panic("tmux: Options.Capture and Options.Connected must be set together")
 	}
-	if (o.Snapshot == nil) == (o.SnapshotWithReports == nil) {
+	if (o.Snapshot == nil) == (o.Poll == nil) {
 		// Half-wired reporting is silent: with neither there is nothing to
 		// poll, and with both there is no way to say which fork happens.
-		panic("tmux: exactly one of Options.Snapshot and Options.SnapshotWithReports must be set")
+		panic("tmux: exactly one of Options.Snapshot and Options.Poll must be set")
 	}
-	fn := o.SnapshotWithReports
+	if o.Poll != nil && o.ServerStart != nil {
+		// The batched read already carries the generation. A second reader
+		// beside it forks tmux twice a poll, forever, for one value both
+		// answers agree on -- so nothing would ever look wrong, which is
+		// exactly why this is worth failing at startup rather than leaving to
+		// be noticed.
+		panic("tmux: Options.ServerStart is the fork Options.Poll removes; set one or the other")
+	}
+	fn := o.Poll
 	if fn == nil {
-		fn = func(ctx context.Context) ([]Row, map[string]string, error) {
+		fn = func(ctx context.Context) (Poll, error) {
 			rows, err := o.Snapshot(ctx)
-			// No map at all rather than an empty one, and nothing downstream
-			// needs a branch for it: reports[id] on a nil map is "", which is
-			// exactly what no report means.
-			return rows, nil, err
+			// No map and no generation rather than empty ones, and nothing
+			// downstream needs a branch for either: reports[id] on a nil map is
+			// "", which is exactly what no report means, and HaveServerStart
+			// false is what sends refresh to startFn.
+			return Poll{Rows: rows}, err
 		}
 	}
 	p := &Poller{
@@ -268,7 +282,7 @@ func (p *Poller) refresh(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	rows, reports, err := p.fn(ctx)
+	res, err := p.fn(ctx)
 	// Said in the daemon's own words, because tmux does not say it: the error
 	// from a command killed by its context is "signal: killed", which wraps
 	// nothing a caller can match on and reads, in the sidebar, as though tmux
@@ -283,15 +297,23 @@ func (p *Poller) refresh(ctx context.Context) {
 	// The generation is read per poll rather than once at construction: the tmux
 	// server can restart underneath a running daemon, and that is precisely the
 	// moment the value matters. It is skipped when the snapshot itself failed --
-	// the same fault would fail this too, and a doomed second fork buys nothing --
-	// and a failure of its own leaves the previous generation in place, since
-	// blanking it would make every browser's per-pane memory miss for one poll.
+	// the same fault would fail this too, and a doomed read buys nothing -- and
+	// a read that did not carry one leaves the previous generation in place,
+	// since blanking it would make every browser's per-pane memory miss for one
+	// poll.
+	//
+	// It rides the batched read where there is one, which is the daemon's own
+	// poller: one fork, N format strings, and this value was the last thing
+	// breaking that rule.
 	var start string
 	var haveStart bool
-	if err == nil && p.startFn != nil {
-		var serr error
-		if start, serr = p.startFn(ctx); serr == nil {
-			haveStart = true
+	if err == nil {
+		start, haveStart = res.ServerStart, res.HaveServerStart
+		if !haveStart && p.startFn != nil {
+			var serr error
+			if start, serr = p.startFn(ctx); serr == nil {
+				haveStart = true
+			}
 		}
 	}
 
@@ -335,7 +357,7 @@ func (p *Poller) refresh(ctx context.Context) {
 	// Before publishing, so no reader ever sees a row between its snapshot
 	// fields being set and its state being decided.
 	if err == nil {
-		p.classify(ctx, rows, reports)
+		p.classify(ctx, res.Rows, res.Reports)
 	}
 
 	p.mu.Lock()
@@ -347,7 +369,7 @@ func (p *Poller) refresh(ctx context.Context) {
 	if err != nil {
 		return
 	}
-	p.latest = rows
+	p.latest = res.Rows
 }
 
 // classify captures every known agent pane and writes its state into rows.

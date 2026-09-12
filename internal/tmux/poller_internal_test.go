@@ -628,14 +628,14 @@ func TestNewPollerWithRefusesHalfWiredClassification(t *testing.T) {
 // overruled produce identical rows.
 func reportPoller(rows *[]Row, reports, screens map[string]string, captured *[]string, connected *bool) *Poller {
 	return NewPollerWith(Options{
-		SnapshotWithReports: func(context.Context) ([]Row, map[string]string, error) {
+		Poll: func(context.Context) (Poll, error) {
 			// Copied, as the real one is: the poller must not be handed the
 			// test's live map.
 			out := make(map[string]string, len(reports))
 			for id, v := range reports {
 				out[id] = v
 			}
-			return append([]Row{}, *rows...), out, nil
+			return Poll{Rows: append([]Row{}, *rows...), Reports: out}, nil
 		},
 		Capture: func(_ context.Context, paneID string) (string, error) {
 			*captured = append(*captured, paneID)
@@ -814,13 +814,13 @@ func TestACaptureSkippedPaneIsNotRetained(t *testing.T) {
 // is no way to say which fork happens.
 func TestNewPollerWithRefusesHalfWiredReporting(t *testing.T) {
 	snap := func(context.Context) ([]Row, error) { return nil, nil }
-	withReports := func(context.Context) ([]Row, map[string]string, error) { return nil, nil, nil }
+	batched := func(context.Context) (Poll, error) { return Poll{}, nil }
 	for _, tc := range []struct {
 		name string
 		o    Options
 	}{
 		{"neither", Options{}},
-		{"both", Options{Snapshot: snap, SnapshotWithReports: withReports}},
+		{"both", Options{Snapshot: snap, Poll: batched}},
 	} {
 		func() {
 			defer func() {
@@ -1203,12 +1203,12 @@ func blockedReportPoller(screen string, screens *map[string]string, captured *[]
 	reports := map[string]string{"%1": FormatReport(StateBlocked, time.Now().Add(-3*time.Second).UnixMilli(), "")}
 	connected := true
 	return NewPollerWith(Options{
-		SnapshotWithReports: func(context.Context) ([]Row, map[string]string, error) {
+		Poll: func(context.Context) (Poll, error) {
 			out := make(map[string]string, len(reports))
 			for id, v := range reports {
 				out[id] = v
 			}
-			return append([]Row{}, rows...), out, nil
+			return Poll{Rows: append([]Row{}, rows...), Reports: out}, nil
 		},
 		Capture: func(_ context.Context, paneID string) (string, error) {
 			*captured = append(*captured, paneID)
@@ -2309,4 +2309,51 @@ func TestAPollCutShortByShutdownIsNotReportedAsATimeout(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("Err() = %v, want context.Canceled", err)
 	}
+}
+
+// --- the generation, from the batch ------------------------------------------
+
+// The batched read carries the generation, so the poll asks for it in the fork
+// it was already making. startFn stays for the poller that has no batch --
+// NewPoller's -- and must not run beside one that has.
+func TestRefreshTakesTheGenerationFromTheBatch(t *testing.T) {
+	batch := Poll{Rows: []Row{{PaneID: "%1"}}, ServerStart: "100", HaveServerStart: true}
+	p := NewPollerWith(Options{Poll: func(context.Context) (Poll, error) { return batch, nil }})
+
+	p.refresh(context.Background())
+	if got := p.ServerStart(); got != "100" {
+		t.Fatalf("ServerStart() = %q, want the generation the batch carried", got)
+	}
+
+	// A restart, seen through the same one fork.
+	batch.ServerStart = "200"
+	p.refresh(context.Background())
+	if got := p.ServerStart(); got != "200" {
+		t.Errorf("ServerStart() = %q after a restart, want 200", got)
+	}
+
+	// A read whose generation block failed leaves the last known one in place,
+	// exactly as a failed second fork used to: blanking it makes every
+	// browser's per-pane memory miss for a poll.
+	batch.ServerStart, batch.HaveServerStart = "", false
+	p.refresh(context.Background())
+	if got := p.ServerStart(); got != "200" {
+		t.Errorf("ServerStart() = %q after a read that carried no generation, want the last known 200", got)
+	}
+}
+
+// The fork this commit removes must not be wireable back in by accident: a
+// poller given both the batch and a generation reader would fork twice per poll
+// forever, and every test would stay green because the value is the same.
+func TestNewPollerWithRefusesASecondGenerationFork(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("a poller wired with both the batch and ServerStart was accepted; that is two forks a poll " +
+				"for one value, which is the thing the batch exists to stop")
+		}
+	}()
+	NewPollerWith(Options{
+		Poll:        func(context.Context) (Poll, error) { return Poll{}, nil },
+		ServerStart: func(context.Context) (string, error) { return "100", nil },
+	})
 }

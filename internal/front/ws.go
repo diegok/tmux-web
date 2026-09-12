@@ -83,6 +83,16 @@ type TerminalConfig struct {
 	// matched exactly.
 	AllowedOrigins []string
 
+	// WindowFor answers "which window is this pane in" from a snapshot the
+	// daemon has already taken -- Poller.WindowFor is what the server passes.
+	// It is what makes a sidebar click one tmux invocation instead of three;
+	// see tmux.Client.SelectPane, which treats the answer as a hint and
+	// verifies it in the same invocation.
+	//
+	// nil is allowed and means every click re-reads the id, which is what a
+	// handler built without a poller behind it has to do.
+	WindowFor func(paneID string) (string, bool)
+
 	// PingInterval and PingTimeout override the keepalive timings. Zero means
 	// the defaults above; they exist so tests can observe a keepalive without
 	// waiting twenty seconds for one.
@@ -101,6 +111,12 @@ type TerminalHandler struct {
 	// never by suffix.
 	origins []string
 
+	// tm is this handler's own client, and it is deliberately not the daemon's.
+	// It runs exactly two commands -- the has-session check below and copy-mode
+	// -- neither of which reads a cache, so sharing the daemon's would buy
+	// nothing; what the handler does need from the daemon's snapshot arrives as
+	// WindowFor, explicitly, rather than riding invisibly on a shared client.
+	// Same socket (cfg.TmuxArgs is the daemon's) and same lifetime.
 	tm *tmux.Client
 }
 
@@ -450,7 +466,7 @@ func (h *TerminalHandler) control(ctx context.Context, sess *ptybridge.Session, 
 	case "select":
 		// Navigates this tab's own session only, so clicking a pane here moves
 		// neither the other tabs nor the terminal the user is sitting at.
-		if err := sess.SelectPane(ctx, m.Pane); err != nil {
+		if err := sess.SelectPane(ctx, m.Pane, h.windowFor(m.Pane)); err != nil {
 			slog.Warn("terminal: select pane failed", "pane", m.Pane, "err", err)
 		}
 	case "copy-mode":
@@ -489,6 +505,20 @@ func (h *TerminalHandler) control(ctx context.Context, sess *ptybridge.Session, 
 		slog.Warn("terminal: ignoring unknown control message", "type", m.Type)
 	}
 	return wsExit{}, false
+}
+
+// windowFor is the configured cache read, or "no answer" when there is no cache.
+// A miss is not a failure: tmux.Client.SelectPane reads the id itself when the
+// hint is empty, at the cost of the fork the hint exists to remove.
+func (h *TerminalHandler) windowFor(paneID string) string {
+	if h.cfg.WindowFor == nil {
+		return ""
+	}
+	window, ok := h.cfg.WindowFor(paneID)
+	if !ok {
+		return ""
+	}
+	return window
 }
 
 // copyMode puts a pane into tmux's copy-mode, which is where this app's

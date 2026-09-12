@@ -286,7 +286,7 @@ func TestSelectPaneMovesOnlyTheGivenSession(t *testing.T) {
 	srv.Run(t, "select-pane", "-t", "=work:2.0")
 	target := paneAt(t, srv, "=work:2", 1)
 
-	if err := tmux.NewClient(srv.Args()).SelectPane(context.Background(), "_web-a", target); err != nil {
+	if err := tmux.NewClient(srv.Args()).SelectPane(context.Background(), "_web-a", target, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -316,7 +316,7 @@ func TestSelectPaneRejectsBadPaneIDs(t *testing.T) {
 
 	c := tmux.NewClient(srv.Args())
 	for _, bad := range []string{"", "%", "0", "work:1", "%999"} {
-		if err := c.SelectPane(context.Background(), "_web-a", bad); err == nil {
+		if err := c.SelectPane(context.Background(), "_web-a", bad, ""); err == nil {
 			t.Errorf("SelectPane(%q) = nil, want an error", bad)
 		}
 		if got := currentWindow(t, srv, "_web-a"); got != "0" {
@@ -338,14 +338,21 @@ func TestSelectPaneRefusesSessionsItWasNotGiven(t *testing.T) {
 	srv.Run(t, "select-window", "-t", "=work:0")
 	target := paneAt(t, srv, "=work:1", 0)
 
+	window := srv.Run(t, "list-panes", "-t", target, "-F", "#{window_id}")
 	c := tmux.NewClient(srv.Args())
-	for _, bad := range []string{"", "_web-"} {
-		if err := c.SelectPane(context.Background(), bad, target); err == nil {
-			t.Errorf("SelectPane(session=%q) = nil, want an error", bad)
-		}
-		for _, s := range []string{"_web-abcd", "work"} {
-			if got := currentWindow(t, srv, s); got != "0" {
-				t.Fatalf("SelectPane(session=%q) moved %s to window %q", bad, s, got)
+	// Both paths: with a window id the whole click is one chained invocation
+	// whose first command is the read, and the session only reaches tmux in the
+	// second -- so the refusal has to hold there too, not just on the path that
+	// reads the window separately.
+	for _, hint := range []string{"", window} {
+		for _, bad := range []string{"", "_web-"} {
+			if err := c.SelectPane(context.Background(), bad, target, hint); err == nil {
+				t.Errorf("SelectPane(session=%q, window=%q) = nil, want an error", bad, hint)
+			}
+			for _, s := range []string{"_web-abcd", "work"} {
+				if got := currentWindow(t, srv, s); got != "0" {
+					t.Fatalf("SelectPane(session=%q, window=%q) moved %s to window %q", bad, hint, s, got)
+				}
 			}
 		}
 	}

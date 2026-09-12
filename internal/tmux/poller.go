@@ -80,6 +80,29 @@ type Poller struct {
 	// goroutine on exactly the same terms as classifier.
 	reports *Reports
 
+	// The forced-poll machinery. PollNow does not poll; it asks the loop to,
+	// and waits. See PollNow for why it must not simply call refresh.
+	//
+	// force carries one BATCH of waiting callers to the loop. Buffered at one,
+	// which is enough forever: a batch is created only when pending is nil, and
+	// pending is cleared only by the loop at the moment it takes the batch off
+	// this channel -- so between a send and its receive no second send can be
+	// started, and the send never blocks.
+	force chan chan struct{}
+	// fmu guards pending and loopDone. Its own mutex rather than mu: mu is held
+	// across a read of the published snapshot, and a caller waiting to be told
+	// a poll has happened has no business queueing behind readers.
+	fmu sync.Mutex
+	// pending is the batch of callers waiting for a poll that STARTS AFTER they
+	// asked, or nil when there is none. Closed by the loop when that poll has
+	// published.
+	pending chan struct{}
+	// loopDone is the poll loop's context, so a forced poll on a poller that
+	// has stopped is an error rather than a wait. nil until Start, which is the
+	// answer for a poller that was never started: such a caller waits out its
+	// own context, which is the honest thing to do -- nothing is coming.
+	loopDone <-chan struct{}
+
 	mu          sync.RWMutex
 	latest      []Row
 	err         error
@@ -156,6 +179,7 @@ func NewPollerWith(o Options) *Poller {
 	p := &Poller{
 		interval:  o.Interval,
 		timeout:   pollTimeout(o.Interval),
+		force:     make(chan chan struct{}, 1),
 		fn:        fn,
 		startFn:   o.ServerStart,
 		nowFn:     time.Now,
@@ -233,6 +257,12 @@ func realTicker(d time.Duration) (<-chan time.Time, func()) {
 // them at random. That costs at most one more poll -- the ticker is stopped on
 // the way out, so no further tick can arrive to be picked.
 func (p *Poller) Start(ctx context.Context) {
+	// Published before the first poll, so a PollNow that arrives during it can
+	// already tell a running poller from one that was never started.
+	p.fmu.Lock()
+	p.loopDone = ctx.Done()
+	p.fmu.Unlock()
+
 	p.refresh(ctx)
 	tick, stop := p.newTicker(p.interval)
 	go func() {
@@ -243,9 +273,82 @@ func (p *Poller) Start(ctx context.Context) {
 				return
 			case <-tick:
 				p.refresh(ctx)
+			case batch := <-p.force:
+				// Cleared BEFORE the poll, not after. A caller that arrives
+				// while this poll is running asked after it started, so this
+				// poll cannot answer them: they open the next batch and get
+				// their own poll. Clearing afterwards would fold them into a
+				// read that predates the change they are waiting to see, which
+				// is the whole bug being fixed.
+				p.fmu.Lock()
+				p.pending = nil
+				p.fmu.Unlock()
+				// ctx, not the caller's. The poll is the daemon's work and
+				// carries the poll deadline; a browser that gave up must not
+				// abort a poll every other reader is about to be served.
+				p.refresh(ctx)
+				close(batch)
 			}
 		}
 	}()
+}
+
+// errPollerStopped is what a forced poll gets when there is no loop to run it.
+var errPollerStopped = errors.New("tmux: the poller has stopped")
+
+// PollNow forces a poll and returns once its result has been published, so that
+// the caller's next Latest -- or the browser's next /api/snapshot -- sees a tree
+// read after whatever the caller just did.
+//
+// WHY IT EXISTS. Every management verb changes the tmux tree, and the cached
+// snapshot is up to one interval old. A killed row lingering is the mild half;
+// the sharp half is a split, whose new pane id is ABSENT from the tree the
+// browser asks for immediately afterwards, so the tab it is trying to open
+// points at nothing. Both frontend and design promised this was already
+// handled. Only the browser's re-fetch was: nothing re-polled.
+//
+// WHY IT DOES NOT JUST CALL refresh. refresh owns the classifier and the report
+// memory outright -- see the field comments -- and that ownership is what lets
+// them run without locks of their own. A second caller running refresh on a
+// request goroutine would race the ticker's for those maps, and the damage
+// would not be a crash but a mis-stamped finish edge, which is a false done
+// badge. So a forced poll is a REQUEST to the one poll goroutine, and no two
+// polls ever overlap.
+//
+// WHAT IT COSTS, since a management verb can be held down. One poll: the same
+// batched fork the ticker makes, plus a capture per agent pane while a browser
+// is connected. Concurrent callers COALESCE -- they share one batch and one
+// poll -- so a burst costs one poll for the burst rather than one each, and
+// because the polls are serialized on the one goroutine, the worst a caller can
+// do is keep that goroutine busy back to back. The ticker is deliberately NOT
+// reset: it is a ceiling on staleness rather than a rate limit, and resetting
+// it would make a stream of management verbs able to postpone the regular poll
+// indefinitely.
+//
+// A caller that gives up -- its context expired, or the browser went away --
+// leaves the poll running. It was requested, other readers are about to be
+// served by it, and abandoning it would waste the fork it has already made.
+func (p *Poller) PollNow(ctx context.Context) error {
+	p.fmu.Lock()
+	batch, done := p.pending, p.loopDone
+	if batch == nil {
+		batch = make(chan struct{})
+		p.pending = batch
+		// Never blocks; see the field comment on force.
+		p.force <- batch
+	}
+	p.fmu.Unlock()
+
+	select {
+	case <-batch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+		// nil for a poller that was never started, which makes this case
+		// unreachable and leaves such a caller on its own context.
+		return errPollerStopped
+	}
 }
 
 // refresh replaces the cached snapshot, but only when the poll succeeded.
@@ -587,6 +690,32 @@ func (p *Poller) PathFor(paneID string) (string, bool) {
 	for _, r := range p.latest {
 		if r.PaneID == paneID {
 			return r.Path, r.Path != ""
+		}
+	}
+	return "", false
+}
+
+// WindowFor is the window the most recent poll saw a pane in, and whether it
+// saw one at all.
+//
+// This is what the terminal handler passes to Client.SelectPane, and it is why
+// a sidebar click forks tmux once instead of three times: the id that used to
+// be re-read per click is a column of the snapshot that produced the row the
+// user clicked on.
+//
+// A HINT, never an authority, and SelectPane treats it as one -- see there. ok
+// is false for a pane the poll did not see and for a row with no window id, and
+// both mean "read it": "" handed to `select-window -t "=sess:"` resolves to the
+// window the session is already on and exits 0, which is a navigation that
+// silently does not happen.
+//
+// A linear scan, for the reason PathFor gives.
+func (p *Poller) WindowFor(paneID string) (string, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, r := range p.latest {
+		if r.PaneID == paneID {
+			return r.WindowID, r.WindowID != ""
 		}
 	}
 	return "", false

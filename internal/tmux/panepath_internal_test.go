@@ -232,3 +232,31 @@ func TestAPollerFedCacheCarriesThePathToASplit(t *testing.T) {
 		t.Errorf("the polled path %q lost characters on the way", got)
 	}
 }
+
+// WindowFor is the same cache read as PathFor, for the value SelectPane needs.
+// "" is a miss for the same reason: `select-window -t "=sess:"` resolves to
+// whatever window the session is already on and exits 0, so an empty answer
+// handed to a target is a silent no-op, not an answer.
+func TestPollerWindowFor(t *testing.T) {
+	p := NewPollerFunc(time.Hour, func(context.Context) ([]Row, error) {
+		return []Row{
+			{PaneID: "%1", WindowID: "@3"},
+			{PaneID: "%2", WindowID: ""},
+		}, nil
+	})
+
+	if _, ok := p.WindowFor("%1"); ok {
+		t.Error("WindowFor answered before the first poll")
+	}
+	p.refresh(context.Background())
+
+	if got, ok := p.WindowFor("%1"); !ok || got != "@3" {
+		t.Errorf("WindowFor(%%1) = %q, %v; want @3, true", got, ok)
+	}
+	if got, ok := p.WindowFor("%2"); ok {
+		t.Errorf("WindowFor(%%2) = %q, %v; want a miss: a pane with no window id has none to give", got, ok)
+	}
+	if got, ok := p.WindowFor("%9"); ok {
+		t.Errorf("WindowFor(%%9) = %q, %v; want a miss for a pane the poll never saw", got, ok)
+	}
+}

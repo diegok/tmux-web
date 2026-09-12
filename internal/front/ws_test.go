@@ -473,6 +473,56 @@ func TestSelectControlMessageMovesOnlyThisTabsSession(t *testing.T) {
 	}
 }
 
+// The handler asks its window cache before it selects, and it asks about the
+// pane that was clicked. Without this the wiring in TerminalConfig can be
+// dropped and every other select test stays green -- the click still lands,
+// three forks later.
+func TestSelectControlMessageAsksTheWindowCache(t *testing.T) {
+	var mu sync.Mutex
+	var asked []string
+	var stale string // the wrong window, filled in once the fixture exists
+
+	f := newWSFixture(t, front.TerminalConfig{
+		AllowedOrigin: wsCanonical,
+		// Deliberately the WRONG window for the pane that gets clicked: the
+		// answer is a hint, and a hint from a snapshot a poll interval old can
+		// name the window a pane has since been moved out of. The tab must
+		// still land where the pane actually is.
+		WindowFor: func(paneID string) (string, bool) {
+			mu.Lock()
+			defer mu.Unlock()
+			asked = append(asked, paneID)
+			return stale, stale != ""
+		},
+	})
+	f.srv.Run(t, "new-window", "-t", "=work", "-d")
+	panes := strings.Split(f.srv.Run(t, "list-panes", "-s", "-t", "=work", "-F", "#{pane_id}"), "\n")
+	windows := strings.Split(f.srv.Run(t, "list-panes", "-s", "-t", "=work", "-F", "#{window_id}"), "\n")
+	if len(panes) != 2 || len(windows) != 2 {
+		t.Fatalf("want two panes in two windows, got %q in %q", panes, windows)
+	}
+	mu.Lock()
+	stale = windows[0]
+	mu.Unlock()
+
+	c := f.dial(t, wsCanonical, "?session=work")
+	tab := f.tabSession(t)
+	wsWrite(t, c, ptybridge.EncodeControl([]byte(`{"type":"select","pane":"`+panes[1]+`"}`)))
+
+	wsWaitFor(t, 10*time.Second, func() bool {
+		return wsCurrentWindow(t, f, tab) == windows[1]
+	}, "the tab never landed on the clicked pane's real window")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) == 0 {
+		t.Fatal("the handler never asked its window cache: the hint is not wired to the select")
+	}
+	if asked[0] != panes[1] {
+		t.Errorf("the handler asked about %q, want the clicked pane %q", asked[0], panes[1])
+	}
+}
+
 func TestCopyModeControlMessageEntersCopyMode(t *testing.T) {
 	f := defaultWSFixture(t)
 	c := f.dial(t, wsCanonical, "?session=work")

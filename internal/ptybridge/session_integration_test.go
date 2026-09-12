@@ -210,7 +210,7 @@ func TestSelectPaneMovesOnlyThisTabsSession(t *testing.T) {
 	// it print an empty line and exit 0, hence the trailing ":".
 	before := currentWindow(t, srv, "work")
 
-	if err := s.SelectPane(context.Background(), other); err != nil {
+	if err := s.SelectPane(context.Background(), other, ""); err != nil {
 		t.Fatal(err)
 	}
 

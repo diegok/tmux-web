@@ -935,6 +935,7 @@ type daemon struct {
 	registry  *Registry
 	poller    *tmux.Poller
 	tmux      *tmux.Client
+	terminal  *TerminalHandler
 	handler   http.Handler
 	baseURL   string
 	statePath string
@@ -1000,6 +1001,23 @@ func newDaemon(cfg Config) (*daemon, error) {
 	// served; the cached answer is still stat'd at the point of use.
 	tm.UsePathCache(d.poller.PathFor)
 
+	// Held on the daemon as well as handed to the router: what it was wired
+	// with -- the origin allowlist, the poller's window cache -- is a decision
+	// made here, and a field is the only way a test can see it without starting
+	// a daemon on a real port. See the type's own comment.
+	d.terminal = NewTerminalHandler(TerminalConfig{
+		TmuxArgs: cfg.TmuxArgs,
+		// The same snapshot that drew the sidebar row answers "which
+		// window is that pane in", so clicking it forks tmux once
+		// instead of three times. Wired here for the same reason as
+		// UsePathCache above, and read the same way: as a hint.
+		WindowFor: d.poller.WindowFor,
+		// Fed from the middleware's own allowlist rather than rebuilt, so
+		// the handshake asks the same question of the same list. A second
+		// copy of the rule is a second thing to keep in step with --dev.
+		AllowedOrigins: authn.Origins(),
+	})
+
 	d.handler, err = NewHandler(HandlerConfig{
 		Auth:      authn,
 		Store:     store,
@@ -1007,15 +1025,9 @@ func newDaemon(cfg Config) (*daemon, error) {
 		Snapshots: d.poller,
 		Registry:  d.registry,
 		Manage:    tm,
-		Terminal: NewTerminalHandler(TerminalConfig{
-			TmuxArgs: cfg.TmuxArgs,
-			// Fed from the middleware's own allowlist rather than rebuilt, so
-			// the handshake asks the same question of the same list. A second
-			// copy of the rule is a second thing to keep in step with --dev.
-			AllowedOrigins: authn.Origins(),
-		}),
-		Assets:  DistFS(),
-		BaseURL: d.baseURL,
+		Terminal:  d.terminal,
+		Assets:    DistFS(),
+		BaseURL:   d.baseURL,
 	})
 	if err != nil {
 		return nil, err

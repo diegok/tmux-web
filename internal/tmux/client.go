@@ -314,22 +314,45 @@ func noServer(msg string) bool {
 // and looks <win> up as a name, index or @id; a pane id is not one of those.
 // The bare form `select-window -t %3` does work, but it picks the session
 // itself, and with grouped sessions that choice is arbitrary: with two tabs
-// open on one base, it moved the wrong one. Hence the extra call to resolve the
-// pane's window id, which can then be qualified with the session that must
-// move. "=" pins the session name to an exact match, as in Sweep.
+// open on one base, it moved the wrong one. So the pane's window id has to be
+// in hand, to qualify with the session that must move. "=" pins the session
+// name to an exact match, as in Sweep.
 //
-// list-panes does the resolving rather than display-message, which is the
-// obvious command and is unusable here: given a target it cannot find, it
-// prints an empty expansion and exits 0, and `display-message -t work:9`
-// happily answers about a different window. list-panes errors on all of those.
-// It reports the window id once per pane in the window; the lines are identical
-// and the first is taken.
+// windowID is where that id comes from, and it is a HINT: the caller's most
+// recent snapshot already carries one per row (Row.WindowID, via
+// Poller.WindowFor), and the row it carries is the row the user clicked. With
+// it, the whole click is ONE invocation -- the read, the select-window and the
+// select-pane chained with ";" -- against the three it used to cost. Measured
+// on this machine: 10.1-11.3ms per click as three invocations, 5.9-6.5ms as
+// two, 3.3-4.2ms as one.
+//
+// THE HINT SAVES THE FORKS, NOT THE READ. It is a poll interval old, and a pane
+// moved between windows since -- break-pane, join-pane -- would send the tab to
+// a window that no longer holds what it clicked, with no error to notice. So
+// the read stays in the chain and costs nothing extra, its answer is compared
+// against the hint, and a hint that does not match is corrected by a second
+// invocation rather than believed. A hint that is not a window id at all is
+// dropped before tmux ever sees it, for the reason every id here is validated:
+// tmux resolves a great many strings to "whatever is current" and exits 0.
+//
+// Reading FIRST is what keeps the failure behaviour. tmux abandons the rest of
+// a command list once one of its commands fails, so a pane that died between
+// the poll and the click fails the read and the two selects never run -- the
+// same "error, and nothing moved" the un-chained version gave, which
+// TerminalHandler's "where" reply depends on.
+//
+// list-panes does the reading rather than display-message, which is the obvious
+// command and is unusable here: given a target it cannot find, it prints an
+// empty expansion and exits 0, and `display-message -t work:9` happily answers
+// about a different window. list-panes errors on all of those. It reports the
+// window id once per pane in the window; the lines are identical and the first
+// is taken.
 //
 // Only the current window is per-session. The active pane belongs to the
 // window, which grouped sessions share, so that half is visible to every member
 // of the group. tmux offers no way to scope it, and it matches what the user
 // sees when they select a pane in one of two attached clients.
-func (c *Client) SelectPane(ctx context.Context, session, paneID string) error {
+func (c *Client) SelectPane(ctx context.Context, session, paneID, windowID string) error {
 	// tmux resolves an empty target to "whatever is current" and exits 0, so an
 	// unset pane id would quietly navigate the tab somewhere arbitrary instead
 	// of failing. The ids come from the frontend, where "no selection yet" is
@@ -340,16 +363,41 @@ func (c *Client) SelectPane(ctx context.Context, session, paneID string) error {
 	if session == "" {
 		return fmt.Errorf("select pane %s: no session given", paneID)
 	}
-	out, err := c.Run(ctx, "list-panes", "-t", paneID, "-F", "#{window_id}")
-	if err != nil {
-		return err
+
+	read := []string{"list-panes", "-t", paneID, "-F", "#{window_id}"}
+	if ValidateWindowID(windowID) == nil {
+		out, err := c.Run(ctx, append(read, append([]string{";"}, selectWindowPaneArgs(session, windowID, paneID)...)...)...)
+		if err != nil {
+			return err
+		}
+		actual, _, _ := strings.Cut(out, "\n")
+		if actual == windowID {
+			return nil
+		}
+		// The hint was stale. The selects above landed the tab on a real window
+		// of its own session, so the correction below is a move, not a repair of
+		// something broken -- and it is the read's answer, not another guess.
+		windowID = actual
+	} else {
+		out, err := c.Run(ctx, read...)
+		if err != nil {
+			return err
+		}
+		windowID, _, _ = strings.Cut(out, "\n")
 	}
-	window, _, _ := strings.Cut(out, "\n")
-	if _, err := c.Run(ctx, "select-window", "-t", "="+session+":"+window); err != nil {
-		return err
-	}
-	_, err = c.Run(ctx, "select-pane", "-t", paneID)
+	_, err := c.Run(ctx, selectWindowPaneArgs(session, windowID, paneID)...)
 	return err
+}
+
+// selectWindowPaneArgs is the two-command tail of a select: point the session at
+// the window, then the window at the pane. One invocation, because tmux runs a
+// ";"-separated command list in the client it already started -- the second
+// command is free, and it used to be a fork.
+func selectWindowPaneArgs(session, windowID, paneID string) []string {
+	return []string{
+		"select-window", "-t", "=" + session + ":" + windowID,
+		";", "select-pane", "-t", paneID,
+	}
 }
 
 // CurrentPane answers "which pane is this session looking at": the active pane

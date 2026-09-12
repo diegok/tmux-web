@@ -312,3 +312,83 @@ func TestDaemonPollerClassifiesAgentPanesWhileAClientIsConnected(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// A sidebar click costs one tmux fork only if the terminal handler was actually
+// given the poller's window cache. Nothing else observes the wiring: the click
+// lands on the right pane either way -- tmux.Client.SelectPane reads the id when
+// it has no hint -- so every behavioural test in front, ptybridge and tmux stays
+// green with this one line deleted, and the daemon quietly pays three forks per
+// click again.
+func TestDaemonGivesTheTerminalThePollersWindowCache(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "40", "-y", "10")
+	srv.Run(t, "new-window", "-t", "work")
+	pane := srv.Run(t, "list-panes", "-t", "=work:1", "-F", "#{pane_id}")
+	window := srv.Run(t, "list-panes", "-t", "=work:1", "-F", "#{window_id}")
+
+	d, err := newDaemon(Config{
+		Host:         "tmux.example.com",
+		Dev:          true,
+		Port:         7000,
+		StatePath:    filepath.Join(t.TempDir(), "devices.json"),
+		TmuxArgs:     srv.Args(),
+		PollInterval: 25 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d.poller.Start(ctx)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for len(d.poller.Latest()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the poller never produced a snapshot")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if got := d.terminal.windowFor(pane); got != window {
+		t.Errorf("the terminal handler answers %q for pane %s, want %q -- it is not reading the poller",
+			got, pane, window)
+	}
+	if got := d.terminal.windowFor("%9999"); got != "" {
+		t.Errorf("the terminal handler answers %q for a pane no poll ever saw, want \"\"", got)
+	}
+}
+
+// The cache's second return value is the whole answer when the first one is not
+// empty. A poller answers ("", false) for a pane it never saw, so a handler that
+// ignored ok would look correct against one -- but the field is a func, and any
+// cache that answers "here is a value, but no" must be believed on the "no".
+// The value it did offer would otherwise become a tmux target.
+func TestTerminalWindowForBelievesTheMiss(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		window string
+		ok     bool
+		want   string
+	}{
+		{"a hit", "@7", true, "@7"},
+		{"a miss carrying a value anyway", "@7", false, ""},
+		{"a hit with no value", "", true, ""},
+		{"a miss", "", false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewTerminalHandler(TerminalConfig{
+				AllowedOrigin: "https://tmux.example.com",
+				WindowFor:     func(string) (string, bool) { return tc.window, tc.ok },
+			})
+			if got := h.windowFor("%1"); got != tc.want {
+				t.Errorf("windowFor = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	// No cache at all is a miss, not a panic: a handler built without a poller
+	// behind it still has to serve terminals.
+	h := NewTerminalHandler(TerminalConfig{AllowedOrigin: "https://tmux.example.com"})
+	if got := h.windowFor("%1"); got != "" {
+		t.Errorf("windowFor with no cache = %q, want \"\"", got)
+	}
+}

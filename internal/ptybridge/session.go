@@ -191,8 +191,12 @@ func (s *Session) Resize(cols, rows uint16) error {
 }
 
 // SelectPane navigates this tab's own session only.
-func (s *Session) SelectPane(ctx context.Context, paneID string) error {
-	return s.tm.SelectPane(ctx, s.name, paneID)
+//
+// windowID is the hint tmux.Client.SelectPane documents: the window the caller's
+// last snapshot saw the pane in, which turns the click into a single tmux
+// invocation. "" is always allowed and costs one extra fork.
+func (s *Session) SelectPane(ctx context.Context, paneID, windowID string) error {
+	return s.tm.SelectPane(ctx, s.name, paneID, windowID)
 }
 
 // CurrentPane is the pane this tab is looking at right now: the active pane of

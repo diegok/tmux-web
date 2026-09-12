@@ -2,6 +2,8 @@ package tmux
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -36,6 +38,17 @@ type Poller struct {
 	// already in force can only be replaced by a NEWER one, so there is no
 	// value a test could write to a fixture that would make it stale instead.
 	nowFn func() time.Time
+	// timeout bounds one whole poll -- the snapshot, and every capture it
+	// leads to -- and is what keeps a wedged tmux from parking the poll
+	// goroutine forever. See pollTimeout for the value and refresh for what a
+	// poll that hits it looks like to the owner.
+	//
+	// A field rather than a constant so that it is derived from the interval,
+	// and unexported beside nowFn and newTicker for the same reason: the
+	// interval is the caller's business, the machinery behind it is not. The
+	// tests that have to wait a deadline out set it directly, because the real
+	// value is seconds.
+	timeout time.Duration
 	// newTicker is the poll loop's ticker, returning its channel and the
 	// function that stops it. Beside nowFn, and unexported for the same reason:
 	// the interval is the caller's business, the machinery behind it is not.
@@ -126,7 +139,14 @@ func NewPollerWith(o Options) *Poller {
 			return rows, nil, err
 		}
 	}
-	p := &Poller{interval: o.Interval, fn: fn, startFn: o.ServerStart, nowFn: time.Now, newTicker: realTicker}
+	p := &Poller{
+		interval:  o.Interval,
+		timeout:   pollTimeout(o.Interval),
+		fn:        fn,
+		startFn:   o.ServerStart,
+		nowFn:     time.Now,
+		newTicker: realTicker,
+	}
 	if o.Capture != nil {
 		p.capture, p.connected = o.Capture, o.Connected
 		// Built here rather than taken from the caller: it is the poll
@@ -149,6 +169,36 @@ func NewPollerFunc(interval time.Duration, fn func(context.Context) ([]Row, erro
 // NewPoller builds a poller over a real tmux server, without classification.
 func NewPoller(interval time.Duration, c *Client) *Poller {
 	return NewPollerWith(Options{Interval: interval, Snapshot: c.Snapshot, ServerStart: c.ServerStart})
+}
+
+// pollTimeoutFactor is how many intervals one poll may take before it is
+// abandoned.
+//
+// Not one. A deadline equal to the interval means a tmux that answers in 1.6s
+// on a 1.5s interval -- slow, loaded, but working -- never completes a poll,
+// and the daemon reports a healthy server as unreachable forever. Four leaves
+// room for a machine having a bad minute while still being far outside
+// anything a working server does: a poll's tmux read is milliseconds, so a
+// poll that has taken four intervals is not slow, it is stuck.
+//
+// The cost of the headroom is bounded and mild: the tree can be up to one
+// deadline behind before the daemon says so, and the browser waits for two
+// troubled polls before it tells the user anyway (TROUBLE_BEFORE_STALE).
+const pollTimeoutFactor = 4
+
+// minPollTimeout is the floor under that multiple.
+//
+// Two jobs. It keeps a short interval from tightening the deadline below what a
+// single tmux command is allowed to take anywhere else in this daemon -- the
+// socket path bounds each of its own at 5s (front.wsTmuxTimeout) against the
+// same wedged server. And it makes an unset interval safe: NewPollerFunc(0,
+// ...) is a real construction, and context.WithTimeout(ctx, 0) is a context
+// that has already expired, which would fail every poll such a poller makes.
+const minPollTimeout = 5 * time.Second
+
+// pollTimeout is how long one poll may take, given the interval it runs on.
+func pollTimeout(interval time.Duration) time.Duration {
+	return max(interval*pollTimeoutFactor, minPollTimeout)
 }
 
 // realTicker is what every poller outside a test polls on.
@@ -197,8 +247,38 @@ func (p *Poller) Start(ctx context.Context) {
 // The stale snapshot is not served silently: err stays set until a poll
 // succeeds, so a caller can tell a momentary hiccup from a server that has been
 // unreachable for a minute.
+//
+// The whole poll runs under a deadline, and that is what makes the sentence
+// above true of a wedged tmux as well as of a failed one. Without it a tmux
+// that never answers parks this goroutine: the loop above cannot start another
+// poll, every tick is dropped, and err stays nil -- so the sidebar freezes
+// while the daemon goes on reporting itself fresh, which is the one failure
+// nothing tells the user about. With it, a poll that runs out of time is an
+// ordinary failed poll: the last good tree stays on screen and Err() carries a
+// sentence saying tmux did not answer, which /api/snapshot serves as `stale`
+// and the sidebar prints.
+//
+// One deadline for the poll rather than one per command, so that the bound does
+// not multiply by the number of agent panes. A capture cut short by it is not
+// promoted to a failed poll -- classify already treats a failed capture as one
+// pane's missing state rather than a blank sidebar -- so a poll whose snapshot
+// arrived and whose captures did not is published with fresh rows and no agent
+// state, which is what "the capture failed" has always meant here.
 func (p *Poller) refresh(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+
 	rows, reports, err := p.fn(ctx)
+	// Said in the daemon's own words, because tmux does not say it: the error
+	// from a command killed by its context is "signal: killed", which wraps
+	// nothing a caller can match on and reads, in the sidebar, as though tmux
+	// had been shot. Only an expired deadline is rewritten -- a parent
+	// cancelled by a shutting-down daemon reports itself as cancelled, since an
+	// operator reading "tmux did not answer" out of their own Ctrl-C would go
+	// looking in the wrong place.
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		err = fmt.Errorf("tmux did not answer within %s", p.timeout)
+	}
 
 	// The generation is read per poll rather than once at construction: the tmux
 	// server can restart underneath a running daemon, and that is precisely the

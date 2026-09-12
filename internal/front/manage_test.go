@@ -2,15 +2,18 @@ package front_test
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -634,4 +637,195 @@ func quote(s string) string {
 		panic(err)
 	}
 	return string(b)
+}
+
+// ------------------------------------------------------- the deadline
+//
+// A management verb runs a tmux command on the request goroutine. Against a
+// wedged server that command can take seconds -- registry.go says so out loud
+// about the same server -- and with nothing bounding it the browser's fetch is
+// what eventually gives up, leaving the daemon still holding a request nobody
+// is waiting for and the owner with a dialog that never closes.
+
+// deadlineManager is a Manager that records the deadline every verb was given,
+// and -- when told to block -- never answers, the way a wedged tmux does not.
+type deadlineManager struct {
+	mu    sync.Mutex
+	calls []managerCall
+	block bool
+}
+
+type managerCall struct {
+	verb string
+	// bounded is whether the verb was given a deadline at all, and left is how
+	// long it had. Both, because the failure being pinned here is the absence
+	// of one: a zero `left` from a missing deadline would otherwise be
+	// indistinguishable from one that had already expired.
+	bounded bool
+	left    time.Duration
+}
+
+func (m *deadlineManager) seen(ctx context.Context, verb string) error {
+	deadline, ok := ctx.Deadline()
+	m.mu.Lock()
+	m.calls = append(m.calls, managerCall{verb: verb, bounded: ok, left: time.Until(deadline)})
+	blocking := m.block
+	m.mu.Unlock()
+	if blocking {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return nil
+}
+
+func (m *deadlineManager) seenCalls() []managerCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]managerCall{}, m.calls...)
+}
+
+func (m *deadlineManager) NewSession(ctx context.Context, _, _ string) (string, error) {
+	return "$9", m.seen(ctx, "create session")
+}
+
+func (m *deadlineManager) NewWindow(ctx context.Context, _, _, _ string) (string, error) {
+	return "@9", m.seen(ctx, "create window")
+}
+
+func (m *deadlineManager) SplitPane(ctx context.Context, _, _ string) (string, error) {
+	return "%9", m.seen(ctx, "split pane")
+}
+
+func (m *deadlineManager) RenameSession(ctx context.Context, _, _ string) error {
+	return m.seen(ctx, "rename session")
+}
+
+func (m *deadlineManager) RenameWindow(ctx context.Context, _, _ string) error {
+	return m.seen(ctx, "rename window")
+}
+
+func (m *deadlineManager) SetLabel(ctx context.Context, _, _ string) error {
+	return m.seen(ctx, "label pane")
+}
+
+func (m *deadlineManager) ToggleZoom(ctx context.Context, _ string) error {
+	return m.seen(ctx, "zoom pane")
+}
+
+func (m *deadlineManager) KillSessionID(ctx context.Context, _ string) error {
+	return m.seen(ctx, "kill session")
+}
+
+func (m *deadlineManager) KillWindow(ctx context.Context, _ string) error {
+	return m.seen(ctx, "kill window")
+}
+
+func (m *deadlineManager) KillPane(ctx context.Context, _ string) error {
+	return m.seen(ctx, "kill pane")
+}
+
+// manageRoutes is every management route, in the shape a request takes.
+var manageRoutes = []struct {
+	verb   string
+	method string
+	target string
+	body   string
+}{
+	{"create session", "POST", "/api/sessions", `{"name":"work"}`},
+	{"create window", "POST", "/api/windows", `{"session":"$0"}`},
+	{"split pane", "POST", "/api/panes", `{"pane":"%0","direction":"right"}`},
+	{"rename session", "PATCH", "/api/sessions/%240", `{"name":"renamed"}`},
+	{"rename window", "PATCH", "/api/windows/%400", `{"name":"renamed"}`},
+	{"label pane", "PATCH", "/api/panes/%250", `{"label":"a label"}`},
+	{"zoom pane", "POST", "/api/panes/%250/zoom", ``},
+	{"kill session", "DELETE", "/api/sessions/%240", `{"confirm":true}`},
+	{"kill window", "DELETE", "/api/windows/%400", `{"confirm":true}`},
+	{"kill pane", "DELETE", "/api/panes/%250", `{"confirm":true}`},
+}
+
+// Every one of them, because the bound is per handler: the one route that
+// forgets it is the one that hangs, and it would hang exactly as rarely as
+// tmux wedges.
+func TestEveryManagementVerbRunsUnderADeadline(t *testing.T) {
+	for _, c := range manageRoutes {
+		t.Run(c.verb, func(t *testing.T) {
+			m := &deadlineManager{}
+			f := newFixture(t, withManager(m))
+
+			rec := f.ok(c.method, c.target, c.body)
+			if rec.Code >= 400 {
+				t.Fatalf("%s %s = %d (%s)", c.method, c.target, rec.Code, rec.Body.String())
+			}
+
+			calls := m.seenCalls()
+			if len(calls) != 1 {
+				t.Fatalf("%s reached the manager %d times, want 1: %+v", c.verb, len(calls), calls)
+			}
+			if !calls[0].bounded {
+				t.Fatalf("%s ran on the bare request context: a wedged tmux would hold this request "+
+					"until the browser gave up on it", c.verb)
+			}
+			// 5s, minus however long the request took to get here. A tighter
+			// window than the poll's because the owner is waiting on this one.
+			if calls[0].left < 4*time.Second || calls[0].left > 5*time.Second {
+				t.Errorf("%s had %v left on its deadline, want ~5s", c.verb, calls[0].left)
+			}
+		})
+	}
+}
+
+// What a wedged tmux looks like to the owner: an answer, saying what happened,
+// instead of a dialog that spins until the browser gives up.
+//
+// 504 rather than the 400 every other management failure gets. That rule is
+// about not guessing at tmux's message text -- see writeManageError -- and this
+// case needs no guess: the daemon's own deadline expired, which it knows
+// without reading a word tmux said. 400 would tell the owner their request was
+// wrong, and it was not.
+func TestAWedgedManagementVerbSaysSoInsteadOfHanging(t *testing.T) {
+	defer front.SetManageTimeout(60 * time.Millisecond)()
+
+	m := &deadlineManager{block: true}
+	f := newFixture(t, withManager(m))
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- f.ok("DELETE", "/api/panes/%250", `{"confirm":true}`) }()
+
+	var rec *httptest.ResponseRecorder
+	select {
+	case rec = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a management request against a tmux that never answered never came back")
+	}
+
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("a timed-out kill = %d (%s), want 504", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	decode(t, rec, &body)
+	if !strings.Contains(body.Error, "tmux did not answer within 60ms") {
+		t.Errorf("the owner is told %q; it has to say tmux did not answer, and for how long", body.Error)
+	}
+}
+
+// The ordinary refusal must not be swept into the timeout answer: a stale id is
+// the common case, it is the owner's own request that was wrong, and tmux's
+// sentence about it is what the toast prints.
+func TestARefusedManagementVerbIsStillA400(t *testing.T) {
+	f := newManageFixture(t)
+	f.seed(t, "victim")
+
+	rec := f.ok("DELETE", "/api/panes/"+pathID("%99"), `{"confirm":true}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("killing a stale pane id = %d (%s), want 400", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error string `json:"error"`
+	}
+	decode(t, rec, &body)
+	if strings.Contains(body.Error, "did not answer") || !strings.Contains(body.Error, "%99") {
+		t.Errorf("the owner is told %q, want tmux's own words about the id they named", body.Error)
+	}
 }

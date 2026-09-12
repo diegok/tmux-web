@@ -2130,3 +2130,183 @@ func TestPrecedenceTable(t *testing.T) {
 		})
 	}
 }
+
+// --- the poll's deadline -----------------------------------------------------
+//
+// The poll is the daemon's hottest tmux path and was the only one with no
+// bound on it. What that costs is not a slow sidebar: refresh runs on the one
+// poll goroutine, so a wedged tmux parks it forever, every later tick is
+// dropped by the select, and err stays nil -- the tree freezes WHILE THE DAEMON
+// GOES ON SAYING IT IS FRESH. A dropped poll that says "stale" is the honest
+// shape and the one these pin.
+//
+// timeout is set directly rather than through the interval in the tests below
+// that have to wait one out, for the same reason nowFn and newTicker are
+// seams: the real value is seconds, and a test that waits seconds to prove a
+// deadline exists is a test nobody runs.
+
+func TestThePollDeadlineHasHeadroomOverTheInterval(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		interval time.Duration
+		want     time.Duration
+	}{
+		{
+			// The daemon's own interval. Four of them, not one: a deadline
+			// equal to the interval means a server that answers in 1.6s --
+			// slow, loaded, but WORKING -- never completes a poll, and the
+			// sidebar reports itself broken forever. The other direction costs
+			// at most 6s of a tree that is behind before it says so, and the
+			// browser needs two troubled polls (~3s) to say it anyway.
+			"the default interval, four times over", 1500 * time.Millisecond, 6 * time.Second,
+		},
+		{
+			// It scales, so an operator who slows the poll down on a loaded
+			// box does not thereby tighten the deadline on it.
+			"a long interval scales", 10 * time.Second, 40 * time.Second,
+		},
+		{
+			// Below the floor the multiple would be tighter than one tmux
+			// command is allowed to take anywhere else in this daemon (the
+			// socket path bounds each of its own at 5s), and a poll dropped
+			// while tmux was about to answer is a sidebar that says stale
+			// about a healthy server.
+			"a short interval gets the floor", 100 * time.Millisecond, 5 * time.Second,
+		},
+		{
+			// The one that would break everything. NewPollerFunc(0, ...) is a
+			// real construction -- every v1 test uses it -- and
+			// context.WithTimeout(ctx, 0) is a context that has ALREADY
+			// expired, so a floorless deadline would fail every poll a
+			// zero-interval poller ever makes.
+			"an unset interval is not an already-expired context", 0, 5 * time.Second,
+		},
+		{"nor is a negative one", -time.Second, 5 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pollTimeout(tc.interval); got != tc.want {
+				t.Errorf("pollTimeout(%v) = %v, want %v", tc.interval, got, tc.want)
+			}
+		})
+	}
+}
+
+// The deadline is on the POLL, not on one command inside it: the snapshot and
+// every capture it leads to run under the same one, so a poll cannot outlive it
+// however many agent panes are on the server.
+func TestTheWholePollRunsUnderOneDeadline(t *testing.T) {
+	rows := []Row{{PaneID: "%1", Command: "claude"}}
+	var snapshotDeadline, captureDeadline time.Time
+	var snapshotOK, captureOK bool
+	connected := true
+	p := NewPollerWith(Options{
+		Interval: 2 * time.Second,
+		Snapshot: func(ctx context.Context) ([]Row, error) {
+			snapshotDeadline, snapshotOK = ctx.Deadline()
+			return append([]Row{}, rows...), nil
+		},
+		Capture: func(ctx context.Context, _ string) (string, error) {
+			captureDeadline, captureOK = ctx.Deadline()
+			return "a screen", nil
+		},
+		Connected: func() bool { return connected },
+	})
+
+	p.refresh(context.Background())
+
+	if !snapshotOK {
+		t.Fatal("the snapshot ran on a context with no deadline: a wedged tmux would park the poll goroutine forever")
+	}
+	if !captureOK {
+		t.Fatal("the capture ran on a context with no deadline")
+	}
+	if !captureDeadline.Equal(snapshotDeadline) {
+		t.Errorf("the capture's deadline %v is not the snapshot's %v; the whole poll must be bounded once, "+
+			"or N agent panes multiply the bound by N", captureDeadline, snapshotDeadline)
+	}
+	// 4 * 2s, measured from the top of refresh: anything under three intervals
+	// means the headroom is gone.
+	if left := time.Until(snapshotDeadline); left < 7*time.Second || left > 8*time.Second {
+		t.Errorf("the poll has %v left on its deadline, want ~8s (four 2s intervals)", left)
+	}
+}
+
+// What a wedged tmux must look like: the tree that was there stays on screen,
+// and the daemon says out loud that it is not the current one. Err() is what
+// /api/snapshot turns into `stale` plus the sentence the sidebar prints under
+// "Showing the last good state" -- see TestSnapshotServesStaleRowsWithAFlag in
+// internal/front.
+func TestAWedgedPollIsDroppedAndSaysSo(t *testing.T) {
+	var polls int
+	p := NewPollerFunc(time.Hour, func(ctx context.Context) ([]Row, error) {
+		polls++
+		if polls == 1 {
+			return []Row{{PaneID: "%0"}}, nil
+		}
+		// A tmux that never answers. The real one is killed by
+		// exec.CommandContext when the deadline fires and returns "signal:
+		// killed"; what reaches refresh either way is an error and an expired
+		// context.
+		//
+		// The second arm is what a poller with no deadline gets, and it is
+		// there so that such a poller FAILS AN ASSERTION rather than hanging
+		// the test binary: it answers late, with rows no dropped poll may ever
+		// publish.
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(3 * time.Second):
+			return []Row{{PaneID: "%9"}}, nil
+		}
+	})
+	p.timeout = 40 * time.Millisecond
+
+	p.refresh(context.Background())
+	if got := p.Latest(); len(got) != 1 || p.Err() != nil {
+		t.Fatalf("the first poll did not land: rows %+v, err %v", got, p.Err())
+	}
+
+	start := time.Now()
+	p.refresh(context.Background())
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("refresh took %v to give up on a tmux that never answered, want ~40ms", took)
+	}
+
+	if rows := p.Latest(); len(rows) != 1 || rows[0].PaneID != "%0" {
+		t.Errorf("Latest() = %+v after a dropped poll, want the last good tree", rows)
+	}
+	err := p.Err()
+	if err == nil {
+		t.Fatal("a poll that hit its deadline reported no error: the sidebar would freeze while calling itself fresh")
+	}
+	if !strings.Contains(err.Error(), "did not answer within 40ms") {
+		t.Errorf("Err() = %q; the owner reads this sentence in the sidebar, so it has to say tmux did not answer and for how long", err)
+	}
+}
+
+// A daemon shutting down cancels the poll's parent. That is not a wedged tmux
+// and must not be dressed up as one -- an operator reading "tmux did not
+// answer" out of their own Ctrl-C would go looking at tmux.
+func TestAPollCutShortByShutdownIsNotReportedAsATimeout(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := NewPollerFunc(time.Hour, func(ctx context.Context) ([]Row, error) {
+		cancel()
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	p.timeout = time.Hour
+
+	p.refresh(ctx)
+
+	err := p.Err()
+	if err == nil {
+		t.Fatal("a cancelled poll reported no error")
+	}
+	if strings.Contains(err.Error(), "did not answer within") {
+		t.Errorf("Err() = %q, want the cancellation itself: only an expired DEADLINE is a wedged tmux", err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("Err() = %v, want context.Canceled", err)
+	}
+}

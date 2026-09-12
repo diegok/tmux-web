@@ -2,7 +2,10 @@ package front
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
+	"time"
 )
 
 // The management endpoints: create, rename, split, label, zoom and kill,
@@ -32,6 +35,32 @@ import (
 // Nothing here validates an id or a name. The verbs in internal/tmux do, per
 // kind, and a second copy of those rules in this package is a copy that
 // eventually disagrees with the first.
+//
+// And every one of them runs its tmux command under a deadline; see
+// manageTimeout.
+
+// manageTimeout bounds the tmux command one management request makes.
+//
+// These run on the request goroutine against the same server registry.go warns
+// about -- a tmux call "can take seconds if the server is wedged" -- and an
+// unbounded one holds the request until the browser gives up on it, which
+// leaves the owner with a dialog that never closes and the daemon holding a
+// request nobody is waiting for. Five seconds is what the socket path already
+// allows one tmux command (wsTmuxTimeout) against the same wedged server, and
+// tighter than the poll's, because the owner is sitting in front of this one.
+//
+// A var rather than a const only so a test can shorten it: waiting a real one
+// out costs five seconds, and nothing in production assigns this.
+var manageTimeout = 5 * time.Second
+
+// manageCtx bounds one management request's tmux work.
+//
+// Derived from the request's own context, so a browser that goes away still
+// cancels the call -- the deadline only puts a ceiling on how long the daemon
+// waits when the browser is still there.
+func manageCtx(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), manageTimeout)
+}
 
 // Manager is the tmux management surface the browser drives. *tmux.Client
 // satisfies it.
@@ -64,9 +93,11 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &body) {
 		return
 	}
-	id, err := s.manage.NewSession(r.Context(), body.Name, body.Path)
+	ctx, cancel := manageCtx(r)
+	defer cancel()
+	id, err := s.manage.NewSession(ctx, body.Name, body.Path)
 	if err != nil {
-		writeManageError(w, err)
+		writeManageError(ctx, w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
@@ -86,9 +117,11 @@ func (s *server) createWindow(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &body) {
 		return
 	}
-	id, err := s.manage.NewWindow(r.Context(), body.Session, body.Name, body.FromPane)
+	ctx, cancel := manageCtx(r)
+	defer cancel()
+	id, err := s.manage.NewWindow(ctx, body.Session, body.Name, body.FromPane)
 	if err != nil {
-		writeManageError(w, err)
+		writeManageError(ctx, w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
@@ -102,9 +135,11 @@ func (s *server) createPane(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &body) {
 		return
 	}
-	id, err := s.manage.SplitPane(r.Context(), body.Pane, body.Direction)
+	ctx, cancel := manageCtx(r)
+	defer cancel()
+	id, err := s.manage.SplitPane(ctx, body.Pane, body.Direction)
 	if err != nil {
-		writeManageError(w, err)
+		writeManageError(ctx, w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
@@ -119,8 +154,10 @@ func (s *server) renameSession(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &body) {
 		return
 	}
-	if err := s.manage.RenameSession(r.Context(), r.PathValue("id"), body.Name); err != nil {
-		writeManageError(w, err)
+	ctx, cancel := manageCtx(r)
+	defer cancel()
+	if err := s.manage.RenameSession(ctx, r.PathValue("id"), body.Name); err != nil {
+		writeManageError(ctx, w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -133,8 +170,10 @@ func (s *server) renameWindow(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &body) {
 		return
 	}
-	if err := s.manage.RenameWindow(r.Context(), r.PathValue("id"), body.Name); err != nil {
-		writeManageError(w, err)
+	ctx, cancel := manageCtx(r)
+	defer cancel()
+	if err := s.manage.RenameWindow(ctx, r.PathValue("id"), body.Name); err != nil {
+		writeManageError(ctx, w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -149,8 +188,10 @@ func (s *server) labelPane(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &body) {
 		return
 	}
-	if err := s.manage.SetLabel(r.Context(), r.PathValue("id"), body.Label); err != nil {
-		writeManageError(w, err)
+	ctx, cancel := manageCtx(r)
+	defer cancel()
+	if err := s.manage.SetLabel(ctx, r.PathValue("id"), body.Label); err != nil {
+		writeManageError(ctx, w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -162,8 +203,10 @@ func (s *server) labelPane(w http.ResponseWriter, r *http.Request) {
 // matters -- it is its own undo -- and there is nothing for a confirmation to
 // protect.
 func (s *server) zoomPane(w http.ResponseWriter, r *http.Request) {
-	if err := s.manage.ToggleZoom(r.Context(), r.PathValue("id")); err != nil {
-		writeManageError(w, err)
+	ctx, cancel := manageCtx(r)
+	defer cancel()
+	if err := s.manage.ToggleZoom(ctx, r.PathValue("id")); err != nil {
+		writeManageError(ctx, w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -175,8 +218,10 @@ func (s *server) killSession(w http.ResponseWriter, r *http.Request) {
 	if !confirmed(w, r) {
 		return
 	}
-	if err := s.manage.KillSessionID(r.Context(), r.PathValue("id")); err != nil {
-		writeManageError(w, err)
+	ctx, cancel := manageCtx(r)
+	defer cancel()
+	if err := s.manage.KillSessionID(ctx, r.PathValue("id")); err != nil {
+		writeManageError(ctx, w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -186,8 +231,10 @@ func (s *server) killWindow(w http.ResponseWriter, r *http.Request) {
 	if !confirmed(w, r) {
 		return
 	}
-	if err := s.manage.KillWindow(r.Context(), r.PathValue("id")); err != nil {
-		writeManageError(w, err)
+	ctx, cancel := manageCtx(r)
+	defer cancel()
+	if err := s.manage.KillWindow(ctx, r.PathValue("id")); err != nil {
+		writeManageError(ctx, w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -197,8 +244,10 @@ func (s *server) killPane(w http.ResponseWriter, r *http.Request) {
 	if !confirmed(w, r) {
 		return
 	}
-	if err := s.manage.KillPane(r.Context(), r.PathValue("id")); err != nil {
-		writeManageError(w, err)
+	ctx, cancel := manageCtx(r)
+	defer cancel()
+	if err := s.manage.KillPane(ctx, r.PathValue("id")); err != nil {
+		writeManageError(ctx, w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -248,6 +297,24 @@ func readJSON(w http.ResponseWriter, r *http.Request, out any) bool {
 // tmux's own words are passed through rather than replaced. There is one user,
 // they own the machine, and "can't find pane: %7" in a toast tells them what
 // happened; a laundered "management failed" does not.
-func writeManageError(w http.ResponseWriter, err error) {
+//
+// The one exception is the daemon's own deadline running out, which is a 504.
+// It does not break the rule above, it is the reason for it: telling a timeout
+// apart from a refusal takes no guess at tmux's message text, because the
+// daemon is the one that gave up -- and it must be told apart, since a 400
+// says the owner's request was wrong when it was not, and the words tmux is
+// killed with ("signal: killed") say nothing about what happened. The context
+// is what is asked rather than the error, because an exec killed by its
+// context wraps no context error at all: measured on go1.26, cmd.Run returns a
+// bare *ExitError and errors.Is(err, context.DeadlineExceeded) is false.
+//
+// A browser that went away mid-request cancels the same context, and that is
+// deliberately NOT a timeout: it reports itself as cancelled, and this answers
+// it the ordinary way -- into a response nobody reads.
+func writeManageError(ctx context.Context, w http.ResponseWriter, err error) {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		writeError(w, http.StatusGatewayTimeout, fmt.Sprintf("tmux did not answer within %s", manageTimeout))
+		return
+	}
 	writeError(w, http.StatusBadRequest, err.Error())
 }

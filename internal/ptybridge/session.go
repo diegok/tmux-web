@@ -35,6 +35,31 @@ const (
 	currentPaneRetry = 25 * time.Millisecond
 )
 
+// hyperlinkTimeout bounds the one tmux call Open makes before the browser has a
+// terminal.
+//
+// It runs before the pty is started, so before the read, write and ping loops
+// that bound everything else on this path exist, and on a context ws.go hands
+// it deliberately unwired from the request -- so nothing else can end it. Two
+// seconds because of what the two outcomes are worth: waiting costs the owner a
+// blank terminal while they stare at it, and giving up costs clickable links,
+// which is what Open already treats a failed check as costing. A healthy server
+// answers a `show` in milliseconds.
+//
+// A var rather than a const only so a test can shorten it; nothing in
+// production assigns it.
+var hyperlinkTimeout = 2 * time.Second
+
+// enableHyperlinks is the hyperlink check as Open makes it.
+//
+// A package-level var for the same reason tmux.batchArgs is one: the real thing
+// talks to a tmux server, a wedged server cannot be produced on cue, and this
+// is the only seam through which a test can hold the check up and see what Open
+// does about it. Nothing in production reassigns it.
+var enableHyperlinks = func(ctx context.Context, args []string) error {
+	return tmux.NewClient(args).EnableHyperlinks(ctx)
+}
+
 type Config struct {
 	TmuxArgs []string // server selection, e.g. {"-L", "sock"}; nil for default
 	Base     string   // the real session to group onto
@@ -65,7 +90,15 @@ func Open(ctx context.Context, cfg Config) (*Session, error) {
 	// first time. Done here rather than only at daemon startup because the tmux
 	// server may not have existed then -- the user can start one at any point.
 	// A failure costs clickable links, not the terminal, so it is logged.
-	if err := tmux.NewClient(cfg.TmuxArgs).EnableHyperlinks(ctx); err != nil {
+	//
+	// Under a deadline of its own, because "a failure costs clickable links"
+	// is only true of a call that ends: ctx here is the session's, which
+	// nothing cancels until Close, so a wedged server would hold the tab on
+	// this line with no terminal, no loops, and nothing to notice.
+	hctx, cancel := context.WithTimeout(ctx, hyperlinkTimeout)
+	err := enableHyperlinks(hctx, cfg.TmuxArgs)
+	cancel()
+	if err != nil {
 		slog.Warn("ptybridge: could not enable tmux hyperlinks", "err", err)
 	}
 

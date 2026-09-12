@@ -87,6 +87,48 @@ function forcedSession(): string | null {
   return new URLSearchParams(window.location.search).get('session')
 }
 
+/**
+ * What is left to do about a cross-session click, given what the terminal now
+ * says. The rule behind the effect in `App`, out here where it can be tested:
+ * everything else that effect does needs a live socket and a ref.
+ *
+ * `pendingPane` is an *optimistic* answer to "which pane is this tab on". It is
+ * written the instant a pane in another session is clicked -- before the socket
+ * that could select it exists -- so that the highlight and the breadcrumb
+ * answer the click now rather than a reconnect later. Something has to end it,
+ * and this is that something:
+ *
+ *  - **hold** -- the replacement socket is not live, so the override is still
+ *    the only answer anything has. This is the state the whole mechanism exists
+ *    for, and it is why "not ready" is checked before the pane is looked at:
+ *    `TerminalSession` reports the pane it remembers for that session from the
+ *    moment it is constructed, and a value read out of `sessionStorage` is not
+ *    a socket that has selected anything.
+ *  - **replay** -- the socket is live and on some other pane: send it the
+ *    selection it could not receive when it was clicked.
+ *  - **landed** -- the terminal reports the clicked pane itself. The override
+ *    is now a second copy of `status.pane` and the caller must drop it.
+ *
+ * Dropping it exactly there is what makes the hand-off invisible: `activePane`
+ * is `pendingPane ?? status.pane`, and `landed` is the one state in which the
+ * fallback already reads the same pane, so nothing on screen moves as the
+ * override goes away. Dropping it any earlier un-acknowledges the click --
+ * `activePane` would fall back to the pane of the socket that was just thrown
+ * away, and then to null. Never dropping it is worse and is what this rule was
+ * written for: an optimistic override held past its landing is a *pin*, and it
+ * pins `activePane` to that id for the life of the tab. Nothing shows until the
+ * pane dies, and then everything does -- the successor effect stands down while
+ * a switch is in flight, so there is no successor and no toast, the breadcrumb
+ * settles on "%N is gone" over a live terminal, and every later reconnect's
+ * `where` answer is masked by an id from a click made minutes ago.
+ */
+export type PendingStep = 'hold' | 'replay' | 'landed'
+
+export function pendingStep(pending: string, status: TerminalStatus | null): PendingStep {
+  if (status?.phase !== 'ready') return 'hold'
+  return status.pane === pending ? 'landed' : 'replay'
+}
+
 export default function App() {
   const snapshot = useSnapshot()
   const term = useRef<TerminalHandle>(null)
@@ -138,19 +180,35 @@ export default function App() {
   }, [session])
 
   /**
-   * Replay a cross-session click once the new socket is up. `select` on a
-   * socket that is not ready would be remembered by the *old* TerminalSession,
-   * which the switch threw away.
+   * Replay a cross-session click once the new socket is up, and let the
+   * override go once it has landed. `select` on a socket that is not ready
+   * would be remembered by the *old* TerminalSession, which the switch threw
+   * away.
    *
    * `status.pane` is what ends this: `select` records the pane locally whether
    * or not tmux honours it, so a pane that died in between still settles rather
-   * than being re-sent on every status change.
+   * than being re-sent on every status change -- and settling is what hands the
+   * answer back to the terminal. See `pendingStep` for why the hand-off happens
+   * there and not a moment before or after.
    */
   useEffect(() => {
-    if (!pendingPane || status?.phase !== 'ready' || status.pane === pendingPane) return
-    term.current?.select(pendingPane)
-    term.current?.focus()
-  }, [pendingPane, status?.phase, status?.pane])
+    if (!pendingPane) return
+    switch (pendingStep(pendingPane, status)) {
+      case 'replay':
+        term.current?.select(pendingPane)
+        term.current?.focus()
+        break
+      case 'landed':
+        // The one setState in an effect that oxlint would rather not see, and
+        // it is not derivable during render: what it records is that the
+        // terminal has caught up with a click, which is an event, not a
+        // function of this render's props. It converges immediately --
+        // `activePane` reads the same pane either way -- and runs once per
+        // cross-session click.
+        setPendingPane(null)
+        break
+    }
+  }, [pendingPane, status])
 
   const handleSelectPane = useCallback(
     (paneId: string, groupKey: string) => {

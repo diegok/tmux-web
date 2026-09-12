@@ -271,3 +271,76 @@ test('killing the last tab of a session leaves the tab selected in the next one'
   // changed and the part nothing else would have told them.
   await expect(page.locator('[data-sonner-toast]')).toContainText('Moved to other › 0: work')
 })
+
+/**
+ * The death that follows a click into *another session*.
+ *
+ * That click is not the same code path as the four above. It cannot select
+ * anything yet -- the pane belongs to a window this tab's socket has no session
+ * in -- so `App` re-attaches, holds the clicked pane as `pendingPane` to
+ * acknowledge the click immediately, and replays the selection when the
+ * replacement socket comes up. Everything downstream reads
+ * `pendingPane ?? status.pane`, and the successor effect stands down while a
+ * switch is in flight, so an override that is never dropped is invisible until
+ * the moment this test exercises: the pane dies, and the tab that clicked it
+ * from another session is the one tab that cannot follow.
+ *
+ * ## What each name in here rules out
+ *
+ * `crossed` is deliberately **not** where a re-attach lands on its own. It is
+ * the second pane of the window and `split-window -d` leaves the first one
+ * current, so a tab that switched sessions and never replayed the click ends up
+ * on `successor` -- which is what the assertion right after the click is for.
+ * Without that, an app that dropped the optimistic override on the way and
+ * forgot to select anything would pass this test on tmux's own choice of pane.
+ *
+ * `successor` in turn is on no row that could be highlighted before the kill --
+ * the highlight is on the pane row that is about to die -- so the leading
+ * assertion after it cannot pass on the state the kill was supposed to change.
+ */
+test('a pane clicked from another session is still followed when it dies', async ({
+  page,
+  tmuxWeb,
+}) => {
+  // Created before the browser so the sidebar has it from the first poll. Two
+  // panes, because the successor has to be a pane the tab was never on.
+  tmuxWeb.tmux('new-session', '-d', '-s', 'other', '-n', 'remote', tmuxWeb.fakeAgent('successor'))
+  tmuxWeb.tmux('split-window', '-d', '-t', 'other:remote', tmuxWeb.fakeAgent('crossed'))
+  const panes = () =>
+    tmuxWeb.tmux('list-panes', '-t', 'other:remote', '-F', '#{pane_id}').split('\n')
+  await expect.poll(panes).toHaveLength(2)
+  const crossed = panes()[1]
+
+  await enroll(page, tmuxWeb, 'laptop')
+
+  // The click that crosses the boundary: `other` is not the session this tab is
+  // attached to, so this replaces the socket and replays the selection on the
+  // new one. The pane row directly, and only it -- clicking the window row
+  // first would be a cross-session click of its own, on the other pane.
+  await page.getByRole('button', { name: /pane 1/ }).click()
+  await expect(
+    breadcrumb(page),
+    'the click into another session never landed on the pane it named, so what ' +
+      'follows tests nothing',
+  ).toContainText('crossed')
+  await expect(breadcrumb(page)).toContainText('other')
+  await expect(selectedRow(page)).toContainText('crossed')
+  await expect(selectedRow(page)).toHaveCount(1)
+
+  tmuxWeb.tmux('kill-pane', '-t', crossed)
+  await expect.poll(panes).toHaveLength(1)
+
+  // Text first, count second -- see the note further up this file. Against the
+  // unfixed app the highlight is on nothing at all: `activePane` is still
+  // pinned to the pane that was clicked, so this fails with "element(s) not
+  // found" rather than on the wrong row.
+  await expect(
+    selectedRow(page),
+    'the tab that reached this pane from another session never followed it: the ' +
+      'user is looking at a live pane with no row anywhere saying which',
+  ).toContainText('successor')
+  await expect(selectedRow(page)).toHaveCount(1)
+  await expect(breadcrumb(page)).toContainText('successor')
+  await expect(breadcrumb(page)).not.toContainText('is gone')
+  await expect(page.locator('[data-sonner-toast]')).toContainText(`${crossed} is gone`)
+})

@@ -73,7 +73,7 @@ npx playwright test    # the e2e suite, 32 tests
 pnpm typecheck         # FROM THE REPO ROOT
 ```
 
-Run **both** suites after every task. `go test ./...` alone is not enough: the frontend carries a contract test that parses the Go `Row` struct out of `internal/tmux/snapshot.go` and compares its json tags against the TypeScript keys, **including an exact field count**, so a Go-side wire change turns the frontend suite red while Go stays green. Task 12 is that change in this batch.
+Run **both** suites after every task. `go test ./...` alone is not enough: the frontend carries a contract test that parses the Go `Row` struct out of `internal/tmux/snapshot.go` and compares its json tags against the TypeScript keys, **including an exact field count**, so a Go-side wire change turns the frontend suite red while Go stays green. Task 11 is that change in this batch.
 
 Per-package during a task: `go test ./internal/tmux/ -run TestName -v`, and `cd web && pnpm test <file>`.
 
@@ -100,7 +100,7 @@ Twenty-six tasks in seven phases, one phase per design item, in the owner's prio
 
 - **Phase A (1–4) wakes the socket** — item 2. It goes first because it depends on nothing, it is the smallest of the six, and it is the only one that fixes a failure that **never heals**: a socket that claims `OPEN` and is dead has no backoff timer pending, because no `close` event ever fired, so nothing in the app will ever try again. Task 1 moves an invariant before anything depends on the new one.
 - **Phase B (5–9) is the capture panel** — item 1. It goes second because **it earns item 4**. A pane in copy mode does not merely eat a reply sent down our PTY path: it truncates it at the first cancel key and delivers the remainder to the program as input (measured — `echo quit PARTIAL` cancels on the `q` of `quit` and runs `uit PARTIAL`). Today the only way to read scrollback in the browser is to scroll the pane into copy mode. The panel removes the reason to be in copy mode at all, which is worth more to item 4 than any code in it.
-- **Phase C (10–13) is the branch** — item 3. Independent of everything; placed third because it is the last of the small ones and because Task 12 is the wire change that turns the frontend contract test red, and it is cleaner to do that while nothing else is in flight.
+- **Phase C (10–13) is the branch** — item 3. Independent of everything; placed third because it is the last of the small ones and because Task 11 is the wire change that turns the frontend contract test red, and it is cleaner to do that while nothing else is in flight. **The wire comes before the reader, deliberately**: the parser (10), then the field on the wire shipped always `""` (11), then the goroutine that fills it (12), then the chip (13). Written the other way round — enrich the rows, then add the field — the reader's implementer has no `Row.Branch` to write into, and either adds it themselves (reddening the contract test with none of Task 11's guidance about the fixture files) or invents a side map that Task 11 then has to unpick.
 - **Phase D (14–18) is the reply box on the desktop** — item 4a. The Go half first (the cancel and its two-pane fixture, which is the sharpest trap in this plan), then the transport, then the copy-mode regression through `ptybridge`, then the box, then the bracketed-paste measurement.
 - **Phase E (19) is resume** — item 5a. One task, and its first step is a measurement (pi's invocation) rather than an implementation.
 - **Phase F (20–25) is the phone** — item 6. **It opens with a device-measurement task and that is a gate, not a formality.** Nine of its facts come from another project's source, verified on their layout and their device matrix. There is no iOS device here, no Android device, and Playwright's Chromium `isMobile` emulation **has no soft keyboard at all** — which is why the one phone-sized e2e test we have asserts focus-trap behaviour and nothing about the keyboard. Nine borrowed constants that test green on a desktop Chromium is the precise shape of this project's stated failure mode. Task 21 (resize suppression) lands before Task 22 (the viewport meta) and Task 23 (the geometry properties), because both of those can change the terminal's box and the suppression is what keeps that off the owner's terminal.
@@ -122,8 +122,8 @@ Every task is independently committable and reviewable. Where a task changes the
 | 8 | The panel's selector is the tab's selection | Reuses the palette's row source across every session, goes through `handleSelectPane`, carries the palette's `unreachable` flag, then captures |
 | 9 | The panel under Playwright | Selectable text and a working copy-all at the default viewport, with the clipboard permission granted in the context |
 | 10 | `.git/HEAD`, parsed | Eight cases including a **64**-hex detached line and the two `gitdir:` indirections; `maxGitWalk = 40` |
-| 11 | The git reader goroutine | A one-slot mailbox that drops rather than queues, one unit of work **per directory** with its own in-flight flag, `gitMissTTL = 30s`, and a test that the poll is not on it |
-| 12 | `Branch` on the wire | `Row` 19 tags → 20; the contract test's literal at `useSnapshot.test.ts:132` moves and stays a literal |
+| 11 | `Branch` on the wire | `Row` 19 tags → 20, shipped **always `""`**; the contract test's literal at `useSnapshot.test.ts:132` moves and stays a literal |
+| 12 | The git reader goroutine | A one-slot mailbox that drops rather than queues, one unit of work **per directory** with its own in-flight flag, `gitMissTTL = 30s`, and a test that the poll is not on it; it fills in the field Task 11 shipped empty |
 | 13 | The chip, and the width budget | Its own slot, presence on `Branch != ""` alone; a shared shrinkable 80 px pair overriding `Badge`'s `shrink-0`, branch capped at 64 px |
 | 14 | `end-mode` | `send-keys -X -t %<id> cancel`, exit status ignored, **two-pane fixture with the target not active**, four cases |
 | 15 | `endMode()` on the transport | The control message and its pin in `transport.test.ts`, beside the existing `copy-mode` one |
@@ -145,11 +145,11 @@ The design's ten open questions are open. **Do not invent answers.** Each row sa
 
 | Task | Open question | Standing instruction |
 | --- | --- | --- |
-| 2, 3, 4 | **2 — `LIVENESS_SLACK_MS`, `PROBE_TIMEOUT_MS`, `CONNECT_STALL_MS`.** All guesses. The slack is anchored at one end only: the server's 20 s ping is exactly the traffic `lastRecvAt` **cannot see** (pongs are below the JavaScript API), so it never refreshes the field and anchors nothing | Ship `45_000`, `5_000`, `10_000` as three named constants with the measurement written in the comment beside each. Wrong high costs a zombie that survives one wake; wrong low costs three forks per glance at the phone. Measurable by backgrounding a real phone for an hour and recording how long a wake takes to produce a frame — **fold this into Task 20's device session** |
+| 2, 3, 4 | **2 — `LIVENESS_SLACK_MS`, `PROBE_TIMEOUT_MS`, `CONNECT_STALL_MS`.** All guesses. The slack is anchored at one end only: the server's 20 s ping is exactly the traffic `lastRecvAt` **cannot see** (pongs are below the JavaScript API), so it never refreshes the field and anchors nothing | Ship `45_000`, `5_000`, `10_000` as three named constants with the measurement written in the comment beside each. Wrong high costs a zombie that survives one wake; wrong low costs two forks per glance at the phone (three when the window-id hint is stale or absent — see Task 4). Measurable by backgrounding a real phone for an hour and recording how long a wake takes to produce a frame — **fold this into Task 20's device session** |
 | 6 | **5 — what `lines` should default to.** 1 000 is sized against a measured ~5 KB per 1 000 lines at 80 columns. The real question is how far back a person scrolls to answer an agent, and nobody has measured it | One named constant, `defaultCaptureLines = 1000`, changeable by editing one line. Maximum stays 5 000, validated server-side |
 | 7 | **8 — whether the panel should offer the visible screen as a distinct choice.** `-p` alone is 2.6 ms and 4 KB against 5.1 ms and 168 KB, which is a real difference on a phone on a train | Ship the depth default and **no control**. Record the numbers in the panel's comment so the control can be argued for against them rather than added because it seems nice |
 | 7, 9 | **7 — whether iOS Safari's clipboard rule is satisfied by copying from memory inside the handler.** The design assumes yes and is written so that it can be: the button copies from state already in memory and never fetches first | Implement it that way and **do not claim it works on iOS**. It is a line in Task 20's device session |
-| 11 | **6 — how often a pane's directory actually changes.** The cache's whole design rests on it being rare (3 distinct paths for 12 panes, once, on one machine) | Build the cache as designed and add one counter behind a debug log. If agents `cd` constantly, the negative cache and the mtime check are both sized wrong — but nothing about the *structure* changes, only two numbers |
+| 12 | **6 — how often a pane's directory actually changes.** The cache's whole design rests on it being rare (3 distinct paths for 12 panes, once, on one machine) | Build the cache as designed and add one counter behind a debug log. If agents `cd` constantly, the negative cache and the mtime check are both sized wrong — but nothing about the *structure* changes, only two numbers |
 | 13 | **4 — the name floor.** 50 px is asserted from where "pane 3" stops being readable at `text-sm` and has not been looked at | **This one needs no device.** Task 13 step 1 is: open the app on a desktop with a split window in a repository and look. If 50 px is wrong the group cap moves, not the slot rule |
 | 18 | **3 — whether each agent enables `DECSET 2004` and honours it.** The tmux half is settled: tmux mediates the wrappers client-side and strips them for a program that never asked, so there is no literal-`[200~` failure to design around. What remains is three programs and three answers | Task 18 **is** the measurement, and the design already writes down the fallback: refuse the paste and say why. Twelve submitted turns is not an acceptable failure and "it probably works" is not a measurement |
 | 19 | **10 — pi's exact resume invocation.** Claude's `--resume` and opencode's `--continue` / `-s <id>` are known; pi's cell is taken from documentation rather than measured | Task 19 step 1 measures it, in a throwaway directory, before anything is written into a button. If it cannot be established, ship Claude and opencode and leave pi's control absent rather than wrong |
@@ -160,7 +160,7 @@ The design's ten open questions are open. **Do not invent answers.** Each row sa
 
 `web/vitest.config.ts` sets **`environment: 'node'`**, deliberately — "the transport's only DOM dependency is the WebSocket constructor, which its tests replace anyway. A component test added later can opt in per file with `// @vitest-environment jsdom`." So `document` and `window` **do not exist** in `Terminal.test.tsx`.
 
-The consequence, and it applies to Tasks 3, 4, 21 and 23: **the logic is tested by calling the method, and the wiring is tested in its own small jsdom file.** `TerminalSession.wake()` is public and every behavioural test calls it directly under the existing node-environment harness; one new file, `web/src/components/TerminalWake.dom.test.ts`, opens with `// @vitest-environment jsdom` and asserts only that `start()` registered the two listeners and `stop()` removed them with the same references. Do not convert `Terminal.test.tsx` to jsdom to save that file — it would move several hundred passing tests onto a different environment to test two `addEventListener` calls.
+The consequence, and it applies to Tasks 3, 4, 21 and 23: **the logic is tested by calling the method, and the wiring is tested in its own small jsdom file.** `TerminalSession.wake()` is public and every behavioural test calls it directly under the existing node-environment harness; one new file, `web/src/components/TerminalWake.dom.test.ts`, opens with `// @vitest-environment jsdom` and asserts only that `start()` registered the two listeners and `stop()` removed them with the same references. **`jsdom` is not currently a dependency of `web/`** — nothing has ever needed it — so Task 3 installs it as its step 0 and Tasks 21 and 23 inherit it. Do not convert `Terminal.test.tsx` to jsdom to save that file — it would move several hundred passing tests onto a different environment to test two `addEventListener` calls.
 
 ---
 
@@ -275,7 +275,7 @@ git commit -m "refactor: a where is answered once per outstanding question, not 
 
 So the threshold is anchored at **one end only** — below what a person would call frozen — and its real job is to keep the probe off the common case of a tab that was hidden for a moment.
 
-**The initial value is a decision, not a default.** `#lastRecvAt` is stamped at **construction** and re-stamped on **open** and on **every inbound frame**. It answers "when did we last have evidence this peer was alive", and a socket that has just been created is evidence as fresh as evidence gets. Initialising it to `0` instead would make every socket permanently stale until its first frame, so a glance at the phone two seconds after a connect would cost three forks on a pane that has simply not printed anything. That alternative is a named mutant below.
+**The initial value is a decision, not a default.** `#lastRecvAt` is stamped at **construction** and re-stamped on **open** and on **every inbound frame**. It answers "when did we last have evidence this peer was alive", and a socket that has just been created is evidence as fresh as evidence gets. Initialising it to `0` instead would make every socket permanently stale until its first frame, so a glance at the phone two seconds after a connect would cost two forks on a pane that has simply not printed anything. That alternative is a named mutant below.
 
 **Step 1: Write the failing tests**
 
@@ -318,7 +318,25 @@ describe('lastRecvAt', () => {
 })
 
 describe('connectStartedAt', () => {
-  it('is the construction time and never moves', () => { /* … */ })
+  it('is the construction time and does not move when the socket opens', () => {
+    let now = 1_000
+    const t = new Transport({ url: 'ws://x/ws', now: () => now })
+    expect(t.connectStartedAt).toBe(1_000)
+
+    // The open is the point. The mutant this test exists for is "re-stamp
+    // connectStartedAt in ws.onopen", beside the lastRecvAt stamp that
+    // legitimately goes there -- and that mutant is DEFERRED in the table
+    // below to Task 3's case (c), where it cannot die, because case (c)'s
+    // socket never opens. Nothing that never opens can catch a re-stamp on
+    // open. So the kill has to be here: advance the clock, open, and assert
+    // the field did not follow.
+    now = 7_000
+    MockWebSocket.last.open()
+    expect(t.connectStartedAt).toBe(1_000)
+
+    now = 9_000
+    expect(t.connectStartedAt).toBe(1_000)
+  })
 })
 ```
 
@@ -359,8 +377,8 @@ describe('connectStartedAt', () => {
    * evidence of life, never proof of death.
    *
    * Stamped at construction so that a socket which has not spoken yet is not
-   * instantly stale: a probe two seconds after a connect is three forks spent
-   * on a pane that has simply printed nothing.
+   * instantly stale: a probe two seconds after a connect is two forks spent on
+   * a pane that has simply printed nothing.
    */
   get lastRecvAt(): number
 ```
@@ -391,7 +409,8 @@ Then in `web/src/components/Terminal.tsx`, beside `BACKOFF_MAX_MS`:
  * answered below the JavaScript API and never touches `lastRecvAt`.
  *
  * Wrong high costs a zombie socket that survives one wake and waits for the
- * next. Wrong low costs three tmux forks per glance at a phone. Measurable by
+ * next. Wrong low costs two tmux forks per glance at a phone -- three when the
+ * window-id hint is stale or absent. Measurable by
  * backgrounding a real phone for an hour and recording how long a wake takes to
  * produce a frame.
  */
@@ -427,13 +446,13 @@ export const CONNECT_STALL_MS = 10_000
 
 | Mutant | Killed by |
 | --- | --- |
-| Initialise `#lastRecvAt = 0` instead of `this.#now()` | `is stamped at construction` — **the headline mutant.** It is the version that makes every first wake after a connect cost three forks |
+| Initialise `#lastRecvAt = 0` instead of `this.#now()` | `is stamped at construction` — **the headline mutant.** It is the version that makes every first wake after a connect cost two forks on a pane that has printed nothing |
 | Make `lastRecvAt` a getter returning `this.#now()` | the same test's second assertion, which is why the clock is advanced there. A test that only checked the value once would score this as a kill |
 | Stamp only when `frame[0] === FRAME_DATA` | `counts a control frame, not only data` — the probe's own answer would stop counting, which makes the probe unable to prove anything |
 | Move the stamp after the `instanceof ArrayBuffer` check | `counts a frame the transport goes on to reject as unusable` |
 | Move the stamp in front of the `#closedByCaller` guard | `does not count a frame that arrives after close()` |
 | `LIVENESS_SLACK_MS = 45` (a units slip: seconds for milliseconds) | **nothing in this task**, and that is correct — it is killed in Task 4, by a test whose fixture is built from a literal duration and whose assertion is on the constant. Do not write a Task 2 test against the constant's *value*; a test asserting `LIVENESS_SLACK_MS === 45_000` is the self-referential shape and cannot fail |
-| `connectStartedAt` re-stamped on open | Task 3's case (c) tests. Note it here and confirm the kill there |
+| `connectStartedAt` re-stamped on open | **this task's `does not move when the socket opens`, and nowhere else.** Do not defer it to Task 3: case (c)'s fixture is a socket that never opens, so a mutant that only fires in `onopen` cannot die there. That deferral was the plan being wrong, and it is why this test's body opens the socket at a later clock instead of being a `/* … */` |
 
 **Step 6: Commit**
 
@@ -448,13 +467,24 @@ git commit -m "feat: a transport remembers when it last heard anything and when 
 ### Task 3: The wake handler, cases (a) and (c)
 
 **Files:**
-- Modify: `web/src/components/Terminal.tsx`, `web/src/components/Terminal.test.tsx`
+- Modify: `web/src/components/Terminal.tsx`, `web/src/components/Terminal.test.tsx`, `web/package.json`, `pnpm-lock.yaml`
 - Create: `web/src/components/TerminalWake.dom.test.ts`
+
+**Step 0: install `jsdom`, because it is not installed.** `web/package.json` has no `jsdom` and no `happy-dom` — the suite has run under `environment: 'node'` since it was written and has never needed one — so `// @vitest-environment jsdom` on the new file fails at collection with *"Cannot find dependency 'jsdom'"*, which reads like a config error and is not one.
+
+```bash
+cd web && pnpm add -D jsdom
+```
+
+That writes `web/package.json` **and** `pnpm-lock.yaml` **at the repo root** (this is a workspace; the lockfile is `/pnpm-lock.yaml`, not `web/pnpm-lock.yaml` — check `git status` and stage whichever the install actually touched). Both are in the file list above and both must be named explicitly in the commit: `git add -A` is forbidden here, and a lockfile left out of the commit is a suite that passes for you and fails for everybody else.
+
+`@types/jsdom` is **not** needed: nothing imports jsdom, vitest loads it by name.
 
 **Two things in the existing code make the obvious implementation not work**, and both were found by review rather than by writing it:
 
 - **`retryNow()` returns early whenever `#transport` is non-null** (`Terminal.tsx:538-543`: `if (this.#stopped || this.#transport) return`). It covers case (a) — no transport, a backoff timer pending — and **nothing else**. A socket left in `CONNECTING` by a suspend still *has* a transport, so `retryNow()` is a no-op on exactly the state it looks like the tool for.
 - **`Transport.close()` suppresses its own `onClose`.** It sets `#closedByCaller` and the close handler returns early on that flag (`transport.ts:266-270`, `:165-166`). So "close it and let the reconnect path fire" fires **nothing at all**. Whatever decides a socket is dead has to drop the transport and start the connect itself.
+- **`state` is a three-value enum and `'closed'` covers two different things.** `get state()` (`transport.ts:180-190`) returns `'closed'` when `#closedByCaller` is set, **before** it looks at the socket at all, and `'closed'` again for a `CLOSING`/`CLOSED` socket. So `wake()` cannot be written as "connecting → case (c), otherwise case (b)": a transport the caller has already closed is neither, and probing it would send frames into a socket that is going away and then arm a timer that reconnects over the top of whatever replaced it. **Case (b) is gated on `state === 'open'` and on nothing weaker**, and that guard is written in Task 4 as the first line of the case. This task's `wake()` ends after case (c), so it is correct as it stands here — but do not "tidy" the `=== 'connecting'` test into an `!== 'open'` early return, because the two cases need different treatment and only one of them is a discard.
 
 **Step 1: Write the failing tests**
 
@@ -480,22 +510,41 @@ describe('wake', () => {
     expect(MockWebSocket.instances).toHaveLength(2)
   })
 
+  // Every duration in these three is a LITERAL, never `CONNECT_STALL_MS ± 1`.
+  // The reason is in the mutation table: the mutant that retargets the constant
+  // to 0 SURVIVES a fixture derived from the constant, because `0 - 1` is an
+  // elapsed time of -1ms, which is still inside any window. Fixture from a
+  // literal, assertion against the constant -- never both from the same number.
+
   it('case (c): a socket stuck in CONNECTING past CONNECT_STALL_MS is dropped and replaced', () => {
     let now = 1_000
     const { term } = makeSession({ now: () => now })
     term.start()
-    const first = MockWebSocket.last
-    // Never opened: readyState stays 0, which is CONNECTING.
-    expect(first.readyState).toBe(0)
-    expect(first.closedWith).toBeNull()
 
-    now += CONNECT_STALL_MS + 1
+    // A prior failed attempt, so the attempt assertion at the end is a RESET
+    // and not the value the fixture already had. `term.start()` alone leaves
+    // attempt at 0, which makes `toBe(0)` true before the action -- the
+    // "fixture true by accident" shape, and this is where it hides.
+    MockWebSocket.last.emitClose(1006)
+    expect(term.status.attempt).toBe(1)
+    // Let the backoff open the socket this test is about, keeping the injected
+    // clock in step with the fake timers so `connectStartedAt` is coherent.
+    now += BACKOFF_MAX_MS
+    vi.advanceTimersByTime(BACKOFF_MAX_MS)
+    expect(MockWebSocket.instances).toHaveLength(2)
+
+    const stalled = MockWebSocket.last
+    // Never opened: readyState stays 0, which is CONNECTING.
+    expect(stalled.readyState).toBe(0)
+    expect(stalled.closedWith).toBeNull()
+
+    now += 10_001
     term.wake()
 
-    expect(first.closedWith).toEqual({ code: 4001, reason: 'socket did not answer' })
-    expect(MockWebSocket.instances).toHaveLength(2)
-    // attempt reset to 0, so the pill says "connecting" rather than climbing
-    // the ladder from wherever it was.
+    expect(stalled.closedWith).toEqual({ code: 4001, reason: 'socket did not answer' })
+    expect(MockWebSocket.instances).toHaveLength(3)
+    // Reset from 1 to 0, so the pill says "connecting" rather than climbing the
+    // ladder from wherever it was.
     expect(term.status.attempt).toBe(0)
   })
 
@@ -505,9 +554,24 @@ describe('wake', () => {
     term.start()
     const first = MockWebSocket.last
 
-    now += CONNECT_STALL_MS - 1
+    now += 9_999
     term.wake()
 
+    expect(first.closedWith).toBeNull()
+    expect(MockWebSocket.instances).toHaveLength(1)
+  })
+
+  it('case (c), the boundary: exactly CONNECT_STALL_MS is inside the window', () => {
+    let now = 1_000
+    const { term } = makeSession({ now: () => now })
+    term.start()
+    const first = MockWebSocket.last
+
+    now += 10_000
+    term.wake()
+
+    // `<=` and `<` agree everywhere except here, which is the only place the
+    // operator mutant can be caught.
     expect(first.closedWith).toBeNull()
     expect(MockWebSocket.instances).toHaveLength(1)
   })
@@ -606,14 +670,14 @@ Stub `globalThis.WebSocket` with a ten-line class in this file; do not import th
   }
 ```
 
-`#wakeProbe: ReturnType<typeof setTimeout> | null = null` is declared here even though only Task 4 ever sets it, so that `#discard()` is whole in the commit that introduces it.
+`#wakeProbe: ReturnType<typeof setTimeout> | null = null` is declared here even though only Task 4 ever sets it, so that `#discard()` is whole in the commit that introduces it. **It stays out of `#clearTimers()` and `#closed()` in this task and Task 4 puts it in both** — see Task 4's step 3, which owns the whole lifecycle of the field because it is the only task that ever arms it. Nothing in this task can arm it, so nothing in this task can leak it.
 
 Registration goes in `start()` and removal in `stop()`, through two stored bound handlers:
 
 ```ts
   readonly #onVisible = () => {
     // The event fires on hide as well as on show, and probing a tab that is
-    // going away is three forks nobody will see the result of.
+    // going away is two forks nobody will see the result of.
     if (globalThis.document?.visibilityState === 'hidden') return
     this.wake()
   }
@@ -646,8 +710,8 @@ guarded so the class still constructs under the node environment (`globalThis.do
 | Mutant | Killed by |
 | --- | --- |
 | Replace the whole case (c) branch with `this.retryNow()` | `case (c): a socket stuck in CONNECTING…` — `retryNow` is a no-op while `#transport` is non-null, so no second socket is constructed. **The headline mutant: this is the implementation the design says a reader will write** |
-| `<= CONNECT_STALL_MS` to `< CONNECT_STALL_MS` | nothing, unless a fixture sits exactly on the boundary. **Add one**: `now += CONNECT_STALL_MS` exactly, and assert the socket is left alone. Without it this is a boundary mutant asserted off the boundary, where the two operators agree |
-| `CONNECT_STALL_MS` retargeted to `0` | `case (c), the negative control` — and it is killed only because that test's fixture is built from `CONNECT_STALL_MS - 1` while the *assertion* is "nothing happened". Check that reasoning before scoring it: if you write the fixture as a literal `9_999` the test stops moving with the constant, which is the safer direction here |
+| `<= CONNECT_STALL_MS` to `< CONNECT_STALL_MS` | `case (c), the boundary`, and only that test — the two operators agree at every other elapsed time, so a boundary mutant asserted off the boundary is not asserted at all |
+| `CONNECT_STALL_MS` retargeted to `0` | `case (c), the negative control`, **because its fixture is the literal `9_999`.** Written as `CONNECT_STALL_MS - 1` this mutant **survives**: the fixture becomes `now += -1`, elapsed is `-1`, `-1 <= 0` is true, the socket is left alone and the test passes. That is the self-referential shape in its purest form and it is why all three fixtures here are literals |
 | `#discard()` without the `close()` call | add an assertion on `first.closedWith` — which `case (c)` already has. Without the close, the old socket's `tmux attach` leaks until the server's ping collects it |
 | `#discard()` closing but not detaching (`this.#transport = null` removed before `close`) | nothing today, because `close()` suppresses the callback. **Reduced to a review check**, not a mutant: the detach is defence against a callback that arrives from a path `close()` does not suppress. Say so in the commit rather than recording a kill |
 | Drop `this.#clearTimers()` from `#discard()` | a new assertion in `case (c)`: after the discard, advance past `BACKOFF_MAX_MS * 2` and assert still exactly two sockets. Without it a pending retry opens a third |
@@ -660,7 +724,7 @@ guarded so the class still constructs under the node environment (`globalThis.do
 
 ```bash
 git status
-git add web/src/components/Terminal.tsx web/src/components/Terminal.test.tsx web/src/components/TerminalWake.dom.test.ts
+git add web/src/components/Terminal.tsx web/src/components/Terminal.test.tsx web/src/components/TerminalWake.dom.test.ts web/package.json pnpm-lock.yaml
 git commit -m "feat: a foregrounded tab reconnects a socket that is stalled or waiting on a suspended timer"
 ```
 
@@ -677,7 +741,7 @@ git commit -m "feat: a foregrounded tab reconnects a socket that is stalled or w
 
 So the probe does what reconnect does — and `#landed` needs no change at all.
 
-**Cost, stated rather than discovered — and the design's figure is one too high.** The design prices the probe at **three forks**. Read against the source it is **two in the common case**: `Client.SelectPane` (`internal/tmux/client.go:355`) sends `list-panes ; select-window ; select-pane` as **one** `;`-joined invocation when the window-id hint is valid and returns immediately if the hint matched (`selectWindowPaneArgs`, `:396`), so that is one fork, not two; `CurrentPane` (`:432`) is a second. It becomes **three only when the window-id hint was stale**, which costs a corrective second `Run`. Cheaper than the design says, so nothing decided on it changes — but write two, not three, in the comment, and say where the third comes from. **Verify this by reading `SelectPane` before you write the comment; do not take it from here.**
+**Cost, stated rather than discovered — and the design's figure is one too high.** The design prices the probe at **three forks**. Read against the source it is **two in the common case**: `Client.SelectPane` (`internal/tmux/client.go:355`) sends `list-panes ; select-window ; select-pane` as **one** `;`-joined invocation when the window-id hint is valid and returns immediately if the hint matched (`selectWindowPaneArgs`, `:396`), so that is one fork, not two; `CurrentPane` (`:432`) is a second. It becomes **three when the window-id hint was stale *or absent***: a stale hint costs a corrective second `Run` (`client.go:376-382`), and an invalid or empty one takes the `else` branch, which reads the window and then selects as two separate `Run`s (`:382-388`). Both are ordinary — the hint is absent on the first select of a socket. Cheaper than the design says, so nothing decided on it changes — but write two, not three, in the comment, and say where the third comes from. **Task 2's two constant comments and its `lastRecvAt` doc say two for the same reason**; if you find a "three" in them, it is a leftover and the source is what settles it. **Verify this by reading `SelectPane` before you write the comment; do not take it from here.**
 
 And **waking the phone now moves the owner's active pane**, because `select-pane` is what pulls it back. That is v1's already-accepted shared-active-pane cost reached through a new occasion, and it is the price of the app agreeing with itself about which pane it is on.
 
@@ -719,8 +783,14 @@ And **waking the phone now moves the owner's active pane**, because `select-pane
   it('does not probe a socket that has been talking', () => {
     // The positive control for the whole feature. Without it, a handler that
     // always probes (or always reconnects) passes every other test here.
-    // Receive a data frame, advance the clock by LIVENESS_SLACK_MS - 1 since
-    // that frame, wake, and assert no new control frame and no new socket.
+    // Receive a data frame, advance the clock by a LITERAL 1_000 since that
+    // frame, wake, and assert no new control frame and no new socket.
+    //
+    // A literal, not `LIVENESS_SLACK_MS - 1`, and the mutation table below is
+    // the authority on that: the mutant this test exists to kill retargets
+    // LIVENESS_SLACK_MS to 0, and a fixture derived from the constant moves
+    // with it (`0 - 1` is silence of -1ms, which is still under the threshold)
+    // and survives. The two must not be built from the same number.
   })
 
   it('is idempotent on an OPEN stale socket: one probe frame and one armed timer', () => {
@@ -758,6 +828,35 @@ And **waking the phone now moves the owner's active pane**, because `select-pane
     // …probe, advance PROBE_TIMEOUT_MS, assert closedWith 4001 and a second
     // socket. And the boundary sibling: at PROBE_TIMEOUT_MS - 1, nothing.
   })
+
+  // The two teardown tests. Neither is about the probe working; both are about
+  // the timer not outliving the thing it was armed for. Nothing else in this
+  // suite can see either failure, because both need a probe to be in flight at
+  // the moment the session ends.
+
+  it('a stop() during a probe does not later open a socket on a stopped session', () => {
+    // …arm the probe exactly as `case (b)` does, then:
+    term.stop()
+    const socketsAtStop = MockWebSocket.instances.length
+    vi.advanceTimersByTime(PROBE_TIMEOUT_MS * 3)
+    // Not "no reconnect" -- no SOCKET. `#discard()` calls `#connect()`, and a
+    // connect after stop() is a new attach and a new throwaway tmux session
+    // that nothing is left alive to close.
+    expect(MockWebSocket.instances).toHaveLength(socketsAtStop)
+  })
+
+  it('a close during a probe does not discard the socket the backoff opened', () => {
+    // …arm the probe, then let the socket die under it:
+    ws.emitClose(1006)
+    expect(MockWebSocket.instances).toHaveLength(1)
+
+    // Past the backoff AND past the probe timeout, in whichever order the
+    // fixture produces -- the orphan is a problem in both. Exactly one new
+    // socket: the backoff's. A surviving probe timer would discard that one and
+    // open a third.
+    vi.advanceTimersByTime(Math.max(BACKOFF_MAX_MS, PROBE_TIMEOUT_MS) * 3)
+    expect(MockWebSocket.instances).toHaveLength(2)
+  })
 ```
 
 **`vi.getTimerCount()` needs care.** Other timers may be pending in a given fixture (the resize debounce, a backoff). Assert it against a baseline taken immediately before the wake (`const timersBefore = vi.getTimerCount()`, then `expect(vi.getTimerCount()).toBe(timersBefore + 1)`), or the assertion is measuring the fixture rather than the probe. Check what is pending in your fixture before you decide which form to use — **an assertion that happens to be true because the fixture has no other timers is the "true by accident" shape**.
@@ -781,6 +880,13 @@ And add the half Task 1 could not write:
     // (b) The socket says it is open. It may be lying, and nothing else in this
     // app will ever find out: no close event fired, so there is no backoff
     // timer, so there is nothing pending that could discover it.
+    //
+    // Gated on `open` explicitly, and not on "not connecting". `state` returns
+    // 'closed' for a socket the CALLER closed (transport.ts:180-181, ahead of
+    // any readyState test) as well as for one that is CLOSING or CLOSED, and
+    // probing any of those sends frames into a socket that is going away and
+    // then arms a timer that would discard whatever replaced it.
+    if (this.#transport.state !== 'open') return
     if (this.#wakeProbe !== null) return
     if (this.#now() - this.#transport.lastRecvAt <= LIVENESS_SLACK_MS) return
 
@@ -816,7 +922,35 @@ and the cancel, in `#landed` — or better, wherever *any* inbound frame lands, 
   }
 ```
 
-`#wakeProbe` is nulled in exactly three places — here, in the timeout, and in `#discard()` — and a non-null value is the in-flight flag. This is the same pattern as `#checkGone()`'s `#probing` (`Terminal.tsx:418-419`, `:676-689`) and should be written to look like it.
+A non-null `#wakeProbe` is the in-flight flag, the same pattern as `#checkGone()`'s `#probing` (`Terminal.tsx:418-419`, `:676-689`), and it should be written to look like it.
+
+**The timer must not outlive the session, and today's teardown paths do not know about it.** Two paths end a socket without going through `#discard()`, and neither clears this timer as written:
+
+- **`stop()`** (`Terminal.tsx:457-466`) sets `#stopped`, calls `#clearTimers()`, and closes the transport. `#clearTimers()` (`:723-727`) clears `#resizeTimer` and `#retryTimer` and **nothing else**. So a `stop()` while a probe is armed leaves the timer pending; it fires, calls `#discard()`, and `#discard()` calls `#connect()` — **a new WebSocket, a new attach and a new throwaway tmux session on a session the user has closed, with nothing left alive to close it.**
+- **`#closed()`** (`:627-665`) clears `#resizeTimer` inline and nothing else. So a close during a probe leaves an orphan timer that fires after the backoff has already opened a **new** socket, and discards *that* one.
+
+So, in this task:
+
+1. **`#wakeProbe` goes into `#clearTimers()`**, beside the other two:
+
+```ts
+  #clearTimers(): void {
+    if (this.#resizeTimer) clearTimeout(this.#resizeTimer)
+    if (this.#retryTimer) clearTimeout(this.#retryTimer)
+    // The wake probe is a timer like the other two, and `stop()` is the path
+    // that proves it: without this, a stop during a probe fires `#discard()`
+    // on a stopped session, which calls `#connect()` -- a socket, an attach
+    // and a throwaway tmux session that nothing is left alive to close.
+    if (this.#wakeProbe) clearTimeout(this.#wakeProbe)
+    this.#resizeTimer = null
+    this.#retryTimer = null
+    this.#wakeProbe = null
+  }
+```
+
+2. **`#closed()` clears it too**, beside its existing `#resizeTimer` block — that path does *not* call `#clearTimers()`, and an orphan surviving a close would discard the socket the backoff went on to open.
+
+3. **`#discard()`'s own explicit clear stays.** It is now redundant with `#clearTimers()`, and it is kept because `#discard()` clears the field *before* it detaches the transport and *before* `#clearTimers()` runs — so the ordering is self-evident at the call site, and a later edit that moves `#clearTimers()` cannot silently re-arm the leak. Say so in a one-line comment rather than deleting it.
 
 **Step 4: Run both suites, expect PASS.** Then `pnpm typecheck`.
 
@@ -827,6 +961,7 @@ and the cancel, in `#landed` — or better, wherever *any* inbound frame lands, 
 | Drop the `select` and send only `where` | `select-then-where, in that order`. **The headline mutant** — it is revision 2's design, and it passes an assertion written as "a `where` was sent" |
 | Send `where` before `select` | same test. A `toEqual` on the array catches order; a pair of `toContainEqual`s would not |
 | Set `#awaitingWhere = false` after the `where` (revision 2's discard) | `the negative control: an answer naming a different pane is followed`. It **passes** `the answer is adopted`, because the pane was already `%5`. That is the "fixture true by accident" shape and the reason the negative control exists |
+| Relax `state !== 'open'` to `state !== 'connecting'` | add a case: close the transport through `term`'s own path so `#closedByCaller` is set, wake past the slack, and assert no control frame and no timer. `state` is `'closed'` for a caller-closed socket, so the two guards are not equivalent |
 | Drop the `if (this.#wakeProbe !== null) return` single-flight guard | `is idempotent on an OPEN stale socket` — at **both** assertions: two select/where pairs, and two timers. Confirm the kill at the frame-array assertion *and* at the timer count; a version that only counted connect attempts would go green |
 | Null `#wakeProbe` in `#frameArrived` but not clear the timeout | the same test's tail: the orphan fires `#discard()` after the answer landed and a second socket appears |
 | `<= LIVENESS_SLACK_MS` to `< LIVENESS_SLACK_MS` | needs a fixture exactly on the boundary. Add one: silence of exactly `LIVENESS_SLACK_MS` and assert **no** probe |
@@ -835,6 +970,8 @@ and the cancel, in `#landed` — or better, wherever *any* inbound frame lands, 
 | `#discard()` on timeout replaced by `retryNow()` | `reconnects when nobody answers` — `retryNow` is a no-op while the transport exists, so no second socket |
 | `PROBE_TIMEOUT_MS` retargeted longer | `reconnects when nobody answers`, whose `advanceTimersByTime` must be a literal-derived duration or the assertion moves with the mutant |
 | Cancel the probe only on a control frame, not on data | add a test: probe, then receive a `FRAME_DATA` frame, advance past `PROBE_TIMEOUT_MS`, assert no reconnect. Any frame is an answer to "is anyone there" |
+| Leave `#wakeProbe` out of `#clearTimers()` | `a stop() during a probe…` — the orphan fires `#discard()`, which calls `#connect()`, and a third socket appears on a session the user closed. **Nothing else in the suite can see this**; `stop()` is otherwise the quietest path in the class |
+| Leave `#wakeProbe` uncleared in `#closed()` | `a close during a probe…` — three sockets instead of two |
 | Run the probe from `phase !== 'ready'` | review check, not a mutant: `wake()`'s guard already excludes `ended` and `gone`, and `connecting` is case (c). Note it |
 
 **Step 6: Commit**
@@ -886,6 +1023,22 @@ func TestCaptureRangeCapsBytesAndTruncatesFromTheTop(t *testing.T) {
 	// The fixture must genuinely exceed the cap -- check len() of the uncapped
 	// capture in the test and t.Fatal if it does not, or this is a fixture that
 	// is true by accident forever after someone shrinks it.
+	//
+	// A DEFAULT pane cannot reach the cap, and that t.Fatal is what you will
+	// hit if you build one. Under `-f /dev/null` the history-limit is tmux's
+	// own 2000 and a new-session pane is 80 columns, so the whole history is at
+	// most 160 000 bytes against a 262 144-byte cap -- and far less in practice,
+	// because -J with no -N strips the trailing spaces. Size the fixture:
+	//
+	//	srv.Run(t, "new-session", "-d", "-s", "t", "-x", "200", "-y", "50")
+	//	srv.Run(t, "set-option", "-g", "history-limit", "10000")
+	//
+	// in that order. Measured on 3.7b: `set-option -g` BEFORE any session fails
+	// (there is no server yet to set an option on), and after `new-session` it
+	// does apply to the pane that already exists -- `#{history_limit}` reads
+	// 10000 and 5000 printed 200-column lines gave a history_size of 4957 and a
+	// `capture-pane -p -J -S -10000` of 1 005 203 bytes, comfortably over the
+	// cap. Verify it in your own run rather than trusting this paragraph.
 }
 
 func TestCaptureRangeCutsOnARuneBoundary(t *testing.T) {
@@ -996,10 +1149,17 @@ Response:
 { "paneId": "%3", "text": "…", "lines": 1000, "truncated": false, "capturedAt": 1789075200000 }
 ```
 
+**There is no fake manage layer in this package, and three of the assertions below need one.** `server_test.go:183` wires `Manage: tmux.NewClient(testutil.NewServer(t).Args())` — a **real** client against a real throwaway tmux server, with the comment explaining why (a route accidentally reachable without credentials must run its command against a throwaway socket, never the developer's own). So "assert on what the fake manage layer recorded" is not a thing this file can do as written. Two ways out, and **pick one before writing a line**:
+
+1. **The PATH shim.** `internal/tmux/serverstart_internal_test.go:245-285` (`TestOnePollForksTmuxOnce`) writes a `tmux` shell script into a `t.TempDir()` that appends to a log and `exec`s the real binary, then `t.Setenv("PATH", …)`. Point it at a log of full argv rather than a line per call and the `-S -1000` assertions become exact. It is the instrument this repo already uses for exactly this question.
+2. **Move the argv out of the handler.** A pure `captureArgs(paneID, lines) []string` in `internal/tmux`, unit-tested there for the default, the clamp and the `-S -N` spelling, leaving the handler tests in `internal/front` to assert **status codes and JSON shape only** — which is what they are good at and what the rest of that file does.
+
+Option 2 is the smaller change and keeps the argv assertions in the package that owns the argv; option 1 is the higher-fidelity one. Say in the commit message which you took and why. Either way, **do not add a fake `Manage` to `server_test.go`'s shared fixture** — every other test in that file depends on it being real, for the reason its comment gives.
+
 **Step 1: Write the failing tests** in `internal/front/server_test.go`:
 
 - a capture with no `lines` uses `defaultCaptureLines`;
-- `?lines=2000` reaches tmux as 2 000 — assert on what the fake manage layer recorded, not on the text;
+- `?lines=2000` reaches tmux as 2 000 — assert on the recorded argv, not on the text;
 - `?lines=abc`, `?lines=-1`, `?lines=0`, `?lines=1e3` are **400**, not silently defaulted. A string that is not an integer must never reach tmux: `lines` becomes part of an argv element and the one rule this daemon holds everywhere is that nothing unvalidated does;
 - `?lines=999999` is clamped to `maxCaptureLines` (or 400 — **pick one and pin it**; clamping is friendlier and matches `CaptureRange`'s own clamp, so clamp, and say so in the handler comment);
 - an unencoded `%3` in the path is a 400 from `net/http` before the mux — pin the encoded spelling in the test the way `manage_test.go:138` does;
@@ -1065,7 +1225,14 @@ The header shows the capture time and **ages it** — `captured 14s ago` — and
 
 - `captureAge(capturedAt, now)` → `'just now' | '14s ago' | '3m ago'` — with a boundary fixture at each transition, and a fixture where `now < capturedAt` (a clock skew) asserting it does not render a negative age;
 - `truncationNotice(truncated, lines)` → the line the panel shows when the daemon cut the top, or null;
-- and a render test asserting the `<pre>` is a `pre` and not a `textarea`, that it carries `user-select: text` (assert the **computed style property in the class or style attribute you actually set**, not a Tailwind class name that may contain the word for another reason — that is the `disabled:pointer-events-none` trap), and that the dialog's `onOpenAutoFocus` prop is present.
+- and a render test asserting the `<pre>` is a `pre` and not a `textarea`, and that it carries `user-select: text` (assert the **computed style property in the class or style attribute you actually set**, not a Tailwind class name that may contain the word for another reason — that is the `disabled:pointer-events-none` trap).
+
+**Do not try to assert the `onOpenAutoFocus` prop is present. It cannot be done in this suite.** These tests render with `renderToStaticMarkup` into a bare `<Dialog open>` and **never inside `DialogContent`** — `KillDialog.test.tsx:5-9` spells out why: the Radix root is a context provider with no DOM of its own, and `DialogContent` is a portal into a `document` that does not exist under vitest's node environment. `onOpenAutoFocus` is a prop *of `DialogContent`*, so there is no rendered tree to read it off and no markup it appears in. A test written as "the prop is present" is either checking a React element object the render never sees, or it is a test that cannot fail.
+
+**What replaces it, in two halves:**
+
+1. **An exported handler, unit-tested.** `export function preventAutoFocus(e: Event): void { e.preventDefault() }` in `CapturePanel.tsx`, passed as `onOpenAutoFocus={preventAutoFocus}`. The test drives it directly with a fake event and asserts `preventDefault` was called — a real assertion on the only line of logic there is.
+2. **A Playwright assertion, in Task 9.** After opening the panel, `document.activeElement` is the dialog container and **not** the pane selector. That is the behaviour; nothing in vitest can see it, and Task 9 is where it becomes observable. Task 9's file list already exists; this is one more assertion in it.
 
 **Step 2–4:** run, implement, run. Then `pnpm typecheck`.
 
@@ -1074,8 +1241,8 @@ The header shows the capture time and **ages it** — `captured 14s ago` — and
 | Mutant | Killed by |
 | --- | --- |
 | Render a `<textarea>` instead of a `<pre>` | the tag assertion. **The headline mutant**, because it is the version that looks better and raises a keyboard |
-| Drop `onOpenAutoFocus` | the prop-presence assertion — and note in the commit that this is a *structural* assertion, not a behavioural one: nothing in vitest can prove focus went to the container, and Task 9's Playwright test is where that becomes observable |
-| `onOpenAutoFocus` present but not calling `preventDefault` | the same limitation. Assert the handler calls `preventDefault` on a fake event, driving the exported handler directly |
+| `preventAutoFocus` not calling `preventDefault` | its own unit test, driven with a fake event. This is the only half of the mechanism vitest can see |
+| Drop the `onOpenAutoFocus={preventAutoFocus}` prop from `DialogContent` | **nothing in this suite**, and there is no way to make it: `DialogContent` never renders here. Task 9's `document.activeElement` assertion is the kill, and it lands one task later. Record it here as a deferred mutant, name Task 9, and confirm the kill there — do not invent a structural assertion to close it |
 | Copy-all refetches before writing | assert the exported copy handler takes the text as an argument and performs no fetch — make that structural by giving it a signature that has nowhere to fetch from |
 | Add a `setInterval` refresh | nothing, and no test can catch it. **Reduced to a review check**: the reasons are in the comment, and a reviewer enforces them |
 | `captureAge` off by one at each boundary | the boundary fixtures — which must be literals, not derived from the thresholds |
@@ -1101,6 +1268,27 @@ git commit -m "feat: a read-only scrollback panel you can select and copy from"
 
 So changing pane in the panel goes through the same `handleSelectPane` a sidebar row click goes through (`App.tsx:258-283`), and then captures.
 
+**But not with its focus behaviour, and this is a phone bug, not a nicety.** `handleSelectPane`'s same-group branch ends with `term.current.focus()` (`App.tsx:281`), and its comment explains why: a sidebar click or a closing palette leaves focus nowhere useful, so the terminal takes it and the keyboard follows. Called from inside a Radix modal, that is wrong in two ways at once. Focus leaves the dialog, the focus scope drags it back, and on the way through **the terminal's input takes focus inside a tap gesture — which raises the soft keyboard.** The panel's whole reason to exist is being readable and copyable on a phone *without* the keyboard, and this would raise it on every pane change, in a full-screen dialog where it covers most of what you came to read.
+
+So `handleSelectPane` gains an options argument:
+
+```ts
+  const handleSelectPane = useCallback(
+    (paneId: string, groupKey: string, opts?: { focus?: boolean }) => {
+      …
+      // Default true: every existing caller -- the sidebar row and the palette
+      // -- wants it, and their reasons are in the comment below. The capture
+      // panel passes false, because it is a modal: the focus scope owns focus
+      // while it is open, and on a phone taking it would raise the soft
+      // keyboard the panel exists to avoid.
+      if (opts?.focus !== false) term.current.focus()
+    },
+    [session],
+  )
+```
+
+The panel calls `handleSelectPane(paneId, groupKey, { focus: false })`. Both existing call sites are unchanged and keep today's behaviour, which is what makes this safe to land here.
+
 **Two qualifications the implementer must carry, both of which the design states carefully:**
 
 - **"The same `select`" is only true within a group.** `handleSelectPane` branches: same group is one `transport.select` on the live socket; a pane in **another** group sets `pendingPane` and `setPicked` and returns without touching the terminal. That changes `session`, which changes the `/ws?session=` URL, which **tears the socket down and brings up a new throwaway tmux session in the new group** — then the effect at `App.tsx:239-256` replays `pendingPane` once the new socket is `ready`, and the new socket's `#opened` selects it again before its own `where`. A cross-group pick from the panel is a teardown, a new session, a PTY and a redraw, **not one fork**. That is the existing cost of a cross-group sidebar click, and the panel inherits rather than adds it — but the panel makes it far easier to reach, because the selector reuses the palette's row source, which **spans every session in the snapshot** (`Palette.tsx:117-171`, `paneEntries`: "Every pane, in snapshot order"; the current session is a flag, not a filter). So the panel **must show the same `unreachable` flag `paneEntries` computes**, and must treat a cross-group capture as the expensive path it is.
@@ -1113,7 +1301,8 @@ So changing pane in the panel goes through the same `handleSelectPane` a sidebar
 - the selector's entries come from `paneEntries` and include a pane from a session other than the current one — assert on the entry list, with a two-session fixture;
 - an `unreachable` entry is rendered disabled and its `action` is not dispatched;
 - selecting the current pane **does not** re-select and does not re-capture (a fixture that already satisfies the assertion would hide a selector that fires on every render);
-- selecting a different pane calls `handleSelectPane` **and then** captures, in that order — assert the order, since a capture that races the select captures the old pane.
+- selecting a different pane calls `handleSelectPane` **and then** captures, in that order — assert the order, since a capture that races the select captures the old pane;
+- **selecting from the panel does not focus the terminal** — assert the panel passes `{ focus: false }`, and assert separately that `handleSelectPane` with no options *does* focus, so the default is pinned from both sides. This is the assertion that keeps the soft keyboard off a phone on every pane change.
 
 **Step 2–4:** run, implement, run. `pnpm typecheck`.
 
@@ -1126,6 +1315,8 @@ So changing pane in the panel goes through the same `handleSelectPane` a sidebar
 | Drop the `unreachable` flag | the disabled-entry test |
 | Capture before selecting | the ordering test, which must be an ordered array assertion and not two independent "was called" checks |
 | Re-capture on selecting the pane already selected | the no-op test |
+| Panel calls `handleSelectPane` with no options | the `{ focus: false }` assertion. On a phone this is the soft keyboard opening on every pane change, inside the dialog that exists to avoid it |
+| `opts?.focus !== false` written as `opts?.focus === true` | the default-focus assertion — the sidebar and the palette silently stop focusing the terminal, which is a worse regression than the bug being fixed |
 
 **Step 6: Commit**
 
@@ -1148,10 +1339,11 @@ Two things vitest cannot see: that the text is really selectable in a browser, a
 - Open the panel on a pane with known content **that this test produced** — never anything from a live pane; the repo is public.
 - Assert the `<pre>` contains that content, that `window.getSelection()` after a triple-click is non-empty, and that after clicking copy-all `navigator.clipboard.readText()` equals the panel's text.
 - Assert the truncation notice is **absent** on a short capture, so the notice's own test is not the only fixture it ever sees.
+- **Assert `document.activeElement` after the panel opens is the dialog container and not the pane selector.** This is Task 7's deferred mutant coming home: `onOpenAutoFocus` is a prop of `DialogContent`, which never renders under vitest's node environment, so this is the only place in the whole suite where dropping it is visible. Assert it as a relationship — the active element is not the selector, and it is inside the dialog — rather than against a generated Radix id.
 
 Run it: `npx playwright test e2e/capture.spec.ts`.
 
-**Mutation testing:** make the `<pre>` `user-select: none` and watch the selection assertion go red; make copy-all write a constant and watch the clipboard assertion go red; make copy-all write nothing and watch it go red for a different reason (empty rather than wrong) — check that both directions are distinguishable in the failure output, because a clipboard left over from a previous test is a classic false pass. Clear the clipboard at the start of the test.
+**Mutation testing:** drop `onOpenAutoFocus={preventAutoFocus}` from `DialogContent` and watch the `activeElement` assertion go red — **run this one specifically**, it is the mutant Task 7 could not kill and this is the only test in the repository that can; make the `<pre>` `user-select: none` and watch the selection assertion go red; make copy-all write a constant and watch the clipboard assertion go red; make copy-all write nothing and watch it go red for a different reason (empty rather than wrong) — check that both directions are distinguishable in the failure output, because a clipboard left over from a previous test is a classic false pass. Clear the clipboard at the start of the test.
 
 **Commit**
 
@@ -1283,11 +1475,67 @@ git commit -m "feat: read a working tree's branch off .git/HEAD, worktrees and s
 
 ---
 
-### Task 11: The git reader goroutine
+### Task 11: `Branch` on the wire
+
+**Files:**
+- Modify: `internal/tmux/snapshot.go`, `web/src/lib/useSnapshot.ts`, `web/src/lib/useSnapshot.test.ts`, and every TypeScript file that builds a complete `SnapshotRow`
+
+**This task ships the field and nothing that fills it.** `Branch` is always `""` when this commit lands: `snapshot.go` declares it, the poller writes nothing into it, the TypeScript mirror carries it, and every row in the app renders exactly as it does today. Task 12 is what puts a branch in it and Task 13 is what draws it.
+
+That order is deliberate and it is the one correction the reviewer made to Phase C. The wire change is the disruptive one — it reddens the frontend contract test and it touches eight files — and it wants to happen on its own, against a green tree, with nothing else in flight. Doing it *after* the reader would hand the reader's implementer a `Row` with nowhere to put a branch, and they would either add the field themselves without any of the guidance below, or route around it with a side map.
+
+**`Row` gains one field, taking it from 19 json tags to 20:**
+
+```go
+	// Branch is the pane's git branch: "" when the path is not in a work tree,
+	// and "@<7-hex>" when HEAD is detached.
+	//
+	// Read off .git/HEAD from a goroutine of its own, never the poll's, so it
+	// is up to a poll interval stale in exactly the way Path is. One authority
+	// -- the filesystem -- and nothing about the agent enters it.
+	Branch string `json:"branch"`
+```
+
+**The contract test is designed to fail here and that is the point.** `web/src/lib/useSnapshot.test.ts:122` (*"uses the json names tmux.Row marshals"*) extracts `type Row struct` from `internal/tmux/snapshot.go` at `:123`, collects its json tags, and asserts `toHaveLength(19)` at **`:132`** against a **hand-written literal** — deliberately not `Object.keys(row()).length`, "because a count derived from the TypeScript side would agree with itself forever". **It becomes 20 at `:132` and stays a literal**, and the companion assertion at `:133` means the TypeScript `row()` fixture gains the field in the same change.
+
+**Find every fixture, and do not trust the test suite to find them for you.** vitest does not typecheck, so a fixture missing the new field leaves the suite green over TypeScript that will not build — this exact thing happened in this repo, in Task 4 of the previous plan, where two test files building a complete `SnapshotRow` were missed and both checks came back green because the typecheck was not actually running. So:
+
+```bash
+grep -rln 'SnapshotRow' web/src internal/integrations
+pnpm typecheck    # FROM THE REPO ROOT, and read the exit code
+```
+
+`rowsEqual` (in `useSnapshot.ts`) must compare the new field, or a branch change alone will not re-render the row.
+
+**Step 1–4:** change the count first, watch the frontend suite go red, add the Go field, add the TypeScript field and the fixtures, watch it go green. Run `make test` **and** `pnpm typecheck`.
+
+**Step 5: Mutation testing**
+
+| Mutant | Killed by |
+| --- | --- |
+| Change the Go json tag to `"gitBranch"` | the contract test's name comparison, not its count |
+| Add the Go field with `json:"-"` | the count assertion at `:132` |
+| Add the TypeScript field but not the Go one | the count assertion, from the other side |
+| Drop `branch` from `rowsEqual` | a test that two rows differing only in `branch` are not equal. **Write it** — nothing else in the suite covers it, and its absence is how a branch change silently fails to repaint |
+| Change the count to `20` without the field | the tag-name comparison at `:133` |
+
+**Step 6: Commit**
+
+```bash
+git status
+git add internal/tmux/snapshot.go web/src/lib/useSnapshot.ts web/src/lib/useSnapshot.test.ts <the fixtures grep found>
+git commit -m "feat: the pane's branch crosses the wire"
+```
+
+---
+
+### Task 12: The git reader goroutine
 
 **Files:**
 - Modify: `internal/tmux/git.go`, `internal/tmux/poller.go`
 - Create: `internal/tmux/git_reader_test.go`
+
+**`Row.Branch` already exists** — Task 11 shipped it, empty, on the wire and in the TypeScript mirror. This task is the goroutine that fills it, and it changes no json tag, so the frontend contract test stays green throughout. If `Row.Branch` is not there when you start, Task 11 has not landed: stop and say so rather than adding the field here.
 
 **It does not run on the poll goroutine, and that is the entire design.** Every other read this daemon makes goes through `exec.CommandContext` and therefore has a deadline; `os.Stat` and `os.ReadFile` have **none**, and a `stat` on a wedged NFS or sshfs mount blocks uninterruptibly. The poll is the sidebar. The whole poll runs under one deadline (`poller.go:393-394`), so a wedged `stat` inline would eat the same budget as the captures — and then the sidebar.
 
@@ -1398,56 +1646,6 @@ git commit -m "feat: read branches on a goroutine of their own, one unit of work
 
 ---
 
-### Task 12: `Branch` on the wire
-
-**Files:**
-- Modify: `internal/tmux/snapshot.go`, `web/src/lib/useSnapshot.ts`, `web/src/lib/useSnapshot.test.ts`, and every TypeScript file that builds a complete `SnapshotRow`
-
-**`Row` gains one field, taking it from 19 json tags to 20:**
-
-```go
-	// Branch is the pane's git branch: "" when the path is not in a work tree,
-	// and "@<7-hex>" when HEAD is detached.
-	//
-	// Read off .git/HEAD from a goroutine of its own, never the poll's, so it
-	// is up to a poll interval stale in exactly the way Path is. One authority
-	// -- the filesystem -- and nothing about the agent enters it.
-	Branch string `json:"branch"`
-```
-
-**The contract test is designed to fail here and that is the point.** `web/src/lib/useSnapshot.test.ts:122` (*"uses the json names tmux.Row marshals"*) extracts `type Row struct` from `internal/tmux/snapshot.go` at `:123`, collects its json tags, and asserts `toHaveLength(19)` at **`:132`** against a **hand-written literal** — deliberately not `Object.keys(row()).length`, "because a count derived from the TypeScript side would agree with itself forever". **It becomes 20 at `:132` and stays a literal**, and the companion assertion at `:133` means the TypeScript `row()` fixture gains the field in the same change.
-
-**Find every fixture, and do not trust the test suite to find them for you.** vitest does not typecheck, so a fixture missing the new field leaves the suite green over TypeScript that will not build — this exact thing happened in this repo, in Task 4 of the previous plan, where two test files building a complete `SnapshotRow` were missed and both checks came back green because the typecheck was not actually running. So:
-
-```bash
-grep -rln 'SnapshotRow' web/src internal/integrations
-pnpm typecheck    # FROM THE REPO ROOT, and read the exit code
-```
-
-`rowsEqual` (in `useSnapshot.ts`) must compare the new field, or a branch change alone will not re-render the row.
-
-**Step 1–4:** change the count first, watch the frontend suite go red, add the Go field, add the TypeScript field and the fixtures, watch it go green. Run `make test` **and** `pnpm typecheck`.
-
-**Step 5: Mutation testing**
-
-| Mutant | Killed by |
-| --- | --- |
-| Change the Go json tag to `"gitBranch"` | the contract test's name comparison, not its count |
-| Add the Go field with `json:"-"` | the count assertion at `:132` |
-| Add the TypeScript field but not the Go one | the count assertion, from the other side |
-| Drop `branch` from `rowsEqual` | a test that two rows differing only in `branch` are not equal. **Write it** — nothing else in the suite covers it, and its absence is how a branch change silently fails to repaint |
-| Change the count to `20` without the field | the tag-name comparison at `:133` |
-
-**Step 6: Commit**
-
-```bash
-git status
-git add internal/tmux/snapshot.go web/src/lib/useSnapshot.ts web/src/lib/useSnapshot.test.ts <the fixtures grep found>
-git commit -m "feat: the pane's branch crosses the wire"
-```
-
----
-
 ### Task 13: The chip, and the width budget
 
 **Files:**
@@ -1546,8 +1744,10 @@ git commit -m "feat: the branch as its own chip, sharing a width budget and neve
 ### Task 14: `end-mode`
 
 **Files:**
-- Modify: `internal/front/ws.go`
+- Modify: `internal/front/ws.go`, `web/src/lib/transport.test.ts`
 - Create: `internal/front/endmode_integration_test.go` (or extend `internal/front/ws_test.go`)
+
+**This Go change reddens the frontend suite, and the one-line fix belongs in this commit.** `web/src/lib/transport.test.ts:194-196` (`it('emits only message types the Go control switch handles')`) reads `internal/front/ws.go` off disk, greps every `\n\tcase "…":` out of it, and asserts the set is **exactly** `{resize, select, copy-mode, where}`. Adding `case "end-mode":` makes that `toEqual` fail, so `make test` goes red on the frontend half the moment the Go half lands — and Task 15, which is where a reader would expect the transport's tests to move, is a separate commit. **Add `'end-mode'` to that expected set here**, in the same commit as the Go case. Leave the loop underneath it alone: it iterates the frames this test itself sends, and `transport.endMode()` does not exist until Task 15.
 
 **Copy mode does not swallow a reply on our path — it truncates it and runs the rest.** Measured on 3.7b through a real client PTY, with the pane in copy mode, typing `echo quit PARTIAL` and Enter: the `q` **cancelled copy mode**, and `uit PARTIAL` was delivered to the shell and executed.
 
@@ -1593,7 +1793,7 @@ Failing in both directions, and the second row is precisely the failure the guar
 **Step 1: Verify the six tmux behaviours above by running them. Do not assume them.** On your own socket, through `testutil`-style args (`-L <own socket> -f /dev/null`), never against the live server:
 
 ```bash
-S=/tmp/…your scratchpad…/sock          # your own scratchpad subdirectory
+S=endmode-$$                            # a socket NAME, unique to this run
 tmux -L "$S" -f /dev/null new-session -d -s t
 tmux -L "$S" -f /dev/null split-window -t t
 # note the two pane ids, make the SECOND one active, and drive every command at the FIRST
@@ -1601,6 +1801,8 @@ tmux -L "$S" -f /dev/null list-panes -t t -F '#{pane_id} #{pane_active} #{pane_m
 …
 tmux -L "$S" -f /dev/null kill-server
 ```
+
+> **`-L` takes a socket NAME, not a path, and this is the one place in the plan where getting that wrong is dangerous.** tmux puts the socket in `/tmp/tmux-$UID/<name>`, so `-L /tmp/…/sock` tries to create `/tmp/tmux-1001//tmp/…/sock` and fails with `error creating …`. The natural way out of a command that will not start is to drop the flag — and `tmux new-session` with no `-L` **is the owner's live server, with three coding agents in it**. So: a name (`endmode-$$`, or anything unique to you), or `-S <absolute path>` if you want a path, and **never** a run without one of the two. This snippet must not be "simplified"; `testutil.NewServer` gets this right for the same reason (`internal/tmux/testutil`, which builds a name and never a path).
 
 Record what each row printed in the commit message, exactly as Task 3 of the previous plan does for tmux. **Never `pkill`, never `killall`** — `kill-server` on your own socket is the only teardown.
 
@@ -1682,7 +1884,7 @@ func (h *TerminalHandler) endMode(ctx context.Context, pane string) error {
 
 ```bash
 git status
-git add internal/front/ws.go internal/front/endmode_integration_test.go
+git add internal/front/ws.go internal/front/endmode_integration_test.go web/src/lib/transport.test.ts
 git commit -m "feat: end-mode pops a pane's copy layer and nothing else"
 ```
 
@@ -1707,7 +1909,9 @@ One line of API and one pin. `ControlMessage` (`transport.ts:68-72`) gains `| { 
   }
 ```
 
-`transport.test.ts` already pins `wsControlMessage`'s field names against `internal/front/ws.go`; extend that pin to the new type — the wire contract for this batch is three changes and this is the one with a pinning test already in place.
+`transport.test.ts` already pins `wsControlMessage`'s **field names** against `internal/front/ws.go` (`it('emits only field names that wsControlMessage … decodes')`, `:153`); extend that pin to the new type — the wire contract for this batch is three changes and this is the one with a pinning test already in place.
+
+**The other pin in that file has already moved.** `it('emits only message types the Go control switch handles')` (`:193-196`) asserts the exact set of Go `case` strings, and Task 14 added `'end-mode'` to it in the same commit as the Go case, because leaving it would have left `make test` red between the two commits. What is left for this task is the loop under that assertion: add `transport.endMode('%3')` beside the existing `resize`/`select`/`copyMode`/`where` calls, so the type this transport actually emits is checked against the set and not merely listed in it.
 
 **Mutation testing:** spell the type `'endmode'` and watch the pin go red; drop `pane` from the message and watch it go red; send it as a `FRAME_DATA` frame and watch the frame-kind assertion go red. If any of those survives, the pin is checking the shape of your own object rather than the string on the wire.
 
@@ -1752,7 +1956,37 @@ git commit -m "test: without end-mode a reply into copy mode runs its own tail"
 
 **Files:**
 - Create: `web/src/components/ReplyBox.tsx`, `web/src/components/ReplyBox.test.tsx`
-- Modify: `web/src/App.tsx`
+- Modify: `web/src/App.tsx`, `web/src/components/Terminal.tsx`
+
+**The box has no path to the wire today, and the wrong one is the one in reach.** Read `TerminalHandle` (`Terminal.tsx:755-763`) before writing a line of this: it exposes `select`, `copyMode`, `focus` and `retry`, and **nothing that sends bytes and nothing that ends a mode**. There are two `write`s in this file and only one of them is the socket:
+
+| What | Where | What it does |
+| --- | --- | --- |
+| `TerminalSession.write(data)` | `Terminal.tsx:476` | the **wire** — a `FRAME_DATA` frame down the transport to the PTY |
+| `useTerminal().write` | `Terminal.tsx:798`, via `@wterm/react` | the **display** — paints characters into the local canvas and sends nothing |
+
+Reaching for the second is the plausible mistake and it is the worst available outcome: the reply appears in the terminal, character for character, looking exactly like it worked, and the pane never receives it. **`renderToStaticMarkup` cannot tell the two apart**, so no test in this task's own suite will catch it; only Task 16's integration test and a human looking at a pane would.
+
+So this task widens the handle, in `Terminal.tsx`, and that is why the file is in the list:
+
+```ts
+export interface TerminalHandle {
+  select(pane: string): boolean
+  copyMode(pane?: string): boolean
+  /**
+   * Write bytes to the attached pane's PTY. The reply box's only route to the
+   * wire: it is `TerminalSession.write`, which is the transport, and NOT
+   * `useTerminal().write`, which paints the local canvas and sends nothing.
+   */
+  send(bytes: string | Uint8Array): boolean
+  /** Pop the pane's copy-mode layer. See internal/front/ws.go's "end-mode". */
+  endMode(pane: string): boolean
+  focus(): void
+  retry(): void
+}
+```
+
+`send` forwards to `TerminalSession.write` (`:476`) and `endMode` to a new `TerminalSession.endMode(pane)`, which is three lines beside `select` (`:507`) and forwards to `Transport.endMode` from Task 15. Both go into the same `useImperativeHandle` that already publishes `select` and `copyMode`. `replyFrames`' output is then dispatched by walking the array and calling `endMode`/`send` per frame — one place, in `App.tsx` or in the box's own handler, and the ordering is the array's.
 
 **The box is always there**, one line high, at the foot of the terminal, and it **does not take focus on mount**. Three reasons, in the order they matter:
 
@@ -1873,7 +2107,13 @@ git commit -m "feat: a multi-line paste is bracketed, or refused with a reason"
 - Modify: `internal/tmux/manage.go`, `internal/front/manage.go`, `internal/front/server.go`, `web/src/lib/manage.ts`, `web/src/components/AppSidebar.tsx` (the row menu), `README.md`
 - Plus their tests
 
-**The list of past sessions is out of scope and this is the whole of item 5.** What ships is **resume, driven by the agent**: a "resume here" action that opens a tmux window in the pane's directory running the agent's own resume command. One `new-window -c <path>`, a verb `internal/tmux/manage.go` already has (`NewWindow`, `manage.go:83`), with the path resolved daemon-side from `Row.Path` exactly as `SplitPane` already does through `panePath` (`client.go:342`) and `checkDir` (`manage.go:377`). **Zero parsers, zero disk reads, zero drift** — and the "works for sessions that predate installing anything" property is preserved, because it is the agent's own history.
+**The list of past sessions is out of scope and this is the whole of item 5.** What ships is **resume, driven by the agent**: a "resume here" action that opens a tmux window in the pane's directory running the agent's own resume command. One `new-window -c <path>` **running a command**, with the path resolved daemon-side from `Row.Path` exactly as `SplitPane` already does through `panePath` (`client.go:342`) and `checkDir` (`manage.go:377`). **Zero parsers, zero disk reads, zero drift** — and the "works for sessions that predate installing anything" property is preserved, because it is the agent's own history.
+
+**`NewWindow` cannot do this and you must add a verb, not reuse one.** Read `internal/tmux/manage.go:83-105` first: `NewWindow(ctx, sessionID, name, fromPane)` builds `new-window -t <session> -P -F '#{window_id}'` plus an optional `-c <dir>` and an optional `-n <name>`, and **it never appends a shell-command argument**. It opens an empty shell, which is the dialog's meaning of "new window" and is exactly right for that caller. Widening it with a command parameter would put "run this string" on a verb four call sites already use for "open me a shell", so:
+
+- add a **separate** `ResumeAgent(ctx, sessionID, fromPane, agent string)` (or `NewWindowRunning`, name it as you like) beside `NewWindow`, sharing `panePath`/`checkDir`;
+- the command it appends is a **fixed table entry keyed by the agent name**, never a string from a request — that is the headline mutant below, and keeping the two verbs apart is what makes it structurally true rather than a rule somebody remembers;
+- say in `NewWindow`'s doc comment that it deliberately runs nothing, so the next reader does not add a parameter to it.
 
 **"Driven by the agent's own picker" is true for two of the three**, and the third changes what the control may promise:
 
@@ -1889,7 +2129,7 @@ git commit -m "feat: a multi-line paste is bracketed, or refused with a reason"
 
 **Step 2: Write the failing tests**
 
-- the resume command per agent comes from **one table**, in Go, beside the agent list `internal/report` already holds — one source, one test, the same reason `internal/report` exists;
+- the resume command per agent comes from **one table**, in Go, beside the agent list — which is `tmux.Agents` in **`internal/tmux/agent.go:11`**, not in `internal/report`. `internal/report` *consumes* it (`events.go:23`, `events_test.go:17` and `:240` check that package's rule keys against `tmux.Agents` at load) and does not own it. Put the resume table in `internal/tmux` beside `Agents` and `KnownAgent`, and check its key set against `tmux.Agents` at load exactly as `internal/report` does — one source, one test, the same reason `KnownAgent` exists;
 - a pane whose command is not a known agent has **no** resume action;
 - the window is created with `-c <the pane's path>`, and the path is resolved daemon-side and `stat`ed first (the existing `checkDir` rule), so a directory that has been removed fails before `new-window`;
 - **nothing is installed and no route writes executable code** — resume runs an agent already on the machine, through an existing verb behind existing middleware. Worth an assertion that the argv is a fixed table entry and never anything derived from a request body;
@@ -1957,7 +2197,16 @@ git commit -m "feat: resume an agent's own session history in a new window here"
 - **Open question 7** (Task 7): does the capture panel's copy-all work on iOS Safari, copying from memory inside the handler?
 - **Whether the capture panel's `<pre>` is long-pressable** on both platforms, and whether the dialog opens without raising the keyboard (the `onOpenAutoFocus` prevention).
 
-**Record what you could NOT establish as loudly as what you could.** A lead with no number stays a lead, and Tasks 22–24 must not write a constant for it. If the session cannot happen, **stop the phase here** — Tasks 21 and 25 do not depend on it, Tasks 22, 23 and 24 do.
+**Record what you could NOT establish as loudly as what you could.** A lead with no number stays a lead, and Tasks 22–24 must not write a constant for it. If the session cannot happen, **stop the phase here** — Tasks 21 and 25 do not depend on it, Tasks 22, 23 and 24 do. Task 23's step 0 is written to read this file and refuse rather than guess, so an absent number here is a stop and not a shrug.
+
+**And say plainly what stopping leaves, because "Phase F stops after Task 21" sounds smaller than it is.** Without this session, Phase F ships **Task 21 and Task 25 only**:
+
+- no viewport meta, no manifest, no app badge (Task 22);
+- no keyboard geometry at all (Task 23), so the reply box stays at the foot of `h-svh` — and `svh` does not shrink for a keyboard, which means **on iOS the box sits behind the soft keyboard the moment you focus it**. Task 21 keeps that from resizing the owner's terminal; it does nothing to make the box visible;
+- no safe-area insets and no overscroll containment (Task 24), so the box also sits under the home indicator and pull-to-refresh still costs a reconnect and a new throwaway tmux session;
+- and Phase G is gated on Phase F, so a numbered permission prompt still needs the soft keyboard — which is the case item 4b exists for.
+
+**That is an acceptable place to stop** — the desktop reply box, the capture panel, the branch, the wake and resume all ship, and every one of them is worth having on a laptop. It is written here so that stopping is a decision somebody made rather than a thing that quietly happened.
 
 **Commit**
 
@@ -1973,6 +2222,7 @@ git commit -m "docs: what a real iPhone and a real Android say about the nine le
 
 **Files:**
 - Modify: `web/src/components/Terminal.tsx`, `web/src/components/Terminal.test.tsx`, `web/src/App.tsx`
+- Create: `web/src/components/TerminalSuppress.dom.test.ts`
 
 **This is the task that protects somebody else's terminal, and it does not depend on Task 20.**
 
@@ -1981,6 +2231,18 @@ The terminal's size is a tmux **window** property shared with every client viewi
 **The load-bearing half is suppressing the resize path, not the layout.** With `interactive-widget=resizes-content` (Task 22) the *layout* viewport itself shrinks when the keyboard opens, so an element sized from the viewport shrinks whether or not anything is stacked above it. Laying the reply box **over** the terminal rather than above it is still right — it keeps the box out of the terminal's flow, so the box never takes height *from* the terminal as a sibling would — but it is the smaller half, and revision 1 claiming it was sufficient conflicted with its own lead 2.
 
 **The predicate, and why it is this one.** Suppress while **an app-owned text control has focus**. That needs no keyboard detection at all, it is exactly the interval the keyboard is open on a phone, and it therefore lands cleanly **before** Task 20's numbers exist. Task 23 may widen it to "or the keyboard-open custom property is set", and only if the measurement shows focus alone is insufficient — for instance if a device closes the keyboard while focus stays.
+
+**"An app-owned text control" has to be a definition, not a phrase.** Write it down and test it, because the two obvious readings differ and one of them suppresses forever:
+
+> A focused element that is an `input`, a `textarea`, or carries `[contenteditable]`, **and is not inside the terminal host element**. Nothing else counts — not a focused button, not the dialog container, not `<body>`.
+
+The terminal exclusion is the load-bearing half. wterm's own input surface is a focusable element inside the terminal host, and focusing the *terminal* is the one case where a resize is legitimate and expected; a predicate that caught it would suppress the resize on every ordinary click into the terminal and never lift.
+
+**Track it with `focusin`/`focusout` on `document`**, not with per-element handlers: the reply box, the capture panel's controls and anything added later are all covered without registering anything, and `focusin` bubbles where `focus` does not. Register in `start()` and remove in `stop()` with the same stored references, exactly as Task 3 does for the wake — **and assert that in `web/src/components/TerminalSuppress.dom.test.ts`**, a second `// @vitest-environment jsdom` file. It is a second file rather than an addition to `TerminalWake.dom.test.ts` because the two tasks land separately and a shared file makes each one's diff include the other's fixtures; both are eight lines of harness. The predicate itself — given an element, does it suppress — is a **pure exported function**, tested as a table in `Terminal.test.tsx` under the existing node environment with plain objects standing in for elements. The jsdom file tests only that the listeners are registered and removed.
+
+**And decide what a reconnect landing mid-suppression sends, because `#opened()` does not go through `noteResize`.** `#opened()` (`Terminal.tsx:567-578`) sets `#sentCols = 0` and calls `#sendResize()` **directly** — that reset is deliberate, it is what makes a new socket re-send a size it had already sent on the old one. So a socket that reconnects while a phone keyboard is open either sends the keyboard-shrunk size, dragging the owner's terminal to it (the whole failure this task exists to prevent, reached through the one path the task did not cover), or is suppressed and leaves the attach at the server's initial 80x24, which is worse than either.
+
+Neither. **`#sendResize()` sends the last size in force before suppression began**, and the current size goes out once when suppression lifts. That means `TerminalSession` keeps two numbers: the size wterm last reported (`#cols`/`#rows`, which keep updating under suppression) and the size that was in force when suppression began — and `#sendResize()` picks the second while suppressed. Add a test: suppress, resize twice, reconnect, assert the attach carried the **pre-suppression** size; then lift, and assert one frame carrying the current one.
 
 `TerminalSession.noteResize` (`Terminal.tsx:488`) is where the suppression goes, not in the `ResizeObserver`: the observer keeps observing and the class keeps its own record of the size wterm reported, so that **when suppression lifts, the current size is sent once** rather than the pre-keyboard size being restored from a stale field.
 
@@ -2002,6 +2264,26 @@ The terminal's size is a tmux **window** property shared with every client viewi
   it('sends nothing on lift when the size did not change while suppressed', () => {
     // `#sentCols`/`#sentRows` already do this and it must keep working.
   })
+
+  it('a reconnect during suppression attaches at the pre-suppression size', () => {
+    // `#opened()` calls `#sendResize()` directly and resets `#sentCols` to 0,
+    // so it does not pass through `noteResize` and the suppression there does
+    // not cover it. Resize to a known size, suppress, resize twice smaller,
+    // emitClose, let the backoff reconnect, and assert the resize frame on the
+    // new socket carries the FIRST size -- not the shrunk one (which would
+    // drag the owner's terminal) and not nothing (which would leave the attach
+    // at the server's 80x24).
+  })
+
+  it('suppresses on a focused input outside the terminal, and not on one inside it', () => {
+    // The predicate as a table, under the node environment, with plain objects
+    // for elements. The terminal-host row is the one that matters: wterm's own
+    // input is a focusable element inside it, and a predicate that caught it
+    // would suppress every ordinary click into the terminal and never lift.
+    // Rows: input outside -> suppress; textarea outside -> suppress;
+    // [contenteditable] outside -> suppress; input INSIDE the terminal host ->
+    // do not; a button -> do not; body -> do not; null -> do not.
+  })
 ```
 
 **Steps 2–4:** run, implement, run.
@@ -2010,7 +2292,12 @@ The terminal's size is a tmux **window** property shared with every client viewi
 
 | Mutant | Killed by |
 | --- | --- |
-| Suppress the `ResizeObserver` instead of the send | `sends the CURRENT size once when suppression lifts` — the class never learned the new size, so it sends nothing or the old one. **The headline mutant** |
+| `noteResize` returns early while suppressed, instead of recording the size and skipping only the send | `sends the CURRENT size once when suppression lifts` — the class never learned the new size, so on lift it sends the old one or nothing. **The headline mutant**, and it is stated at the session level deliberately: the `ResizeObserver` version of this mutation is invisible to the node harness, where there is no `ResizeObserver` and every test calls `noteResize` directly. Mutating the observer would be a mutant no test in this file *can* kill, which is not a survivor worth recording — it is the wrong mutant |
+| Suppress `#opened()`'s `#sendResize()` as well | `a reconnect during suppression attaches at the pre-suppression size` — the attach stays at 80x24 |
+| Let `#opened()` send the current (shrunk) size | the same test — and this is the owner's terminal being dragged to a phone's keyboard-open size, which is the failure this whole task exists to prevent |
+| Predicate matches any focused element | the terminal-host row and the button row |
+| Predicate drops the terminal-host exclusion | the terminal-host row — every click into the terminal suppresses, permanently |
+| `removeEventListener` with a fresh arrow in `stop()` | the jsdom file's identity assertion |
 | Queue the suppressed resizes and flush them all | the same test's "exactly one frame" |
 | Drop them and send nothing on lift | the same test |
 | Invert the predicate | `sends no resize while suppressed` |
@@ -2020,7 +2307,7 @@ The terminal's size is a tmux **window** property shared with every client viewi
 
 ```bash
 git status
-git add web/src/components/Terminal.tsx web/src/components/Terminal.test.tsx web/src/App.tsx
+git add web/src/components/Terminal.tsx web/src/components/Terminal.test.tsx web/src/components/TerminalSuppress.dom.test.ts web/src/App.tsx
 git commit -m "feat: a focused text control suppresses the resize, so a phone keyboard cannot resize the owner's terminal"
 ```
 
@@ -2057,13 +2344,13 @@ So: keep the title and the favicon for the tab case, add `setAppBadge` for the i
 - with `navigator.setAppBadge` absent, nothing throws and the title and favicon still update — **this is the assertion that matters**, because the feature detection is the whole safety of it;
 - a rejected `setAppBadge` promise (iOS with permission refused) is swallowed and does not break the title update.
 
-**Steps 2–4:** run, implement, run. Then **look at it**: `pnpm --dir web build` and load the built page, confirm the manifest parses in devtools and the icons resolve.
+**Steps 2–4:** run, implement, run. Then **look at it**: `pnpm --dir web build` and load the built page, confirm the manifest parses in devtools and the icons resolve — **and check the response's `Content-Type`.** `.webmanifest` is not in Go's built-in extension table (`mime.TypeByExtension` returns empty for it on a machine with no system mime database entry), so this daemon may serve it as `application/octet-stream` or with no type at all, and a browser that will not accept the type ignores the manifest **silently**: no error, no install prompt, and a page that looks entirely correct. Curl the built path and read the header. If it is wrong, the fix is one entry wherever the asset handler resolves types — and it belongs in this commit, because nothing else in the plan will ever notice.
 
 **Step 5: Mutation testing**
 
 | Mutant | Killed by |
 | --- | --- |
-| Branch on `matchMedia('(display-mode: standalone)')` instead of feature-detecting | the absent-API test, if you write it as "the API is absent" rather than "we are in a tab". **The headline mutant**: display mode is not the question, the API's existence is |
+| Branch on `matchMedia('(display-mode: standalone)')` instead of feature-detecting | the absent-API test, if you write it as "the API is absent" rather than "we are in a tab". **The headline mutant**: display mode is not the question, the API's existence is. **Stub `globalThis.matchMedia` in the test before running it** — `tabBadge`'s suite is under `environment: 'node'`, where `matchMedia` is undefined, so the mutant throws a `TypeError` and the suite goes red for a reason that has nothing to do with the assertion. That is the **bogus-kill** shape from the table at the top of this plan: a kill counts only when the *named* test fails on its *named* assertion. Stub it to return `{ matches: false }`, confirm the mutant then runs and the absent-API assertion is what fails, and only then score it |
 | `setAppBadge(0)` instead of `clearAppBadge()` | the zero-count test |
 | Compute the app-badge count separately from the title's | the relationship assertion |
 | Drop the `.catch()` on the promise | the rejected-promise test |
@@ -2087,6 +2374,16 @@ git commit -m "feat: an installable app that badges its own icon, and a viewport
 - Modify: `web/src/App.tsx`, `web/src/index.css`
 
 **Gated on Task 20. No constant from leads 1–6 is written here without a number from that session.**
+
+**Step 0, before anything else, and it is a stop condition.** As written, the rest of this task hands you the borrowed numbers — `0.05`, `120`, `80`, `150 ms` — in the same breath as the rule that none of them may be written without a Task 20 measurement. That is a gate only the dispatcher can enforce, and a subagent reading straight through will implement the numbers in front of it. So make it checkable:
+
+```bash
+ls docs/measurements/*-phone.md
+```
+
+Open what that finds and look for a recorded number for **lead 3** (the pinch threshold), **lead 4** (the two hysteresis thresholds) and **lead 6** (the close debounce). If any of the three has no number — or the file does not exist, or it records the lead as "could not establish", which Task 20 is explicitly instructed to write as loudly as a result — **stop and report which ones are missing.** Do not fall back to the numbers below; do not "use them provisionally"; do not pick something conservative. They are another project's constants on another project's layout and device matrix, and shipping them green on a desktop Chromium is the failure mode this plan opens by describing.
+
+The numbers appearing below are the *leads*, kept so you can see what the measurement is a measurement **of**. Every one of them is replaced by what the file says.
 
 **Custom properties, never React state, and the reason is not rendering.** mtmux's reason is that the terminal re-renders underneath. **In this app the reason is sharper.** A React state change re-renders `App`, which changes the terminal element's box, which fires `Terminal`'s `ResizeObserver`, which sends a debounced resize — and a resize is what makes this tab the client that acted most recently, which takes the shared tmux window's size for every client watching it, **including the owner's local terminal** (v1, measured). So keyboard geometry in React state does not merely re-render; **it can resize a terminal in another room.** A custom property on the root element changes layout without a React render and without touching the terminal's box.
 
@@ -2148,7 +2445,10 @@ git commit -m "feat: keyboard geometry as custom properties, from measured thres
 ### Task 24: The gesture and safe-area layer
 
 **Files:**
-- Modify: `web/src/index.css`, `web/src/App.tsx`, `web/src/components/ui/sidebar.tsx` (or a wrapper), `web/src/components/CapturePanel.tsx`
+- Modify: `web/src/index.css`, `web/src/App.tsx`, `web/src/components/CapturePanel.tsx`, and `web/src/components/ui/sidebar.tsx` **or** a wrapper around it — decide which and say so in the commit; `ui/` is generated shadcn and this repo's convention is to wrap rather than edit it, so prefer the wrapper and only touch `ui/sidebar.tsx` if `overscroll-behavior` cannot reach the sheet's scroll container from outside
+- Create: `e2e/touch.spec.ts` (the 390×844 tap test below; `e2e/` has ten specs today and none of them is this one), and the CSS/prohibition test file
+
+The commit block at the foot of this task stages both of those. **Stage exactly what you changed** — if you took the wrapper route, `ui/sidebar.tsx` is not in the commit; if the tap test told you nothing worth keeping, say so and do not commit an empty spec.
 
 Three rules, and the third is a prohibition:
 
@@ -2161,16 +2461,16 @@ And **a tap must never be claimed by the gesture layer, and a claimed gesture's 
 **Test story:** most of this is CSS, which vitest cannot see and Playwright can only partly see. Be honest about it:
 
 - assert the CSS rules exist by reading `web/src/index.css` from disk and matching the selectors — a weak test, but it stops a silent deletion;
-- assert **`touch-action: none` appears nowhere** in the codebase on `body`, `html` or `[data-slot="sidebar-inset"]`. That is a *prohibition* test and it is the strongest one available here;
+- assert **`touch-action: none` appears nowhere** in the codebase on `body`, `html` or `[data-slot="sidebar-inset"]`. That is a *prohibition* test and it is the strongest one available here — **but a grep of `index.css` alone passes trivially and proves nothing**, because nothing in `index.css` sets `touch-action` at all today, and the way this project would actually set it is Tailwind's **`touch-none` utility in a TSX file**. So the test greps both: the CSS for a `touch-action` declaration under those selectors, **and** the TSX for a `touch-none` class on `body`, on the `SidebarInset` element, or on the terminal host and any wrapper above it. `web/src/components/ui/scroll-area.tsx:39` already carries `touch-none` on the scrollbar thumb — a leaf element, which is exactly the legitimate use — so it doubles as the non-vacuity fixture the mutation step asks for: the prohibition must pass with that line present and fail when the same class is moved onto an ancestor;
 - one Playwright test at 390×844 that a tap on a sidebar row selects that pane and nothing else receives a click.
 
-**Mutation testing:** add `touch-action: none` to `body` and watch the prohibition test go red; delete the `overscroll-behavior` rule and watch the CSS-presence test go red; **and then check the prohibition test is not vacuous** by asserting it also passes on a file that legitimately sets `touch-action: none` on a leaf element.
+**Mutation testing:** add `touch-action: none` to `body` in `index.css` and watch the prohibition test go red; **then add `touch-none` to the `SidebarInset` element in `App.tsx` and watch it go red again** — that is the mutant a CSS-only grep does not see, and it is the one this codebase would actually produce, since every other spacing and layout decision here is a Tailwind class; delete the `overscroll-behavior` rule and watch the CSS-presence test go red; **and then check the prohibition test is not vacuous** by confirming it still passes with `ui/scroll-area.tsx:39`'s `touch-none` in place, which is a legitimate leaf-element use.
 
 **Commit**
 
 ```bash
 git status
-git add web/src/index.css web/src/App.tsx web/src/components/CapturePanel.tsx e2e/touch.spec.ts
+git add web/src/index.css web/src/App.tsx web/src/components/CapturePanel.tsx e2e/touch.spec.ts <the prohibition test> <the sidebar wrapper, or ui/sidebar.tsx if you edited it>
 git commit -m "feat: contain the overscroll, respect the safe area, and never claim touch above the terminal"
 ```
 

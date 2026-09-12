@@ -36,6 +36,16 @@ type Poller struct {
 	// already in force can only be replaced by a NEWER one, so there is no
 	// value a test could write to a fixture that would make it stale instead.
 	nowFn func() time.Time
+	// newTicker is the poll loop's ticker, returning its channel and the
+	// function that stops it. Beside nowFn, and unexported for the same reason:
+	// the interval is the caller's business, the machinery behind it is not.
+	//
+	// The tests drive the tick rather than wait for one. A loop test that waits
+	// cannot say anything an interval cannot take back -- "no poll happened
+	// after cancel" is only ever "none yet" -- and at the millisecond intervals
+	// such a test needs to stay fast, "yet" expires while it is still running.
+	// See TestPollerStopsOnContextCancel.
+	newTicker func(time.Duration) (<-chan time.Time, func())
 
 	// The poller's second, narrower job: for panes running a known agent, and
 	// only while a browser is holding a terminal socket, each poll also
@@ -116,7 +126,7 @@ func NewPollerWith(o Options) *Poller {
 			return rows, nil, err
 		}
 	}
-	p := &Poller{interval: o.Interval, fn: fn, startFn: o.ServerStart, nowFn: time.Now}
+	p := &Poller{interval: o.Interval, fn: fn, startFn: o.ServerStart, nowFn: time.Now, newTicker: realTicker}
 	if o.Capture != nil {
 		p.capture, p.connected = o.Capture, o.Connected
 		// Built here rather than taken from the caller: it is the poll
@@ -141,18 +151,33 @@ func NewPoller(interval time.Duration, c *Client) *Poller {
 	return NewPollerWith(Options{Interval: interval, Snapshot: c.Snapshot, ServerStart: c.ServerStart})
 }
 
+// realTicker is what every poller outside a test polls on.
+func realTicker(d time.Duration) (<-chan time.Time, func()) {
+	t := time.NewTicker(d)
+	return t.C, t.Stop
+}
+
 // Start polls once synchronously -- so the first tab to connect does not see an
 // empty sidebar -- then keeps polling until ctx is cancelled.
+//
+// The ticker is built here rather than inside the goroutine so that the
+// interval starts running when Start returns, not whenever the scheduler gets
+// round to the goroutine.
+//
+// Cancellation is not instant and cannot be: a tick already in the channel when
+// ctx is cancelled leaves the select with two ready cases, and Go picks between
+// them at random. That costs at most one more poll -- the ticker is stopped on
+// the way out, so no further tick can arrive to be picked.
 func (p *Poller) Start(ctx context.Context) {
 	p.refresh(ctx)
+	tick, stop := p.newTicker(p.interval)
 	go func() {
-		t := time.NewTicker(p.interval)
-		defer t.Stop()
+		defer stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-t.C:
+			case <-tick:
 				p.refresh(ctx)
 			}
 		}

@@ -373,9 +373,20 @@ func TestParserAloneSurvivesARawPathFromRealTmux(t *testing.T) {
 // machine it runs on.
 func TestSnapshotHostilePaneDirectoryCannotRemoveAPane(t *testing.T) {
 	srv := testutil.NewServer(t)
-	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
-	srv.Run(t, "new-window", "-t", "work", "-n", "api")
-	srv.Run(t, "split-window", "-t", "work:api")
+	// Named windows running `cat`, not the default shell, because this test
+	// compares whole rows against a baseline and a fresh tmux window is not the
+	// row it will be a second later. Measured on 3.7b: a window created with no
+	// -n is called "tmux" for ~500ms before automatic-rename makes it "zsh", and
+	// pane_current_command reads "tmux", then the shell, then briefly whatever
+	// the developer's rc forks -- "bash" here -- before settling. settledRows
+	// only asks for two identical snapshots 20ms apart, so the baseline lands on
+	// a plateau inside that, and every later comparison fails on a field this
+	// test is not about. An explicit -n turns automatic-rename off for the
+	// window, and a command of our own keeps the machine's login shell, and its
+	// rc, out of the fixture entirely.
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24", "-n", "shell", "cat")
+	srv.Run(t, "new-window", "-t", "work", "-n", "api", "cat")
+	srv.Run(t, "split-window", "-t", "work:api", "cat")
 	// A neighbour with a label of its own: a fix that let one pane's fields
 	// leak into the next record has to fail here.
 	srv.Run(t, "set", "-p", "-t", "work:api.1", LabelOption, "neighbour")

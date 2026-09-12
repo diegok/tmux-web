@@ -132,24 +132,3 @@ func TestPollerKeepsLastGoodSnapshotOnError(t *testing.T) {
 		return p.Err() == nil && len(rows) == 1 && rows[0].PaneID == "%9"
 	}, "the poller never recovered after a transient failure")
 }
-
-// Cancelling the context is the only way to stop the ticker. If it does not,
-// every daemon that ever built a Poller keeps forking tmux forever.
-func TestPollerStopsOnContextCancel(t *testing.T) {
-	var calls int32
-	p := tmux.NewPollerFunc(time.Millisecond, func(context.Context) ([]tmux.Row, error) {
-		atomic.AddInt32(&calls, 1)
-		return nil, nil
-	})
-	ctx, cancel := context.WithCancel(context.Background())
-	p.Start(ctx)
-	waitFor(t, 3*time.Second, func() bool { return atomic.LoadInt32(&calls) > 3 }, "the ticker never fired")
-
-	cancel()
-	// One poll may already be in flight when cancel lands, hence the +1.
-	settled := atomic.LoadInt32(&calls) + 1
-	time.Sleep(50 * time.Millisecond) // ~50 intervals
-	if n := atomic.LoadInt32(&calls); n > settled {
-		t.Fatalf("polls went from %d to %d after cancel -- the ticker outlives its context", settled, n)
-	}
-}

@@ -83,6 +83,136 @@ func TestRefreshWithoutAServerGenerationReader(t *testing.T) {
 	}
 }
 
+// --- the poll loop -----------------------------------------------------------
+//
+// These drive the ticker instead of waiting on one, which is why they are
+// internal: newTicker is the seam, and like nowFn it is deliberately not in
+// Options, because no caller outside this package has a reason to move the
+// poller's clock.
+//
+// The version of this that waited on a real 1ms ticker was flaky, and not for
+// want of a wider margin. Once a poll outlasts the interval -- which is what a
+// loaded machine does to a 1ms ticker -- a tick is always waiting in the
+// channel, so the select at the top of the loop finds BOTH ctx.Done and a tick
+// ready and Go picks between them at random. The loop then keeps servicing
+// ticks after cancel, geometrically often: measured with a 1.2ms poll, 47% of
+// runs took at least two more polls and one took ten. No allowance short of
+// "any number" survives that, and every allowance that does tests nothing.
+
+// pollLoopFixture is a poller whose ticks the test sends by hand.
+//
+// The tick channel is the handshake: a send on an unbuffered channel completes
+// only once the loop has received it, so "the loop is running" is an answer
+// rather than an interval to wait out. polled is the other half, one value per
+// poll. It is buffered so that a poller that polls when it should not fails the
+// assertion below instead of deadlocking on a channel nobody is draining.
+type pollLoopFixture struct {
+	tick    chan time.Time
+	polled  chan struct{}
+	stopped chan struct{} // closed by the loop's deferred stop, i.e. on its exit
+	p       *Poller
+}
+
+func newPollLoopFixture(t *testing.T, tick chan time.Time) *pollLoopFixture {
+	t.Helper()
+	f := &pollLoopFixture{tick: tick, polled: make(chan struct{}, 8), stopped: make(chan struct{})}
+	f.p = NewPollerFunc(time.Hour, func(context.Context) ([]Row, error) {
+		f.polled <- struct{}{}
+		return nil, nil
+	})
+	f.p.newTicker = func(time.Duration) (<-chan time.Time, func()) {
+		return f.tick, func() { close(f.stopped) }
+	}
+	return f
+}
+
+// The timeouts below are deadlock guards, not waits: on the passing path every
+// one of them returns as soon as the other goroutine gets scheduled. A test
+// that is right never spends them, so they can be generous without being slow.
+const pollLoopGuard = 10 * time.Second
+
+func (f *pollLoopFixture) sendTick(t *testing.T, what string) {
+	t.Helper()
+	select {
+	case f.tick <- time.Now():
+	case <-time.After(pollLoopGuard):
+		t.Fatalf("the poll loop never took a tick: %s", what)
+	}
+}
+
+func (f *pollLoopFixture) awaitPoll(t *testing.T, what string) {
+	t.Helper()
+	select {
+	case <-f.polled:
+	case <-time.After(pollLoopGuard):
+		t.Fatal(what)
+	}
+}
+
+// Cancelling the context is the only way to stop the ticker. If it does not,
+// every daemon that ever built a Poller keeps forking tmux forever.
+func TestPollerStopsOnContextCancel(t *testing.T) {
+	f := newPollLoopFixture(t, make(chan time.Time))
+	ctx, cancel := context.WithCancel(context.Background())
+	f.p.Start(ctx)
+	f.awaitPoll(t, "Start's initial poll never ran")
+
+	// Ticks must reach the poll first, or "no polls after cancel" would be
+	// satisfied by a poller that never polls at all.
+	for i := 0; i < 3; i++ {
+		f.sendTick(t, "before cancel")
+		f.awaitPoll(t, "a tick before cancel produced no poll")
+	}
+
+	cancel()
+
+	// The loop must RETURN, which is what stops the ticker -- checked by the
+	// exit itself rather than by watching a counter sit still, so there is no
+	// duration whose passing is the evidence. A loop that does not select on
+	// ctx.Done parks on the tick channel forever and nothing closes this.
+	select {
+	case <-f.stopped:
+	case <-time.After(pollLoopGuard):
+		t.Fatal("the poll loop never returned after cancel -- the ticker outlives its context")
+	}
+
+	// Returned, so there is nobody left to receive: this send has to fail. It
+	// is a non-blocking send precisely because the loop is already known to be
+	// gone -- waiting on it would be back to timing the absence of an event.
+	select {
+	case f.tick <- time.Now():
+		t.Fatal("something is still taking ticks after cancel")
+	default:
+	}
+	if n := len(f.polled); n != 0 {
+		t.Fatalf("%d polls ran after cancel", n)
+	}
+}
+
+// The tick already waiting in the channel when cancel lands. select picks
+// between two ready cases at random, so the loop may well serve that tick --
+// but it must serve at most that one and then go, and it must go without
+// another tick to wake it. This is the case the old timing-based version was
+// trying to express with a "+1" allowance it could not enforce.
+func TestPollerStopsWithATickAlreadyPending(t *testing.T) {
+	f := newPollLoopFixture(t, make(chan time.Time, 1))
+	ctx, cancel := context.WithCancel(context.Background())
+	f.p.Start(ctx)
+	f.awaitPoll(t, "Start's initial poll never ran")
+
+	f.tick <- time.Now() // buffered: in flight, not yet received
+	cancel()
+
+	select {
+	case <-f.stopped:
+	case <-time.After(pollLoopGuard):
+		t.Fatal("a tick in flight kept the poll loop alive past cancel")
+	}
+	if n := len(f.polled); n > 1 {
+		t.Fatalf("%d polls after cancel with one tick in flight, want at most 1", n)
+	}
+}
+
 // --- agent classification ---------------------------------------------------
 //
 // These drive refresh directly rather than Start. Classification spans polls --

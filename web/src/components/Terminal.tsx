@@ -457,11 +457,16 @@ export class TerminalSession {
   #resizeTimer: ReturnType<typeof setTimeout> | null = null
   #retryTimer: ReturnType<typeof setTimeout> | null = null
   /**
-   * The wake probe's answer deadline. Declared here, and cleared by
-   * `#discard()`, so that the discard is whole in the commit that introduces
-   * it; only the probe (Task 4) ever arms it, and it owns the rest of this
-   * field's lifecycle -- `#clearTimers()` and `#closed()` -- because nothing
-   * here can arm it and so nothing here can leak it.
+   * The wake probe's answer deadline, and its in-flight flag: non-null means a
+   * `where` is outstanding on a socket we are not sure is alive.
+   *
+   * Cleared on all four paths that can end the wait -- an answer
+   * (`#frameArrived`), the timeout itself, `#discard()`, and the two teardowns
+   * (`#clearTimers()` and `#closed()`). The teardowns matter as much as the
+   * rest: this timer calls `#discard()`, which calls `#connect()`, so one left
+   * armed past a `stop()` opens a socket and a throwaway tmux session on a
+   * session the user closed, and one left armed past a close discards the
+   * socket the backoff went on to open.
    */
   #wakeProbe: ReturnType<typeof setTimeout> | null = null
   #stopped = false
@@ -666,7 +671,57 @@ export class TerminalSession {
       return
     }
 
-    // (b) is Task 4.
+    // (b) The socket says it is open. It may be lying, and nothing else in this
+    // app will ever find out: no close event fired, so `#closed` never ran, so
+    // there is no backoff timer, so there is nothing pending that could
+    // discover it. This is "I opened my phone and the terminal was frozen and
+    // stayed frozen".
+    //
+    // Gated on `open` explicitly, and not on "not connecting". `state` returns
+    // 'closed' for a socket the CALLER closed -- ahead of any readyState test
+    // -- as well as for one that is CLOSING or CLOSED, and probing any of those
+    // sends frames into a socket that is going away and then arms a timer that
+    // would discard whatever replaced it.
+    if (this.#transport.state !== 'open') return
+    // Single-flight, the same shape as `#checkGone()`'s `#probing`: a bfcache
+    // restore can fire `pageshow` and `visibilitychange` both, and two probes
+    // means two timers, of which the second is an orphan that outlives its
+    // answer.
+    if (this.#wakeProbe !== null) return
+    if (this.#now() - this.#transport.lastRecvAt <= LIVENESS_SLACK_MS) return
+
+    // Exactly what `#opened` does, in exactly that order. The select is what
+    // makes `where`'s answer be about *this tab* rather than about the shared
+    // window's active pane, which the owner may have moved while the phone
+    // slept -- and an adopted answer feeds `#pane`, which feeds `useSeenPanes`,
+    // which would clear a finish badge on a pane nobody read. Discarding the
+    // answer instead would leave the two wake paths ending somewhere different:
+    // the terminal on the owner's pane, the sidebar naming this tab's.
+    //
+    // It costs two tmux forks, not the three the design priced it at:
+    // `Client.SelectPane` sends `list-panes ; select-window ; select-pane` as
+    // one `;`-joined invocation and returns as soon as the window-id hint it
+    // was given matches what the read reported, and `CurrentPane` is the
+    // second. It rises to three when that hint is stale -- a corrective second
+    // select -- or absent, where the read and the select are separate runs.
+    // And it pulls the owner's active pane back to this tab's, which is v1's
+    // already-accepted shared-active-pane cost reached through a new occasion.
+    // Both are the price of the two wake paths ending in the same state, and
+    // the `lastRecvAt` gate above is what keeps them off the common case of a
+    // tab hidden for a moment.
+    if (this.#pane) this.#transport.select(this.#pane)
+    this.#awaitingWhere = this.#transport.where()
+    this.#wakeProbe = setTimeout(() => {
+      this.#wakeProbe = null
+      this.#discard()
+    }, PROBE_TIMEOUT_MS)
+  }
+
+  /** Any inbound frame answers the probe: the question was "is anyone there". */
+  #frameArrived(): void {
+    if (this.#wakeProbe === null) return
+    clearTimeout(this.#wakeProbe)
+    this.#wakeProbe = null
   }
 
   /**
@@ -678,6 +733,9 @@ export class TerminalSession {
    * somehow still arrives fails its `transport !== this.#transport` check.
    */
   #discard(): void {
+    // Redundant with `#clearTimers()` below, and kept: this runs before the
+    // transport is detached, so the ordering is self-evident here and a later
+    // edit that moves the `#clearTimers()` call cannot silently re-arm the leak.
     if (this.#wakeProbe) {
       clearTimeout(this.#wakeProbe)
       this.#wakeProbe = null
@@ -698,10 +756,14 @@ export class TerminalSession {
       url: this.#opts.url,
       now: this.#now,
       onData: (bytes) => {
-        if (transport === this.#transport) this.#opts.onData(bytes)
+        if (transport !== this.#transport) return
+        this.#frameArrived()
+        this.#opts.onData(bytes)
       },
       onControl: (message) => {
-        if (transport === this.#transport) this.#landed(message)
+        if (transport !== this.#transport) return
+        this.#frameArrived()
+        this.#landed(message)
       },
       onOpen: () => this.#opened(transport),
       onClose: (event) => this.#closed(transport, event),
@@ -781,6 +843,13 @@ export class TerminalSession {
     if (this.#resizeTimer) {
       clearTimeout(this.#resizeTimer)
       this.#resizeTimer = null
+    }
+    // This path does not go through `#clearTimers()`, and a probe that survived
+    // it would fire after the backoff had already opened a *new* socket and
+    // discard that one.
+    if (this.#wakeProbe) {
+      clearTimeout(this.#wakeProbe)
+      this.#wakeProbe = null
     }
 
     if (!shouldReconnect(event)) {
@@ -873,8 +942,14 @@ export class TerminalSession {
   #clearTimers(): void {
     if (this.#resizeTimer) clearTimeout(this.#resizeTimer)
     if (this.#retryTimer) clearTimeout(this.#retryTimer)
+    // The wake probe is a timer like the other two, and `stop()` is the path
+    // that proves it: without this, a stop during a probe fires `#discard()`
+    // on a stopped session, which calls `#connect()` -- a socket, an attach
+    // and a throwaway tmux session that nothing is left alive to close.
+    if (this.#wakeProbe) clearTimeout(this.#wakeProbe)
     this.#resizeTimer = null
     this.#retryTimer = null
+    this.#wakeProbe = null
   }
 
   #readPane(): string | null {

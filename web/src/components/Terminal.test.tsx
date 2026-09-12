@@ -813,6 +813,37 @@ describe('where am I', () => {
     serverControl(ws, { type: 'pane', pane: '%6' })
     expect(term.status.pane).toBe('%5')
   })
+
+  it('adopts a second answer, because the probe asked a second question', () => {
+    let now = 1_000
+    const { term } = makeSession({ storage: memoryStorage(), now: () => now })
+    term.start()
+    const ws = MockWebSocket.last
+    ws.open()
+
+    // Question one, asked by `#opened`.
+    serverControl(ws, { type: 'pane', pane: '%5' })
+    expect(term.status.pane).toBe('%5')
+
+    // Question two, asked by the wake probe on the *same socket*. This is what
+    // makes the invariant above honest: it is one answer per outstanding
+    // question, and until the probe existed no socket could ask twice, so the
+    // test above carried a name only half of which was reachable.
+    now += 45_001
+    term.wake()
+    expect(controls(ws).map((f) => f.json)).toEqual([
+      { type: 'where' },
+      { type: 'select', pane: '%5' },
+      { type: 'where' },
+    ])
+
+    serverControl(ws, { type: 'pane', pane: '%9' })
+    expect(term.status.pane).toBe('%9')
+
+    // And the third answer is unasked-for again, so it is dropped again.
+    serverControl(ws, { type: 'pane', pane: '%3' })
+    expect(term.status.pane).toBe('%9')
+  })
 })
 
 describe('reconnect', () => {
@@ -1004,6 +1035,233 @@ describe('wake', () => {
     // operator mutant can be caught.
     expect(first.closedWith).toBeNull()
     expect(MockWebSocket.instances).toHaveLength(1)
+  })
+
+
+  /**
+   * A socket that is OPEN, has answered `where` with `%5`, and has then been
+   * silent for longer than the slack: the exact state case (b) exists for.
+   *
+   * The silence is a literal, for the reason at the top of this block, and
+   * `before` is the frame count at the moment of the wake so that every
+   * assertion below is about what the *probe* sent and not about what opening
+   * the socket sent.
+   */
+  function staleOpenSocket() {
+    let now = 1_000
+    const session = makeSession({ storage: memoryStorage(), now: () => now })
+    session.term.start()
+    const ws = MockWebSocket.last
+    ws.open()
+    serverControl(ws, { type: 'pane', pane: '%5' })
+    const before = controls(ws).length
+    const timersBefore = vi.getTimerCount()
+    now += 45_001
+    return { term: session.term, ws, before, timersBefore }
+  }
+
+  it('case (b): a quiet OPEN socket is probed with select-then-where, in that order', () => {
+    const { term, ws, before } = staleOpenSocket()
+
+    term.wake()
+
+    // Order is the assertion, not just presence. A refactor that drops the
+    // select "because the answer is what we wanted anyway" puts the
+    // badge-clearing bug straight back, and only the ordering catches it.
+    expect(controls(ws).slice(before).map((f) => f.json)).toEqual([
+      { type: 'select', pane: '%5' },
+      { type: 'where' },
+    ])
+  })
+
+  it('case (b): the answer is adopted, because the tab asked the question', () => {
+    const { term, ws } = staleOpenSocket()
+    term.wake()
+
+    serverControl(ws, { type: 'pane', pane: '%5' })
+
+    expect(term.status.pane).toBe('%5')
+  })
+
+  it('case (b), the negative control: an answer naming a different pane is followed', () => {
+    const { term, ws } = staleOpenSocket()
+    // The fixture must not already satisfy the assertion.
+    expect(term.status.pane).toBe('%5')
+
+    term.wake()
+    // The server's "your pane is gone, you are here now" -- the same thing a
+    // reconnect hears when the remembered pane died, and it is followed for the
+    // same reason. A probe that discarded its answer (revision 2's design)
+    // passes the test above and fails this one.
+    serverControl(ws, { type: 'pane', pane: '%9' })
+
+    expect(term.status.pane).toBe('%9')
+  })
+
+  it('does not probe a socket that has been talking', () => {
+    // The positive control for the whole feature: without it, a handler that
+    // always probes passes every other test here.
+    let now = 1_000
+    const { term } = makeSession({ storage: memoryStorage(), now: () => now })
+    term.start()
+    const ws = MockWebSocket.last
+    ws.open()
+    serverControl(ws, { type: 'pane', pane: '%5' })
+
+    // Long enough that the socket would be stale if the clock were read
+    // against the connect rather than against the last frame.
+    now += 60_000
+    ws.receive(new Uint8Array([FRAME_DATA, 0x78]))
+    const before = controls(ws).length
+    const timersBefore = vi.getTimerCount()
+
+    // A LITERAL 1_000 since that frame, and the mutation table is the authority
+    // on that: the mutant this test exists to kill retargets LIVENESS_SLACK_MS
+    // to 0, and a fixture derived from the constant moves with it
+    // (`0 - 1` is silence of -1ms, which is under every threshold there is).
+    now += 1_000
+    term.wake()
+
+    expect(controls(ws)).toHaveLength(before)
+    expect(vi.getTimerCount()).toBe(timersBefore)
+    expect(MockWebSocket.instances).toHaveLength(1)
+  })
+
+  it('case (b), the boundary: exactly LIVENESS_SLACK_MS of silence is not stale', () => {
+    let now = 1_000
+    const { term } = makeSession({ storage: memoryStorage(), now: () => now })
+    term.start()
+    const ws = MockWebSocket.last
+    ws.open()
+    serverControl(ws, { type: 'pane', pane: '%5' })
+    const before = controls(ws).length
+
+    now += 45_000
+    term.wake()
+
+    // `<=` and `<` agree everywhere except here, which is the only place the
+    // operator mutant can be caught.
+    expect(controls(ws)).toHaveLength(before)
+  })
+
+  it('does not probe a socket that is not open', () => {
+    let now = 1_000
+    const { term } = makeSession({ storage: memoryStorage(), now: () => now })
+    term.start()
+    const ws = MockWebSocket.last
+    ws.open()
+    serverControl(ws, { type: 'pane', pane: '%5' })
+    const before = controls(ws).length
+    const timersBefore = vi.getTimerCount()
+
+    // The socket is gone and its close event has not been delivered yet.
+    // `Transport.state` calls this 'closed' -- as it does, ahead of any
+    // readyState test, for a socket the caller closed -- so a guard written as
+    // "anything that is not connecting" would probe it: frames into a socket
+    // that is going away, and then a timer that would discard whatever
+    // replaced it.
+    ws.readyState = 3
+
+    now += 45_001
+    term.wake()
+
+    expect(controls(ws)).toHaveLength(before)
+    expect(vi.getTimerCount()).toBe(timersBefore)
+    // Nothing was armed, so nothing fires and nothing is replaced.
+    vi.advanceTimersByTime(5_000 * 3)
+    expect(MockWebSocket.instances).toHaveLength(1)
+  })
+
+  it('is idempotent on an OPEN stale socket: one probe frame and one armed timer', () => {
+    const { term, ws, before, timersBefore } = staleOpenSocket()
+
+    // The pair this handler is explicitly written to tolerate: a bfcache
+    // restore can fire `pageshow` and `visibilitychange` both.
+    term.wake()
+    term.wake()
+
+    // ONE probe: a select and a where, not two of each. Counting connect
+    // attempts here -- which is what revision 2 specified -- passes with two
+    // probes and two timers and notices nothing.
+    expect(controls(ws).slice(before).map((f) => f.json)).toEqual([
+      { type: 'select', pane: '%5' },
+      { type: 'where' },
+    ])
+    // Against a baseline, so the count is about the probe rather than about
+    // whatever else the fixture left pending.
+    expect(vi.getTimerCount()).toBe(timersBefore + 1)
+
+    // ONE timer: let the answer land, then run the clock well past the timeout
+    // and assert no orphan fired a reconnect.
+    serverControl(ws, { type: 'pane', pane: '%5' })
+    vi.advanceTimersByTime(5_000 * 3)
+    expect(MockWebSocket.instances).toHaveLength(1)
+    expect(ws.closedWith).toBeNull()
+  })
+
+  it('a data frame answers the probe as well as a control frame does', () => {
+    const { term, ws } = staleOpenSocket()
+    term.wake()
+
+    // The question the probe asks is "is anyone there", and PTY bytes answer
+    // it. A cancel wired only to the control path would reconnect a socket that
+    // is visibly painting the terminal.
+    ws.receive(new Uint8Array([FRAME_DATA, 0x78]))
+
+    vi.advanceTimersByTime(5_000 * 3)
+    expect(MockWebSocket.instances).toHaveLength(1)
+    expect(ws.closedWith).toBeNull()
+  })
+
+  it('reconnects when nobody answers within PROBE_TIMEOUT_MS', () => {
+    const { term, ws } = staleOpenSocket()
+    term.wake()
+
+    // The boundary sibling: one millisecond short, and nothing has happened.
+    vi.advanceTimersByTime(4_999)
+    expect(ws.closedWith).toBeNull()
+    expect(MockWebSocket.instances).toHaveLength(1)
+
+    vi.advanceTimersByTime(1)
+    // `retryNow()` here instead of the discard would be a no-op -- it returns
+    // early while a transport exists -- so both halves matter.
+    expect(ws.closedWith).toEqual({ code: 4001, reason: 'socket did not answer' })
+    expect(MockWebSocket.instances).toHaveLength(2)
+  })
+
+  // The two teardown tests. Neither is about the probe working; both are about
+  // the timer not outliving the thing it was armed for, and nothing else in
+  // this suite can see either failure because both need a probe to be in
+  // flight at the moment the session ends.
+
+  it('a stop() during a probe does not later open a socket on a stopped session', () => {
+    const { term } = staleOpenSocket()
+    term.wake()
+
+    term.stop()
+    const socketsAtStop = MockWebSocket.instances.length
+    vi.advanceTimersByTime(5_000 * 3)
+
+    // Not "no reconnect" -- no SOCKET. `#discard()` calls `#connect()`, and a
+    // connect after stop() is a new attach and a new throwaway tmux session
+    // that nothing is left alive to close.
+    expect(MockWebSocket.instances).toHaveLength(socketsAtStop)
+  })
+
+  it('a close during a probe does not discard the socket the backoff opened', () => {
+    const { term, ws } = staleOpenSocket()
+    term.wake()
+
+    ws.emitClose(1006)
+    expect(MockWebSocket.instances).toHaveLength(1)
+
+    // Past the backoff AND past the probe timeout -- the backoff is the
+    // shorter of the two, so the orphan would fire onto the socket it opened.
+    vi.advanceTimersByTime(Math.max(BACKOFF_MAX_MS, 5_000) * 3)
+
+    // Exactly one new socket: the backoff's. A surviving probe timer would
+    // discard that one and open a third.
+    expect(MockWebSocket.instances).toHaveLength(2)
   })
 
   it('does nothing once stopped, or from ended, or from gone', async () => {

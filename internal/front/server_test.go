@@ -35,6 +35,13 @@ type fakeSnapshots struct {
 	rows        []tmux.Row
 	err         error
 	serverStart string
+	// polls counts the forced polls a handler asked for, and onPoll -- when a
+	// test sets one -- runs inside PollNow. The hook is what lets a test see
+	// the response AS IT STOOD when the poll was forced, which is the
+	// difference between "refreshed before answering" and "refreshed at some
+	// point", and only the first of those is worth anything to the browser.
+	polls  int
+	onPoll func()
 }
 
 func (f *fakeSnapshots) ServerStart() string {
@@ -53,6 +60,31 @@ func (f *fakeSnapshots) Err() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.err
+}
+
+// PollNow is the forced poll. The rows do not change: what these tests are
+// about is whether a handler asks, and when.
+func (f *fakeSnapshots) PollNow(_ context.Context) error {
+	f.mu.Lock()
+	f.polls++
+	hook := f.onPoll
+	f.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return nil
+}
+
+func (f *fakeSnapshots) pollCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.polls
+}
+
+func (f *fakeSnapshots) setOnPoll(hook func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.onPoll = hook
 }
 
 func (f *fakeSnapshots) set(rows []tmux.Row, err error) {

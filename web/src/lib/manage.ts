@@ -31,6 +31,18 @@
  * Every failure surfaces as a toast naming what was attempted and tmux's own
  * words, and the sidebar refreshes immediately -- so a row that no longer
  * exists disappears along with the error rather than waiting out a poll.
+ *
+ * ## "Immediately" takes both sides
+ *
+ * This side re-fetches `/api/snapshot`, and the daemon forces a poll before it
+ * answers a management verb (`front.settle`, `tmux.Poller.PollNow`). Both
+ * halves are load-bearing, and for a while only this one existed:
+ * `/api/snapshot` serves the poller's CACHED tree and nothing re-polled, so the
+ * re-fetch was answered from a read taken up to an interval before the verb
+ * ran. A killed row lingering was the mild half. The sharp half is a split,
+ * which returns a pane id that is then missing from the very snapshot this side
+ * just asked for -- a tab pointed at a pane the daemon has never heard of,
+ * which is worse than a stale row.
  */
 
 import type { FetchLike, PaneNode, SessionNode, WindowNode } from '@/lib/useSnapshot'

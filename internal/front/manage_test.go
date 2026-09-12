@@ -829,3 +829,128 @@ func TestARefusedManagementVerbIsStillA400(t *testing.T) {
 		t.Errorf("the owner is told %q, want tmux's own words about the id they named", body.Error)
 	}
 }
+
+// ------------------------------------------------------- the forced poll
+//
+// "Nothing is retried ... and the sidebar refreshes immediately -- so a row
+// that no longer exists disappears along with the error rather than waiting out
+// a poll" (web/src/lib/manage.ts), and the v2 design says the same. Only half
+// of it was true: the browser did re-fetch /api/snapshot, and /api/snapshot
+// served Poller.Latest(), which nothing re-polled. The re-fetch was answered
+// from a tree read up to an interval BEFORE the verb ran.
+
+// serveInto is f.ok with the recorder supplied by the caller, so a test can
+// watch the response being built rather than only read it afterwards.
+func (f *fixture) serveInto(rec *httptest.ResponseRecorder, method, target, body string) {
+	f.t.Helper()
+	var r *http.Request
+	if body == "" {
+		r = httptest.NewRequest(method, target, nil)
+	} else {
+		r = httptest.NewRequest(method, target, strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+	}
+	authed(f.token)(r)
+	origin(canonicalOrigin)(r)
+	f.handler.ServeHTTP(rec, r)
+}
+
+// Every verb, and BEFORE it answers -- both halves, over the whole route table.
+//
+// Every verb, because a poll forced by nine handlers out of ten is a promise
+// broken by exactly the one nobody thought about. Before it answers, because
+// the browser re-fetches the moment the response lands: a poll forced
+// afterwards is the same staleness with a smaller window and no way to see it.
+//
+// The sharp case is the split. A killed row lingering for an interval is mild;
+// a create returns an id the very next snapshot does not contain, and a tab
+// pointed at a pane the daemon has never heard of is worse than a stale row.
+func TestEveryManagementVerbForcesAPollBeforeItAnswers(t *testing.T) {
+	for _, c := range manageRoutes {
+		t.Run(c.verb, func(t *testing.T) {
+			m := &deadlineManager{}
+			f := newFixture(t, withManager(m))
+
+			rec := httptest.NewRecorder()
+			// httptest.NewRecorder starts at 200 with an empty body, and no
+			// management verb answers 200 -- they are 201 or 204 -- so an
+			// untouched recorder is distinguishable from every answer any of
+			// them gives.
+			codeAtPoll, bodyAtPoll, verbsAtPoll := 0, -1, -1
+			f.snaps.setOnPoll(func() {
+				codeAtPoll, bodyAtPoll = rec.Code, rec.Body.Len()
+				verbsAtPoll = len(m.seenCalls())
+			})
+
+			f.serveInto(rec, c.method, c.target, c.body)
+			if rec.Code >= 400 {
+				t.Fatalf("%s %s = %d (%s)", c.method, c.target, rec.Code, rec.Body.String())
+			}
+			if n := f.snaps.pollCount(); n != 1 {
+				t.Fatalf("%s forced %d polls, want exactly 1: without one the browser's "+
+					"re-fetch is answered from the tree as it was before the verb ran", c.verb, n)
+			}
+			if bodyAtPoll != 0 || codeAtPoll != http.StatusOK {
+				t.Errorf("%s had already answered %d with %d bytes when it forced the poll; "+
+					"the refresh has to land before the response the browser reacts to",
+					c.verb, codeAtPoll, bodyAtPoll)
+			}
+			// AFTER the tmux command and before the answer, which is the only
+			// window that helps: a poll forced first reads the tree as it was
+			// before the verb changed it, which is the staleness being fixed,
+			// dressed up as a fix.
+			if verbsAtPoll != 1 {
+				t.Errorf("%s had reached tmux %d times when it forced the poll, want 1: "+
+					"a poll taken before the verb ran cannot show what the verb did", c.verb, verbsAtPoll)
+			}
+		})
+	}
+}
+
+// The failure path forces one too, and this is the case the frontend's comment
+// actually describes: the ordinary management failure is an id that was alive
+// when the poll that produced it ran and is not any more, so the row the owner
+// just tried to act on is precisely the one that has to disappear along with
+// the toast.
+func TestAFailedManagementVerbStillForcesThePoll(t *testing.T) {
+	f := newManageFixture(t)
+	f.seed(t, "victim")
+
+	rec := f.ok("DELETE", "/api/panes/"+pathID("%99"), `{"confirm":true}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("killing a stale pane id = %d (%s), want 400", rec.Code, rec.Body.String())
+	}
+	if n := f.snaps.pollCount(); n != 1 {
+		t.Fatalf("a failed kill forced %d polls, want 1: the stale row is exactly what "+
+			"has to go away with the error", n)
+	}
+}
+
+// A request turned away before it reaches a handler forces nothing. The poll
+// costs a tmux fork and a capture per agent pane, and an unauthenticated or
+// unconfirmed request has changed nothing for it to catch up with -- so this is
+// what keeps the forced poll from being reachable without the device cookie.
+func TestARequestThatNeverReachedTmuxForcesNoPoll(t *testing.T) {
+	for _, c := range []struct {
+		name, method, target, body string
+		opts                       func(f *fixture) []reqOpt
+	}{
+		{"no device cookie", "DELETE", "/api/panes/%250", `{"confirm":true}`,
+			func(*fixture) []reqOpt { return []reqOpt{origin(canonicalOrigin)} }},
+		{"a delete with no confirmation", "DELETE", "/api/panes/%250", `{}`,
+			func(f *fixture) []reqOpt { return []reqOpt{authed(f.token), origin(canonicalOrigin)} }},
+		{"a body that is not JSON", "PATCH", "/api/panes/%250", `{`,
+			func(f *fixture) []reqOpt { return []reqOpt{authed(f.token), origin(canonicalOrigin)} }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFixture(t, withManager(&deadlineManager{}))
+			if rec := f.do(c.method, c.target, c.body, c.opts(f)...); rec.Code < 400 {
+				t.Fatalf("%s = %d (%s), want a refusal", c.name, rec.Code, rec.Body.String())
+			}
+			if n := f.snaps.pollCount(); n != 0 {
+				t.Errorf("%s forced %d polls; a request that never reached tmux has "+
+					"nothing for a poll to catch up with", c.name, n)
+			}
+		})
+	}
+}

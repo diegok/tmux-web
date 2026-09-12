@@ -331,13 +331,21 @@ var errPollerStopped = errors.New("tmux: the poller has stopped")
 func (p *Poller) PollNow(ctx context.Context) error {
 	p.fmu.Lock()
 	batch, done := p.pending, p.loopDone
-	if batch == nil {
+	opened := batch == nil
+	if opened {
 		batch = make(chan struct{})
 		p.pending = batch
-		// Never blocks; see the field comment on force.
-		p.force <- batch
 	}
 	p.fmu.Unlock()
+
+	if opened {
+		// Only whoever opened the batch hands it over, and outside the lock.
+		// The send cannot block -- see the field comment on force -- but the
+		// two ways of being wrong about that are not equal: blocking here holds
+		// up one caller, and blocking under fmu would hold up every reader and
+		// the poll loop with them.
+		p.force <- batch
+	}
 
 	select {
 	case <-batch:

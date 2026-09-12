@@ -62,6 +62,38 @@ func manageCtx(r *http.Request) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(r.Context(), manageTimeout)
 }
 
+// settle forces the poll the browser is about to ask for, and is why "the
+// sidebar refreshes immediately" is now true of the daemon and not only of the
+// frontend.
+//
+// The browser already re-fetches /api/snapshot the moment a management request
+// comes back. That endpoint serves Poller.Latest(), which is up to a poll
+// interval old, so the re-fetch was answered from a tree read BEFORE the verb
+// ran. A killed row lingering is the mild half; the sharp half is a split,
+// whose new pane id is missing from the tree the browser just asked for -- and
+// a tab pointed at a pane the daemon has never heard of is worse than a stale
+// row.
+//
+// CALLED ON THE FAILURE PATH TOO, which is the case the frontend's comment
+// actually described: the ordinary management failure is an id that was alive
+// when the last poll produced it and is not any more, so the row the owner just
+// tried to act on is precisely the one that should disappear along with the
+// error. It costs a poll on a path that is rare, and nothing at all when the
+// failure was the daemon's own deadline -- ctx is already done, so this
+// returns at once.
+//
+// BEFORE THE RESPONSE IS WRITTEN, without exception. Afterwards would be a
+// race with the browser's re-fetch that the browser usually loses, which is the
+// same bug with a smaller window and no way to see it.
+//
+// The error is dropped, deliberately. There is nothing to tell the owner: the
+// verb itself already succeeded or failed on its own terms, and a poll that
+// could not be forced leaves the sidebar exactly as stale as it was before any
+// of this existed. Turning it into a 500 would fail a request that worked.
+func (s *server) settle(ctx context.Context) {
+	_ = s.snapshots.PollNow(ctx)
+}
+
 // Manager is the tmux management surface the browser drives. *tmux.Client
 // satisfies it.
 //
@@ -96,6 +128,7 @@ func (s *server) createSession(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := manageCtx(r)
 	defer cancel()
 	id, err := s.manage.NewSession(ctx, body.Name, body.Path)
+	s.settle(ctx)
 	if err != nil {
 		writeManageError(ctx, w, err)
 		return
@@ -120,6 +153,7 @@ func (s *server) createWindow(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := manageCtx(r)
 	defer cancel()
 	id, err := s.manage.NewWindow(ctx, body.Session, body.Name, body.FromPane)
+	s.settle(ctx)
 	if err != nil {
 		writeManageError(ctx, w, err)
 		return
@@ -138,6 +172,7 @@ func (s *server) createPane(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := manageCtx(r)
 	defer cancel()
 	id, err := s.manage.SplitPane(ctx, body.Pane, body.Direction)
+	s.settle(ctx)
 	if err != nil {
 		writeManageError(ctx, w, err)
 		return
@@ -156,7 +191,9 @@ func (s *server) renameSession(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := manageCtx(r)
 	defer cancel()
-	if err := s.manage.RenameSession(ctx, r.PathValue("id"), body.Name); err != nil {
+	err := s.manage.RenameSession(ctx, r.PathValue("id"), body.Name)
+	s.settle(ctx)
+	if err != nil {
 		writeManageError(ctx, w, err)
 		return
 	}
@@ -172,7 +209,9 @@ func (s *server) renameWindow(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := manageCtx(r)
 	defer cancel()
-	if err := s.manage.RenameWindow(ctx, r.PathValue("id"), body.Name); err != nil {
+	err := s.manage.RenameWindow(ctx, r.PathValue("id"), body.Name)
+	s.settle(ctx)
+	if err != nil {
 		writeManageError(ctx, w, err)
 		return
 	}
@@ -190,7 +229,9 @@ func (s *server) labelPane(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := manageCtx(r)
 	defer cancel()
-	if err := s.manage.SetLabel(ctx, r.PathValue("id"), body.Label); err != nil {
+	err := s.manage.SetLabel(ctx, r.PathValue("id"), body.Label)
+	s.settle(ctx)
+	if err != nil {
 		writeManageError(ctx, w, err)
 		return
 	}
@@ -205,7 +246,9 @@ func (s *server) labelPane(w http.ResponseWriter, r *http.Request) {
 func (s *server) zoomPane(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := manageCtx(r)
 	defer cancel()
-	if err := s.manage.ToggleZoom(ctx, r.PathValue("id")); err != nil {
+	err := s.manage.ToggleZoom(ctx, r.PathValue("id"))
+	s.settle(ctx)
+	if err != nil {
 		writeManageError(ctx, w, err)
 		return
 	}
@@ -220,7 +263,9 @@ func (s *server) killSession(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := manageCtx(r)
 	defer cancel()
-	if err := s.manage.KillSessionID(ctx, r.PathValue("id")); err != nil {
+	err := s.manage.KillSessionID(ctx, r.PathValue("id"))
+	s.settle(ctx)
+	if err != nil {
 		writeManageError(ctx, w, err)
 		return
 	}
@@ -233,7 +278,9 @@ func (s *server) killWindow(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := manageCtx(r)
 	defer cancel()
-	if err := s.manage.KillWindow(ctx, r.PathValue("id")); err != nil {
+	err := s.manage.KillWindow(ctx, r.PathValue("id"))
+	s.settle(ctx)
+	if err != nil {
 		writeManageError(ctx, w, err)
 		return
 	}
@@ -246,7 +293,9 @@ func (s *server) killPane(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := manageCtx(r)
 	defer cancel()
-	if err := s.manage.KillPane(ctx, r.PathValue("id")); err != nil {
+	err := s.manage.KillPane(ctx, r.PathValue("id"))
+	s.settle(ctx)
+	if err != nil {
 		writeManageError(ctx, w, err)
 		return
 	}

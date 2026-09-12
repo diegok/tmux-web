@@ -61,6 +61,15 @@ type SnapshotSource interface {
 	// from, or "" if there is none. Pane ids restart at %0 when tmux restarts,
 	// so the browser keys its per-pane memory on it.
 	ServerStart() string
+	// PollNow forces a poll and returns once its result has been published, so
+	// that a Latest taken after it reflects whatever the caller just did to the
+	// tmux tree. The management handlers are the only callers: see settle.
+	//
+	// In this interface rather than a second one, because it is the same
+	// object either way and a snapshot source that cannot be told to catch up
+	// is a source these handlers cannot use. A fake that forgets it is a
+	// compile error, which is the outcome worth having.
+	PollNow(ctx context.Context) error
 }
 
 // DeviceAdmin is the part of *auth.Store this layer administers. Lookup lives

@@ -5,7 +5,10 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -2355,5 +2358,418 @@ func TestNewPollerWithRefusesASecondGenerationFork(t *testing.T) {
 	NewPollerWith(Options{
 		Poll:        func(context.Context) (Poll, error) { return Poll{}, nil },
 		ServerStart: func(context.Context) (string, error) { return "100", nil },
+	})
+}
+
+// -- the forced poll ---------------------------------------------------------
+//
+// "The sidebar refreshes immediately" was a promise only the browser kept: it
+// re-fetched /api/snapshot, which serves Latest(), and nothing re-polled. A
+// killed row lingered up to an interval, and a fresh split's pane id was absent
+// from the very tree the browser had just asked for.
+
+// gatedPoller is a poller whose every poll blocks until the test lets it
+// through, so that "a poll is in flight" and "no poll has started" are both
+// answers rather than intervals to wait out.
+type gatedPoller struct {
+	p     *Poller
+	tick  chan time.Time
+	gate  chan struct{} // one receive per poll; close it to let them all run
+	polls atomic.Int64
+	// inFlight is how many polls are running at this instant, and peak is the
+	// most there have ever been. Peak above one is the failure PollNow exists
+	// to avoid: refresh owns the classifier and the report memory with no lock,
+	// so two overlapping polls corrupt a finish edge rather than crashing.
+	inFlight atomic.Int64
+	peak     atomic.Int64
+}
+
+func newGatedPoller() *gatedPoller {
+	g := &gatedPoller{tick: make(chan time.Time), gate: make(chan struct{})}
+	g.p = NewPollerFunc(time.Hour, func(context.Context) ([]Row, error) {
+		n := g.polls.Add(1)
+		if in := g.inFlight.Add(1); in > g.peak.Load() {
+			g.peak.Store(in)
+		}
+		defer g.inFlight.Add(-1)
+		<-g.gate
+		// One row per poll, named after it, so a caller can say WHICH poll the
+		// cached snapshot came from rather than only that it changed.
+		return []Row{{PaneID: "%" + strconv.FormatInt(n, 10)}}, nil
+	})
+	g.p.newTicker = func(time.Duration) (<-chan time.Time, func()) { return g.tick, func() {} }
+	return g
+}
+
+// latestPane is the pane id the cached snapshot carries, or "" if there is not
+// one.
+func (g *gatedPoller) latestPane() string {
+	rows := g.p.Latest()
+	if len(rows) == 0 {
+		return ""
+	}
+	return rows[0].PaneID
+}
+
+// The promise itself: when PollNow returns, the poll it forced has already been
+// published. Anything weaker -- a poll merely requested, or one still running --
+// leaves the browser's next request served from the tree it was trying to get
+// past, which for a split is a pane id that does not exist yet.
+func TestPollNowPublishesBeforeItReturns(t *testing.T) {
+	// In a bubble so that a PollNow nobody ever answers fails here and now --
+	// synctest panics the moment every goroutine is blocked with no way to
+	// proceed -- rather than parking the test binary until its timeout.
+	synctest.Test(t, func(t *testing.T) {
+		g := newGatedPoller()
+		close(g.gate) // nothing to hold back in this one
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		g.p.Start(ctx)
+		if got := g.latestPane(); got != "%1" {
+			t.Fatalf("after Start the cache holds %q, want the first poll's row", got)
+		}
+		if err := g.p.PollNow(ctx); err != nil {
+			t.Fatalf("PollNow: %v", err)
+		}
+		if got := g.latestPane(); got != "%2" {
+			t.Fatalf("PollNow returned with %q cached, want the row of the poll it forced -- "+
+				"a caller that has to poll again for it has been told nothing", got)
+		}
+		// Again, because a one-shot would pass the assertion above.
+		if err := g.p.PollNow(ctx); err != nil {
+			t.Fatalf("second PollNow: %v", err)
+		}
+		if got := g.latestPane(); got != "%3" {
+			t.Fatalf("the second PollNow left %q cached, want a third poll", got)
+		}
+	})
+}
+
+// A poll that was ALREADY RUNNING when a caller asked does not answer that
+// caller. This is the whole reason the loop clears the pending batch before it
+// polls rather than after: a read taken before the caller's change cannot show
+// it, and a PollNow satisfied by one has told the browser nothing while looking
+// exactly like success.
+func TestPollNowIsNotSatisfiedByAPollThatStartedFirst(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		g := newGatedPoller()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		go g.p.Start(ctx)
+		synctest.Wait()
+		g.gate <- struct{}{} // poll 1, Start's own
+		synctest.Wait()
+
+		g.tick <- time.Now() // poll 2, in flight and gated
+		synctest.Wait()
+
+		var aDone, bDone bool
+		go func() { _ = g.p.PollNow(ctx); aDone = true }()
+		synctest.Wait()
+
+		g.gate <- struct{}{} // poll 2 finishes; the loop takes A's batch, poll 3 starts
+		synctest.Wait()
+		if n := g.polls.Load(); n != 3 || aDone {
+			t.Fatalf("polls=%d aDone=%v, want A's poll running and A still waiting", n, aDone)
+		}
+
+		// B asks DURING poll 3. Poll 3 began before B did, so it cannot be B's.
+		go func() { _ = g.p.PollNow(ctx); bDone = true }()
+		synctest.Wait()
+
+		g.gate <- struct{}{} // poll 3 finishes: A is answered, B must not be
+		synctest.Wait()
+		if !aDone {
+			t.Fatal("A was not answered by the poll the loop started for it")
+		}
+		if bDone {
+			t.Fatalf("B was answered by a poll that started before B asked: the tree it got was "+
+				"read at %q, which is before whatever B did", g.latestPane())
+		}
+
+		g.gate <- struct{}{} // poll 4, which is B's
+		synctest.Wait()
+		if !bDone {
+			t.Fatal("B never got a poll of its own")
+		}
+		if got := g.latestPane(); got != "%4" {
+			t.Fatalf("B was answered from %q, want the fourth poll's row", got)
+		}
+	})
+}
+
+// No two polls ever overlap, whoever asked for them.
+//
+// This is the reason PollNow is a request to the poll goroutine rather than a
+// call to refresh. refresh owns the classifier and the report memory outright
+// and neither has a lock; two concurrent polls do not crash, they mis-stamp a
+// finish edge, which is a done badge on every device for work that did not
+// finish. A bubble is what makes "the forced poll has NOT started" an assertion
+// instead of a sleep: Wait returns only once every goroutine is durably blocked.
+func TestPollNowNeverRunsBesideTheTicker(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		g := newGatedPoller()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		go g.p.Start(ctx) // Start's first poll is synchronous and gated
+		synctest.Wait()
+		g.gate <- struct{}{} // let poll 1 through
+		synctest.Wait()
+
+		// A tick is in the loop's hands and its poll is blocked in fn.
+		g.tick <- time.Now()
+		synctest.Wait()
+		if n := g.polls.Load(); n != 2 {
+			t.Fatalf("%d polls, want the tick's to be in flight", n)
+		}
+
+		var forced error
+		go func() { forced = g.p.PollNow(ctx) }()
+		synctest.Wait()
+
+		// The whole assertion: everything is blocked, and the forced poll has
+		// not begun. A PollNow that called refresh itself would be inside fn
+		// right now, beside the tick's.
+		if n := g.polls.Load(); n != 2 {
+			t.Fatalf("%d polls started while the tick's was still running: a forced poll must wait for it", n)
+		}
+
+		close(g.gate)
+		synctest.Wait()
+		if forced != nil {
+			t.Fatalf("PollNow: %v", forced)
+		}
+		if n := g.polls.Load(); n != 3 {
+			t.Fatalf("%d polls in all, want the initial one, the tick's and the forced one", n)
+		}
+		if peak := g.peak.Load(); peak != 1 {
+			t.Fatalf("%d polls were in flight at once; refresh owns the classifier and the report "+
+				"memory with no lock, so two at a time mis-stamp a finish edge", peak)
+		}
+	})
+}
+
+// Concurrent callers share one poll. Ten management requests landing together
+// must not cost ten polls -- each is a tmux fork plus a capture per agent pane,
+// and the whole point of the cached snapshot is that its cost is per interval
+// and not per reader.
+func TestPollNowCoalescesConcurrentCallers(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		g := newGatedPoller()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		go g.p.Start(ctx)
+		synctest.Wait()
+		g.gate <- struct{}{} // poll 1, Start's own
+		synctest.Wait()
+
+		// A tick first, so the loop is BUSY when the callers arrive. That is
+		// what makes the count below exact rather than a race: a batch is
+		// handed to the loop the moment the first caller opens it, so without
+		// this the first caller might be dequeued before the tenth has joined
+		// and the answer would be two polls on some runs and one on others.
+		// Both are coalescing; only one of them is an assertion.
+		g.tick <- time.Now()
+		synctest.Wait()
+
+		const callers = 10
+		errs := make([]error, callers)
+		var wg sync.WaitGroup
+		for i := range callers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				errs[i] = g.p.PollNow(ctx)
+			}()
+		}
+		synctest.Wait()
+
+		// All ten are in ONE batch: the loop is inside the tick's poll, so it
+		// has taken nothing off the force channel, so pending was non-nil for
+		// every caller after the first.
+		close(g.gate)
+		wg.Wait()
+
+		for i, err := range errs {
+			if err != nil {
+				t.Fatalf("caller %d: %v", i, err)
+			}
+		}
+		// ONE poll for the ten callers, on top of Start's and the tick's.
+		// Twelve is what one poll each would look like.
+		if n := g.polls.Load(); n != 3 {
+			t.Fatalf("%d polls for Start, one tick and %d concurrent callers; want 3, which is "+
+				"one poll shared by all ten", n, callers)
+		}
+	})
+}
+
+// A caller that runs out of time is answered, and the poll it asked for still
+// happens: it was requested, every other reader is about to be served by it,
+// and the fork it costs has already been paid.
+func TestPollNowGivesUpOnItsOwnDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		g := newGatedPoller()
+		loopCtx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		go g.p.Start(loopCtx)
+		synctest.Wait()
+		g.gate <- struct{}{}
+		synctest.Wait()
+
+		callerCtx, callerCancel := context.WithTimeout(loopCtx, time.Second)
+		defer callerCancel()
+		var err error
+		go func() { err = g.p.PollNow(callerCtx) }()
+		synctest.Wait() // the poll is in flight and the caller is waiting on it
+
+		time.Sleep(2 * time.Second) // the bubble's clock, not the test's
+		synctest.Wait()
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("PollNow after its deadline = %v, want the deadline", err)
+		}
+		if n := g.polls.Load(); n != 2 {
+			t.Fatalf("%d polls, want the abandoned caller's to have started anyway", n)
+		}
+
+		// And it finishes and publishes, on the poll context rather than the
+		// caller's: a browser that went away must not abort a poll every other
+		// reader is about to be served.
+		close(g.gate)
+		synctest.Wait()
+		if got := g.latestPane(); got != "%2" {
+			t.Fatalf("the abandoned poll published %q, want its own row", got)
+		}
+	})
+}
+
+// A poller whose context is gone answers rather than waiting: on shutdown an
+// in-flight management request would otherwise sit here until its own deadline,
+// inside a grace period that is the same five seconds.
+func TestPollNowOnAStoppedPollerSaysSo(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		g := newGatedPoller()
+		close(g.gate)
+		ctx, cancel := context.WithCancel(context.Background())
+		g.p.Start(ctx)
+		cancel()
+		synctest.Wait()
+
+		// context.Background(), so nothing but the poller's own state can end
+		// this call. A PollNow that only watched its caller's context would
+		// hang here forever.
+		if err := g.p.PollNow(context.Background()); !errors.Is(err, errPollerStopped) {
+			t.Fatalf("PollNow on a stopped poller = %v, want it to say the poller has stopped", err)
+		}
+	})
+}
+
+// A poller that was never started has no loop to serve a forced poll, and this
+// is what that looks like: the caller waits out its own context and is told so.
+// Not a hang, and not a silent success either -- a success would be a claim
+// that a poll happened.
+func TestPollNowOnAPollerThatWasNeverStarted(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		g := newGatedPoller()
+		close(g.gate)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := g.p.PollNow(ctx); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("PollNow on an unstarted poller = %v, want its caller's deadline", err)
+		}
+		if n := g.polls.Load(); n != 0 {
+			t.Fatalf("%d polls ran without a loop to run them", n)
+		}
+	})
+}
+
+// A forced poll runs on the DAEMON's context, not on the context of whoever
+// asked for it. Two halves, and this pins the one a surviving mutant found
+// unpinned: the poll must stop when the daemon does. The other half -- that a
+// caller giving up does not abort it -- is TestPollNowGivesUpOnItsOwnDeadline
+// above, and the two are the same decision seen from either end.
+//
+// Checked from INSIDE the poll, because refresh puts its own deadline on the
+// context and cancels it on the way out: after a poll has returned, the context
+// it ran on is cancelled whatever it was derived from, so an assertion made
+// afterwards would pass on every implementation.
+func TestAForcedPollRunsOnTheDaemonsContext(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		g := newGatedPoller()
+		seen := make(chan context.Context, 4)
+		inner := g.p.fn
+		g.p.fn = func(ctx context.Context) (Poll, error) {
+			seen <- ctx
+			return inner(ctx)
+		}
+		loopCtx, cancel := context.WithCancel(context.Background())
+
+		go g.p.Start(loopCtx)
+		synctest.Wait()
+		g.gate <- struct{}{} // Start's own poll
+		synctest.Wait()
+		<-seen
+
+		// context.Background(): the caller's context outlives everything here,
+		// so nothing but the daemon's own can end this poll.
+		go func() { _ = g.p.PollNow(context.Background()) }()
+		synctest.Wait()
+
+		forced := <-seen
+		if forced.Err() != nil {
+			t.Fatalf("the forced poll was handed a context that was already %v", forced.Err())
+		}
+
+		cancel()
+		synctest.Wait()
+		if forced.Err() == nil {
+			t.Fatal("the daemon shut down and the forced poll it was running did not notice: " +
+				"a poll on a context of its own outlives the daemon that asked for it")
+		}
+
+		g.gate <- struct{}{} // let it finish, so the bubble can empty
+		synctest.Wait()
+	})
+}
+
+// A forced poll asked for DURING Start's own first poll is still answerable.
+//
+// Start polls once synchronously before the loop exists, and on a real daemon
+// that poll is a tmux fork -- long enough for a request to land inside it. A
+// caller that arrives in that window must still learn that the poller has
+// stopped, which it can only do if Start published its context before polling
+// rather than after: a caller that read nil there waits on its own context
+// forever, and the one this daemon hands it may not have a deadline.
+func TestPollNowDuringStartsFirstPoll(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		g := newGatedPoller()
+		ctx, cancel := context.WithCancel(context.Background())
+
+		go g.p.Start(ctx) // blocked in its first poll
+		synctest.Wait()
+
+		var err error
+		done := make(chan struct{})
+		go func() { defer close(done); err = g.p.PollNow(context.Background()) }()
+		synctest.Wait()
+
+		// Cancelled with the first poll STILL RUNNING, so the loop does not
+		// exist yet and cannot answer the batch. Nothing but loopDone can end
+		// this call, which is what makes the assertion below exact rather than
+		// a coin toss between the two ready cases of a select.
+		cancel()
+		<-done
+		if !errors.Is(err, errPollerStopped) {
+			t.Fatalf("PollNow from inside Start's first poll = %v, want it to say the poller "+
+				"has stopped -- on context.Background() there is nothing else to end it", err)
+		}
+
+		close(g.gate) // let the first poll, Start and the loop finish and the bubble empty
+		synctest.Wait()
 	})
 }

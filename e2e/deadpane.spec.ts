@@ -21,6 +21,7 @@
  * every assertion now names a string that cannot already be on screen.
  */
 import { BASE_SESSION, breadcrumb, enroll, expect, test } from './harness'
+import type { Locator, Page } from '@playwright/test'
 
 test('a pane that dies hands the tab to its neighbour in the same window', async ({
   page,
@@ -92,4 +93,202 @@ test('a pane that takes its window with it falls back to the first window', asyn
   await expect(breadcrumb(page)).not.toContainText('doomed')
   await expect(breadcrumb(page)).not.toContainText('is gone')
   await expect(page.locator('[data-sonner-toast]')).toContainText(`${doomed} is gone`)
+})
+
+/**
+ * ## The same two deaths, ordered from the sidebar
+ *
+ * The two tests above kill from tmux, which is the shape of a pane dying on its
+ * own -- an agent exiting, a shell that got `exit` typed into it. The owner hit
+ * this the other way: he right-clicked the row, armed the dialog and pressed
+ * the red button. That is not the same code. It goes through `runManage` ->
+ * `DELETE` -> `refresh()`, so the first snapshot without the pane arrives
+ * sooner, and from a different call, than the poll the tests above wait out.
+ *
+ * They also assert something the two above do not. The breadcrumb is one
+ * readout of `activePane`; the sidebar highlight is the other, and it is the
+ * one a user reads to answer "which of these am I in". A row carries
+ * `data-active` when it is the selected one, so **nothing is selected** is
+ * `toHaveCount(0)` here -- a state no assertion about breadcrumb text can tell
+ * apart from a breadcrumb that has simply not caught up.
+ */
+
+/**
+ * Every row the sidebar is marking as the selected one.
+ *
+ * Both kinds of row can carry it: a pane row under a split window, and the
+ * window row itself when the window has only one pane -- `WindowItem` marks one
+ * or the other, never both, because two highlights would read as two
+ * selections. Counting them together is what makes "exactly one thing is
+ * selected" expressible.
+ *
+ * `data-sidebar` and not the `data-slot` that names the same rows: a pane row
+ * is wrapped in a `ContextMenuTrigger` with `asChild`, whose own `data-slot`
+ * lands on the button and overwrites shadcn's. `sessionLabel` in the harness
+ * carries the same note for the same reason.
+ */
+function selectedRow(page: Page): Locator {
+  return page
+    .locator('[data-sidebar="content"]')
+    .locator('[data-sidebar="menu-button"][data-active="true"], ' +
+      '[data-sidebar="menu-sub-button"][data-active="true"]')
+}
+
+/** Open a row's context menu, over its text rather than its padding. */
+async function rightClick(row: Locator, text: string): Promise<void> {
+  await row.getByText(text, { exact: true }).click({ button: 'right' })
+}
+
+/** Arm the kill dialog and press the red button. */
+async function confirmKill(page: Page, label: string): Promise<void> {
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('checkbox').check()
+  await dialog.getByRole('button', { name: label }).click()
+}
+
+test('killing the selected pane from the sidebar leaves the successor selected', async ({
+  page,
+  tmuxWeb,
+}) => {
+  await enroll(page, tmuxWeb, 'laptop')
+
+  tmuxWeb.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'api', tmuxWeb.fakeAgent('survivor'))
+  tmuxWeb.tmux('split-window', '-d', '-t', `${BASE_SESSION}:api`, tmuxWeb.fakeAgent('doomed'))
+  const panes = () =>
+    tmuxWeb.tmux('list-panes', '-t', `${BASE_SESSION}:api`, '-F', '#{pane_id}').split('\n')
+  await expect.poll(panes).toHaveLength(2)
+
+  await page.getByRole('button', { name: /^1: api/ }).click()
+  const doomedRow = page.getByRole('button', { name: /pane 1/ })
+  await doomedRow.click()
+
+  // The starting point, in the words the assertion after the kill uses: one row
+  // selected, and it is the pane about to die. `survivor` is deliberately not on
+  // this row, so nothing below can pass on what is already on screen.
+  await expect(selectedRow(page)).toHaveCount(1)
+  await expect(selectedRow(page)).toContainText('doomed')
+
+  await rightClick(doomedRow, 'pane 1')
+  await page.getByRole('menuitem', { name: 'Kill pane…' }).click()
+  await confirmKill(page, 'Kill pane')
+
+  await expect.poll(panes).toHaveLength(1)
+
+  // Down to one pane, so the window row is where the highlight goes -- and that
+  // row names the pane that is left.
+  //
+  // The text assertion comes first and carries the message, deliberately.
+  // `toHaveCount(1)` is satisfied by the *pre-kill* highlight on its very first
+  // try, so leading with it would report a pass before anything had happened --
+  // the same trap the header of this file describes, in its other shape.
+  // `survivor` appears on no row that was selected a moment ago, so this one
+  // cannot be. It fails with "element(s) not found" when nothing is selected at
+  // all, which is the bug being guarded.
+  await expect(
+    selectedRow(page),
+    'the sidebar highlights nothing, or the wrong row: the user is looking at a pane ' +
+      'with nothing saying which',
+  ).toContainText('survivor')
+  await expect(selectedRow(page)).toHaveCount(1)
+})
+
+/**
+ * The other shape the owner named, "pane/tab": the whole window goes at once.
+ *
+ * The window has to be split, because a one-pane window row offers a *pane*
+ * menu -- `rowTargetForWindow` -- so "Kill window…" is only reachable from a
+ * window that has more than one pane. Both of its panes die together, which is
+ * the case `succeedPane`'s first choice cannot answer: the window they were in
+ * is gone too.
+ */
+test('killing the selected window from the sidebar leaves the successor selected', async ({
+  page,
+  tmuxWeb,
+}) => {
+  await enroll(page, tmuxWeb, 'laptop')
+
+  tmuxWeb.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'api', tmuxWeb.fakeAgent('editor'))
+  tmuxWeb.tmux('split-window', '-d', '-t', `${BASE_SESSION}:api`, tmuxWeb.fakeAgent('agent'))
+  const windows = () =>
+    tmuxWeb.tmux('list-windows', '-t', BASE_SESSION, '-F', '#{window_name}').split('\n')
+  await expect.poll(windows).toContain('api')
+
+  const apiRow = page.getByRole('button', { name: /^1: api/ })
+  await apiRow.click()
+  await page.getByRole('button', { name: /pane 1/ }).click()
+  await expect(selectedRow(page)).toHaveCount(1)
+  await expect(selectedRow(page)).toContainText('agent')
+
+  await rightClick(apiRow, '1: api')
+  await page.getByRole('menuitem', { name: 'Kill window…' }).click()
+  await confirmKill(page, 'Kill window')
+
+  await expect.poll(windows).not.toContain('api')
+
+  // Text first, count second -- see the note in the test above.
+  await expect(
+    selectedRow(page),
+    'the sidebar highlights nothing after the window went',
+  ).toContainText('0: shell')
+  await expect(selectedRow(page)).toHaveCount(1)
+})
+
+/**
+ * The one the owner actually hit, and the reason this file grew a second half.
+ *
+ * Closing the last tab of a session destroys the session. The tab does not sit
+ * there disconnected: `resolveSession` moves it to another session -- the first
+ * one in the sidebar -- and the terminal comes back on a live pane of that one.
+ *
+ * What used to happen then was the whole bug in one line: `<Terminal>` files its
+ * remembered pane under the session *address*, so a new address means a new
+ * `TerminalSession` with no remembered pane at all, and `status.pane` went null
+ * at the same moment the old pane left the snapshot. Nothing was highlighted,
+ * the breadcrumb had only a session name in it, and the successor effect --
+ * guarded on `activePane` -- never ran to fill either of them in. The terminal
+ * had moved and there was no indication anywhere of where to.
+ *
+ * The successor here has to be in another session, so it is deliberately not
+ * anything that could be left on screen from before: `elsewhere` appears in no
+ * row of the session being killed.
+ */
+test('killing the last tab of a session leaves the tab selected in the next one', async ({
+  page,
+  tmuxWeb,
+}) => {
+  // Created before the browser so the sidebar has it from the first poll.
+  tmuxWeb.tmux('new-session', '-d', '-s', 'other', '-n', 'work', tmuxWeb.fakeAgent('elsewhere'))
+  await enroll(page, tmuxWeb, 'laptop')
+
+  const sessions = () => tmuxWeb.tmux('list-sessions', '-F', '#{session_name}').split('\n')
+  await expect.poll(sessions).toContain(BASE_SESSION)
+
+  // `e2e` has exactly one window with one pane, so killing that pane takes the
+  // session -- and the group this tab is attached through -- with it.
+  const row = page.getByRole('button', { name: /^0: shell/ })
+  await row.click()
+  await expect(selectedRow(page)).toHaveCount(1)
+  await expect(selectedRow(page)).toContainText('0: shell')
+
+  await rightClick(row, '0: shell')
+  await page.getByRole('menuitem', { name: 'Kill pane…' }).click()
+  await confirmKill(page, 'Kill pane')
+
+  await expect.poll(sessions).not.toContain(BASE_SESSION)
+
+  // The tab landed in `other`, and it says which pane of it. Text first, count
+  // second -- see the note two tests up. Against the broken build this is what
+  // reported the defect: `toHaveCount(1)` was still passing on the highlight
+  // left over from the session that had just been destroyed.
+  await expect(
+    selectedRow(page),
+    'the tab moved to another session and highlighted nothing: the user is looking ' +
+      'at a live terminal with no row anywhere saying which pane it is',
+  ).toContainText('elsewhere')
+  await expect(selectedRow(page)).toHaveCount(1)
+  await expect(breadcrumb(page)).toContainText('other')
+  await expect(breadcrumb(page)).toContainText('elsewhere')
+  // And the toast names the session, which is the part of "where am I" that
+  // changed and the part nothing else would have told them.
+  await expect(page.locator('[data-sonner-toast]')).toContainText('Moved to other › 0: work')
 })

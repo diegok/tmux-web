@@ -13,6 +13,7 @@ import {
   findPane,
   groupRows,
   isDone,
+  landedLabel,
   markSeen,
   mostUrgent,
   paneState,
@@ -478,7 +479,7 @@ describe('succeedPane', () => {
   it('lands on the dead pane\'s own window when the window survived it', () => {
     const was = gone(live, '%75')
     const after = groupRows(live.filter((r) => r.paneId !== '%75'))
-    const to = succeedPane(after, was)
+    const to = succeedPane(after, was, 'work')
     expect(to?.pane.paneId).toBe('%1')
     // The point of preferring the window: the user closed an editor in `api`
     // and is still in `api`, not thrown back to window 0.
@@ -489,7 +490,7 @@ describe('succeedPane', () => {
     const was = gone(live, '%1')
     // `%1` was the last pane in `api`, so tmux took the window too.
     const after = groupRows(live.filter((r) => r.windowIndex !== 1))
-    const to = succeedPane(after, was)
+    const to = succeedPane(after, was, 'work')
     expect(to?.pane.paneId).toBe('%0')
     expect(to?.window.name).toBe('shell')
   })
@@ -500,7 +501,7 @@ describe('succeedPane', () => {
     // every test above and fails this one.
     const was = gone(live, '%75')
     const after = groupRows(live.filter((r) => r.paneId !== '%75'))
-    expect(succeedPane(after, was)?.window.index).toBe(1)
+    expect(succeedPane(after, was, 'work')?.window.index).toBe(1)
   })
 
   it('follows the window active pane, not the first in layout order', () => {
@@ -513,25 +514,111 @@ describe('succeedPane', () => {
     const was = gone(rows, '%75')
     const after = groupRows(rows.filter((r) => r.paneId !== '%75'))
     // %1 is first in layout order; %2 is where tmux actually moved the client.
-    expect(succeedPane(after, was)?.pane.paneId).toBe('%2')
+    expect(succeedPane(after, was, 'work')?.pane.paneId).toBe('%2')
   })
 
-  it('is null when the session itself is gone', () => {
+  // --- when the session went too ---------------------------------------------
+  //
+  // Closing the last tab of a session destroys it. The tab does not stay
+  // disconnected -- `resolveSession` has already moved it to another session and
+  // the terminal is showing a live pane of that one -- so the successor has to
+  // be able to cross a session boundary, or the app ends up pointing into a
+  // session that no longer exists with nothing highlighted anywhere.
+
+  // Two windows in a second session, the first of them split, so "the first
+  // window" and "the window's active pane" are both real choices here.
+  const elsewhere = [
+    row({
+      groupKey: 'other',
+      sessionName: 'other',
+      windowId: '@10',
+      windowIndex: 0,
+      windowName: 'work',
+      paneId: '%10',
+      paneActive: false,
+      command: 'sh',
+    }),
+    row({
+      groupKey: 'other',
+      sessionName: 'other',
+      windowId: '@10',
+      windowIndex: 0,
+      windowName: 'work',
+      paneId: '%11',
+      paneIndex: 1,
+      paneActive: true,
+      command: 'claude',
+    }),
+    row({
+      groupKey: 'other',
+      sessionName: 'other',
+      windowId: '@11',
+      windowIndex: 1,
+      windowName: 'logs',
+      paneId: '%12',
+    }),
+  ]
+
+  it('moves to the session the tab is attached to now when its own session went', () => {
     const was = gone(live, '%75')
-    expect(succeedPane(groupRows([row({ groupKey: 'other', paneId: '%9' })]), was)).toBeNull()
+    const to = succeedPane(groupRows(elsewhere), was, 'other')
+    expect(to?.session.key).toBe('other')
+    // The first window of it, and that window's active pane -- not %10, which
+    // is merely first in layout order.
+    expect(to?.window.name).toBe('work')
+    expect(to?.pane.paneId).toBe('%11')
+  })
+
+  it('is null when the session went and there is nowhere the tab is attached', () => {
+    const was = gone(live, '%75')
+    expect(succeedPane(groupRows(elsewhere), was, null)).toBeNull()
+  })
+
+  it('is null when the tab is pinned to a session the snapshot does not have', () => {
+    // `?session=api` carries a hand-typed name, which is not a group key the
+    // snapshot knows. A pinned tab must stay pinned rather than wander.
+    const was = gone(live, '%75')
+    expect(succeedPane(groupRows(elsewhere), was, 'api')).toBeNull()
+  })
+
+  it('looks for the surviving window only in the pane\'s own session', () => {
+    // The fallback session's windows are not candidates for "the window this
+    // pane was in" -- that sentence is about one session. tmux allocates `@N`
+    // per server so it would never actually offer a collision, but the rule is
+    // not allowed to be right only because of that: here the other session's
+    // second window wears `@1`, the id `%75`'s window had, and the answer is
+    // still the *first* window of the session the tab is now attached to.
+    const was = gone(live, '%75')
+    const collides = elsewhere.map((r) =>
+      r.windowIndex === 1 ? { ...r, windowId: '@1' } : r,
+    )
+    const to = succeedPane(groupRows(collides), was, 'other')
+    expect(to?.window.name).toBe('work')
+    expect(to?.pane.paneId).toBe('%11')
+  })
+
+  it('prefers the dead pane\'s own session over the attached one', () => {
+    // Guards the order. `attached` is usually the *same* session, so a rule
+    // that tried it first would pass every other test here and would silently
+    // throw the user back to window 0 on every ordinary pane death.
+    const was = gone(live, '%75')
+    const after = groupRows([...live.filter((r) => r.paneId !== '%75'), ...elsewhere])
+    const to = succeedPane(after, was, 'other')
+    expect(to?.session.key).toBe('work')
+    expect(to?.pane.paneId).toBe('%1')
   })
 
   it('is null for an empty snapshot, so a failed poll cannot move a tab', () => {
     // The daemon reports its own failed tmux poll as an error with no rows.
     // Treating that as "every pane died" would yank every tab off its pane.
-    expect(succeedPane([], gone(live, '%75'))).toBeNull()
+    expect(succeedPane([], gone(live, '%75'), 'work')).toBeNull()
   })
 
   it('never hands back the pane it was told is gone', () => {
     // A caller that passed a pane still in the snapshot must not be told to
     // re-select it: the caller would do so on every poll, forever.
     const was = gone(live, '%1')
-    expect(succeedPane(groupRows(live.filter((r) => r.windowIndex === 1)), was)).toBeNull()
+    expect(succeedPane(groupRows(live.filter((r) => r.windowIndex === 1)), was, 'work')).toBeNull()
   })
 
   it('follows the window id, not its index, across a renumber', () => {
@@ -558,7 +645,7 @@ describe('succeedPane', () => {
       row({ windowId: '@7', windowIndex: 0, windowName: 'api', paneId: '%1' }),
       row({ windowId: '@9', windowIndex: 1, windowName: 'shell', paneId: '%0' }),
     ])
-    const to = succeedPane(after, was)
+    const to = succeedPane(after, was, 'work')
     expect(to?.window.id).toBe('@7')
     expect(to?.pane.paneId).toBe('%1')
   })
@@ -567,7 +654,30 @@ describe('succeedPane', () => {
     const old = live.map((r) => ({ ...r, windowId: '' }))
     const was = gone(old, '%75')
     const after = groupRows(old.filter((r) => r.paneId !== '%75'))
-    expect(succeedPane(after, was)?.pane.paneId).toBe('%1')
+    expect(succeedPane(after, was, 'work')?.pane.paneId).toBe('%1')
+  })
+})
+
+describe('landedLabel', () => {
+  const at = (rows: SnapshotRow[], paneId: string) => {
+    const found = findPane(groupRows(rows), paneId)
+    if (!found) throw new Error(`fixture does not contain ${paneId}`)
+    return found
+  }
+  const here = [
+    row({ windowIndex: 0, windowName: 'shell', paneId: '%0' }),
+    row({ windowIndex: 2, windowName: 'api', paneId: '%1', command: 'vim' }),
+  ]
+  const away = [row({ groupKey: 'other', sessionName: 'other', paneId: '%9', command: 'claude' })]
+
+  it('names the window and the command for a move inside one session', () => {
+    expect(landedLabel(at(here, '%1'), at(here, '%0'))).toBe('2: api \u203a vim')
+  })
+
+  it('puts the session in front when the move crossed one', () => {
+    // The session changed only because the old one was destroyed, and it is the
+    // part of "where am I" the breadcrumb alone would not tell them.
+    expect(landedLabel(at(away, '%9'), at(here, '%0'))).toBe('other \u203a 0: shell \u203a claude')
   })
 })
 

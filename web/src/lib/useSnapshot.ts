@@ -537,6 +537,22 @@ export function findPane(
  * Only when the window went too -- the editor was the last pane in it -- does
  * this fall back to the session's first window.
  *
+ * ## And when the session went too
+ *
+ * Closing the last tab of a session destroys the session, and with it the group
+ * this tab was attached through. The tab does not sit there disconnected:
+ * `resolveSession` has already moved it to another session and the terminal is
+ * showing a live pane of that one. So there *is* somewhere better than nowhere,
+ * and `attached` -- the group key the tab is attached to now -- is what names
+ * it. Without this the app is pointing into a session that no longer exists: no
+ * row is highlighted, the breadcrumb has nothing to describe, and the user is
+ * looking at a terminal with no indication anywhere of which pane it is.
+ *
+ * It is the last candidate on purpose. While the dead pane's own session is
+ * still in the snapshot it is always the better answer, and `attached` is
+ * usually that same session anyway -- this only differs in the case that made
+ * it necessary.
+ *
  * ## Why "nowhere better" is a real answer
  *
  * A snapshot with no panes at all is not evidence that every pane died: the
@@ -544,17 +560,32 @@ export function findPane(
  * Moving on that would yank a tab off a perfectly good pane because a poll
  * hiccuped. Returning null keeps the caller where it is, which is the one
  * behaviour that is safe to take on a snapshot that may be wrong.
+ *
+ * A tab pinned by `?session=` reaches the same answer by the same route rather
+ * than by a rule of its own: the name it is pinned to is not a group key the
+ * snapshot knows, so the fallback finds no session and the tab stays where it
+ * was told to be.
  */
 export function succeedPane(
   groups: readonly SessionNode[],
   gone: PaneLocation,
+  attached: string | null,
 ): PaneLocation | null {
-  const session = groups.find((g) => g.key === gone.session.key)
+  const own = groups.find((g) => g.key === gone.session.key)
+  const session = own ?? groups.find((g) => attached !== null && g.key === attached)
   if (!session) return null
 
   // The window's id is the identity; `key` is the fallback for a daemon too
   // old to send `@N`, and is what `groupRows` already keys the tree on.
-  const same = session.windows.find((w) =>
+  //
+  // Looked for only in the pane's *own* session, and `own` is what says so.
+  // "The window this pane was in" is a sentence about one session, and a
+  // fallback to a different one has no such window by construction -- so the
+  // fallback lands on the new session's first window, which is the only thing
+  // it could mean. tmux would make the guard unreachable, since `@N` is unique
+  // per server, but the rule does not depend on that being true and should not
+  // read as though it does.
+  const same = own?.windows.find((w) =>
     gone.window.id !== '' ? w.id === gone.window.id : w.key === gone.window.key,
   )
   for (const window of [same, session.windows[0]]) {
@@ -568,6 +599,20 @@ export function succeedPane(
     if (pane) return { session, window, pane }
   }
   return null
+}
+
+/**
+ * Where a tab landed, for the sentence that tells the user it moved.
+ *
+ * `2: api › vim` normally, because the session did not change and naming it
+ * again would just be the breadcrumb read aloud. When the move crossed sessions
+ * -- which only happens because the old one was destroyed -- the session goes
+ * in front, since that is the part of "where am I" that changed and the part
+ * the user has no other way to notice.
+ */
+export function landedLabel(to: PaneLocation, from: PaneLocation): string {
+  const where = `${to.window.index}: ${to.window.name} › ${to.pane.command}`
+  return to.session.key === from.session.key ? where : `${to.session.name} › ${where}`
 }
 
 /**

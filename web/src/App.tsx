@@ -49,6 +49,7 @@ import { useTabBadge } from '@/lib/tabBadge'
 import {
   attachTarget,
   findPane,
+  landedLabel,
   resolveSession,
   succeedPane,
   useSeenPanes,
@@ -217,25 +218,54 @@ export default function App() {
    * this move did not, the caret is wherever the user left it, and yanking it
    * out of an open palette would be its own bug.
    *
+   * ## The death that takes the session with it
+   *
+   * Closing the last tab of a session destroys the session, and this tab is
+   * attached through a throwaway session in its group, so that goes too. It does
+   * not end there: `resolveSession` has already moved the tab to another session
+   * and the terminal comes back on a live pane of that one. The successor
+   * therefore has to be allowed to cross a session boundary -- `session`, below,
+   * is what lets it -- and until it was, this case ended with the app pointing
+   * into a session that no longer existed: no row highlighted, a breadcrumb with
+   * only a session name in it, and a user looking at a live terminal with
+   * nothing anywhere saying which pane it was.
+   *
+   * The `activePane` guard survives that, and the reason is worth writing down
+   * because it does not look like it should. `<Terminal>` is rebuilt around the
+   * new address on the same render, and the pane it remembers is filed *per
+   * address*, so the status it reports next has no pane in it at all. But that
+   * status is a `setState` from a child effect: it is queued, not applied, and
+   * the effect here still runs against the status committed before the switch --
+   * which still names the pane that died. By the render where `activePane` would
+   * be null, the move has happened and `located` ends this effect one line
+   * earlier. Guarding on `lastLocated` alone instead was tried and changes
+   * nothing that any test can see, while giving every *other* reason the
+   * terminal's address can change -- a group key resolving to a `$N` on the
+   * first poll, say -- a way to yank a tab off a perfectly good pane.
+   *
    * Two of the guards are load-bearing. `lastLocated` having to still describe
    * `activePane` is what keeps this to one move per death: after the `select`
    * the remembered location is the successor, so the next poll falls straight
    * through. And a null successor -- an empty snapshot from a failed daemon
-   * poll, a session that is wholly gone, a tab reloaded onto a pane that had
-   * already died -- leaves the tab exactly where it is, and the breadcrumb goes
-   * on saying the pane is gone, because then that is the whole of what is known.
+   * poll, a `?session=` tab pinned to a session that is wholly gone, a tab
+   * reloaded onto a pane that had already died -- leaves the tab exactly where
+   * it is, and the breadcrumb goes on saying the pane is gone, because then that
+   * is the whole of what is known.
    */
   useEffect(() => {
     if (!loaded || !activePane || located || pendingPane) return
     const was = lastLocated.current
     if (!was || was.pane.paneId !== activePane) return
-    const to = succeedPane(groups, was)
+    // `session` and not `was.session.key`: where the tab is attached *now*, so
+    // that a session destroyed under it can still be succeeded by the one the
+    // socket has already moved to.
+    const to = succeedPane(groups, was, session)
     if (!to || !term.current?.select(to.pane.paneId)) return
     lastLocated.current = to
     toast(`${was.pane.command} closed`, {
-      description: `${activePane} is gone. Moved to ${to.window.index}: ${to.window.name} › ${to.pane.command}.`,
+      description: `${activePane} is gone. Moved to ${landedLabel(to, was)}.`,
     })
-  }, [loaded, activePane, located, pendingPane, groups])
+  }, [loaded, activePane, located, pendingPane, groups, session])
 
   // This device's memory of which finished runs it has already been shown, and
   // the write that clears one: looking at a pane is what marks it seen. It is
@@ -460,10 +490,12 @@ export default function App() {
  * in `App` -- and the breadcrumb then describes the pane the terminal actually
  * moved to, which is the question it exists to answer.
  *
- * What is left here is the case where nothing better is known: the whole
- * session went, or the pane was already gone when this tab loaded, so there is
- * no window to fall back into. Naming the dead pane is then the honest reading,
- * because it is all the tab has.
+ * What is left here is the case where nothing better is known. Not the session
+ * going: that is followed too, into whichever session the tab was moved to. It
+ * is the pane already being gone when this tab loaded -- there is no remembered
+ * location to succeed -- and a `?session=` tab pinned to a session that has
+ * died, which must stay pinned rather than wander. Naming the dead pane is then
+ * the honest reading, because it is all the tab has.
  */
 function Breadcrumb({
   session,

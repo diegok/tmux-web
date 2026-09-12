@@ -60,6 +60,11 @@ import (
 //	re-assertion that was descheduled past a later edge from overwriting fresh
 //	news with stale news.
 //
+// WHAT KIND DOES NOT SETTLE is the TIMESTAMP a re-assertion writes under, which
+// is a second question with a criterion of its own -- see dating. The two are
+// separate because opencode's session.idle answers them differently: it is a
+// re-assertion, and it is also the moment the turn ended.
+//
 // It is per (event, state) pair and not per event: an event that writes working
 // on one branch and a resting state on another is an edge on the first and a
 // re-assertion on the second. pi's session_start is exactly that and is the
@@ -126,6 +131,110 @@ func reassertsFor(m Mapping) bool {
 	return m.state == tmux.StateIdle || m.state == tmux.StateBlocked
 }
 
+// dating is where a re-assertion's write takes its TIMESTAMP from.
+//
+// THE CRITERION, stated first for the same reason eventKind's is -- this is a
+// safety property and "these are the ones I thought of" is not one:
+//
+//	A re-assertion that CANNOT KNOW WHEN THE STATE WAS ENTERED dates its write
+//	FROM THE STANDING REPORT. One that IS ITSELF the transition into that state
+//	dates it FROM NOW.
+//
+// It is a second column and not a refinement of eventKind because the two ask
+// different questions of the same row. eventKind asks whether this write may
+// happen at all without looking first; dating asks, once it is happening, what
+// the timestamp on it MEANS. opencode's session.idle answers "re-assertion" to
+// the first and "now" to the second, and that pair is the whole reason this is
+// per event rather than one rule for every repair.
+//
+// WHAT IT IS FOR. ba544cd closed the serious half of the re-assertion race: a
+// re-assertion now also refuses to write when the standing report is NOT OLDER
+// than its own stamp, which stops a descheduled repair parking a stale finish
+// in front of the next first sight. It did not close the pure jitter case, and
+// the reason it could not is that the writer cannot see what the daemon holds:
+//
+//	Stop at T writes idle;T. The daemon accepts it, every device badges and
+//	stores T. A working edge from EARLIER in the turn, stamped T-d, was
+//	descheduled and lands afterwards: the daemon refuses it for being older and
+//	goes on holding idle;T, but the OPTION now reads working;T-d. Sixty seconds
+//	later idle_prompt reads working;T-d -- a state it disagrees with, older than
+//	its own stamp -- and under the old rule writes idle;T+60. That is strictly
+//	newer than the idle;T the daemon holds, so the daemon takes it, finishedAt
+//	moves to T+60, and every device that had already seen the finish badges
+//	again. The badge storm the re-assertion kind exists to stop, arriving
+//	through the writer.
+//
+// What the writer sees there -- working;T-d -- is byte-for-byte what a LOST
+// STOP leaves behind, which is the case the repair exists for. No comparison
+// can separate them. What can is the timestamp the repair writes: dating it
+// from the standing report makes the write A COMPARE-AND-SWAP, accepted by the
+// daemon exactly when the report the writer read is still the newest one the
+// daemon has accepted.
+//
+//   - Jitter: the write is dated (T-d)+1, the daemon holds idle;T, T-d+1 <= T,
+//     refused. Nothing moves and no device badges.
+//   - Lost Stop: the write is dated (T-d)+1, the daemon holds working;T-d,
+//     which is exactly what the writer read, so the write is strictly newer and
+//     accepted. The repair happens -- and the finish is dated at the turn's own
+//     last sign of life rather than sixty seconds after it, which is nearer the
+//     truth than the old answer was.
+//
+// ONE MILLISECOND IS NOT A FUDGE. The daemon's ordering filter is STRICTLY
+// newer, so a write dated at exactly the standing report's own timestamp is one
+// the daemon refuses -- the repair would do nothing in the case it exists for.
+// The smallest timestamp that is newer than the report the writer read is that
+// report's plus one, and anything the daemon has accepted since is at least
+// that, so it is also the largest timestamp that still fails when the daemon
+// knows something the option does not. The wire format is denominated in
+// milliseconds; this is one unit of it.
+//
+// WHY NOT DATE EVERY RE-ASSERTION THIS WAY. opencode's session.idle is a
+// re-assertion AND a genuine turn end -- it can fire twice inside one resting
+// period, which is the eventKind criterion, but when it fires the FIRST time
+// the turn really did just end. Dated from the standing report its finish would
+// be stamped at that turn's last working write, which is the last tool call:
+// up to a minute early, on every opencode turn, visible every time. A rare race
+// is not worth a certain regression, which is why this is a column and not a
+// rule.
+type dating int
+
+const (
+	// dateUnclassified is the zero value and means nobody decided, exactly as
+	// kindUnclassified does. datesFromStandingReport gives it the safe default
+	// -- a re-assertion whose knowledge of the entry time is unknown dates from
+	// the standing report -- and TestEveryReassertionSaysWhereItDates stops the
+	// table leaning on it.
+	dateUnclassified dating = iota
+	// dateFromNow stamps the write when the writer's process started, which is
+	// what every write in this project did before this column existed.
+	dateFromNow
+	// dateFromStandingReport stamps it one millisecond after the report the
+	// writer read, which makes the write a compare-and-swap against the
+	// daemon's own ordering filter.
+	dateFromStandingReport
+)
+
+// datesFromStandingReport reports whether this mapping's write takes its
+// timestamp from the report already on the pane.
+//
+// THE DEFAULT IS THE SAFE DIRECTION, and it is the opposite asymmetry from the
+// one that settles reassertsFor -- because the costs are the opposite way
+// round. An unclassified re-assertion dated from NOW re-dates a finish on the
+// jitter race and storms every enrolled device; dated from the STANDING REPORT
+// the worst it does is stamp a genuine transition early, which shows a finish
+// as older than it was and can never produce a badge nobody earned. So the
+// unknown case takes the one that cannot storm.
+//
+// An EDGE dates from now and must not carry a dating at all: it never reads the
+// standing report, so there is nothing to date from. Same rule, and the same
+// reason, as a form on a mapping that does not rest.
+func datesFromStandingReport(m Mapping) bool {
+	if !reassertsFor(m) {
+		return false
+	}
+	return m.dates != dateFromNow
+}
+
 // textSource is where a mapping's activity text comes from.
 //
 // It is declared here, next to the states, for the same reason eventKind is:
@@ -187,6 +296,12 @@ type Mapping struct {
 	// one: the zero value is "nobody decided", not "edge". See eventKind for
 	// the criterion and reassertsFor for what an undecided one falls back to.
 	kind eventKind
+	// dates is where a RE-ASSERTION's write takes its timestamp from, and it is
+	// meaningless on anything else: an edge never reads the standing report, so
+	// it has nothing to date from. Every re-assertion names one, for the same
+	// reason every mapping names a kind -- see dating for the criterion and
+	// datesFromStandingReport for what an undecided one falls back to.
+	dates dating
 	// form is the screen form a blocked mapping's badge rests on: THE GRAMMAR
 	// ITSELF, not its name. A blocked mapping may exist ONLY where a grammar
 	// can confirm it -- the event says the agent is waiting and the grammar
@@ -223,6 +338,11 @@ func (m Mapping) State() string { return m.state }
 // Reasserts reports whether this mapping's write must read the standing report
 // first. See reassertsFor for the default an unclassified mapping gets.
 func (m Mapping) Reasserts() bool { return reassertsFor(m) }
+
+// DatesFromStandingReport reports whether this mapping's write is dated from
+// the report already on the pane rather than from now. It is meaningful only
+// where Reasserts is true; see dating for the criterion.
+func (m Mapping) DatesFromStandingReport() bool { return datesFromStandingReport(m) }
 
 // Text is the activity line this mapping publishes, read out of the payload by
 // whichever of activity.go's readers the table named. "" is rung 4 of the
@@ -358,8 +478,15 @@ var rules = map[string]agentTable{
 		// fire, so the standing state disagrees and the finish is written. The
 		// one case it loses is a turn whose START write also failed, and that
 		// is a pane that never showed working either.
+		//
+		// DATED FROM NOW, and it is the only re-assertion that is. It is a
+		// genuine turn end as well as a re-assertion: when it fires the first
+		// time, the turn ended at that moment and this event knows it. Dating
+		// it from the standing report would stamp the finish at the turn's last
+		// working write -- its last tool call, up to a minute earlier -- on
+		// every opencode turn. See dating for why that trade is refused.
 		"session.idle": {mapping: Mapping{name: "opencode/session.idle", state: tmux.StateIdle,
-			kind: kindReassertion}},
+			kind: kindReassertion, dates: dateFromNow}},
 		// session.created is absent on purpose: it is the plugin's own
 		// bookkeeping, the event that establishes parentage, and not a state
 		// of the pane.
@@ -429,12 +556,15 @@ var claudeNotifications = map[string]Mapping{
 	// since". It re-asserts what Stop already said, so it is a REPAIR: without
 	// that, an idle_prompt over a standing idle re-dates the finish and
 	// re-badges every device, once per turn, a minute after every turn.
+	// DATED FROM THE STANDING REPORT. "About sixty seconds ago" is the whole
+	// content of this event: it knows the turn ended and it does not know when,
+	// so its own stamp is a minute of guesswork. See dating.
 	"idle_prompt": {name: "claude/Notification(idle_prompt)",
-		state: tmux.StateIdle, kind: kindReassertion},
+		state: tmux.StateIdle, kind: kindReassertion, dates: dateFromStandingReport},
 	// The wait ended and the task was not continued. Same suppression, same
 	// reason.
 	"quota_auto_resume_disabled": {name: "claude/Notification(quota_auto_resume_disabled)",
-		state: tmux.StateIdle, kind: kindReassertion},
+		state: tmux.StateIdle, kind: kindReassertion, dates: dateFromStandingReport},
 
 	// Ignored PENDING A CAPTURE, all four. Each is a real wait drawn on this
 	// pane's root screen that no registered form can confirm, and a blocked
@@ -595,7 +725,11 @@ func claudeStopSubagentRunning(payload []byte) string {
 // this subcommand. The key is namespaced because it is ours and not pi's.
 var piSessionStarts = map[string]Mapping{
 	"working": {name: "pi/session_start(working)", state: tmux.StateWorking, kind: kindEdge},
-	"idle":    {name: "pi/session_start(idle)", state: tmux.StateIdle, kind: kindReassertion},
+	// DATED FROM THE STANDING REPORT. A reload is not a transition: the agent
+	// was already idle, for an unknown length of time, and this event is the
+	// extension coming back and asking what it missed.
+	"idle": {name: "pi/session_start(idle)", state: tmux.StateIdle,
+		kind: kindReassertion, dates: dateFromStandingReport},
 }
 
 // piSessionStartIdle reads that flag.

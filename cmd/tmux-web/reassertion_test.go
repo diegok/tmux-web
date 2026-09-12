@@ -197,7 +197,7 @@ func TestAGenuineFinishIsNotSuppressedByAnyStandingReport(t *testing.T) {
 		standing string
 	}{
 		{"the previous turn's idle, never cleared because this turn's start was lost",
-			"1;idle;" + at(-2 * time.Second)},
+			"1;idle;" + at(-2*time.Second)},
 		{"a report dated after this Stop's own stamp", "1;working;" + at(2*time.Second)},
 		{"a report dated after this Stop's own stamp, and resting", "1;idle;" + at(2*time.Second)},
 	} {
@@ -218,4 +218,182 @@ func TestAGenuineFinishIsNotSuppressedByAnyStandingReport(t *testing.T) {
 			}
 		})
 	}
+}
+
+// What TIMESTAMP a repair writes, which is a different question from whether it
+// writes at all and is settled per event by internal/report's `dating` column.
+//
+// THE CASE THE TIMESTAMP EXISTS FOR cannot be told apart by the comparison. A
+// re-assertion that sees `working;<older>` is looking at one of two panes and
+// the bytes are identical:
+//
+//   - a LOST STOP -- the turn ended, nothing wrote it, and the daemon is still
+//     holding that same working report. The repair must land.
+//   - JITTER -- the Stop landed and every device badged, and then a working
+//     write from earlier in the turn arrived late and overwrote the option. The
+//     daemon refused it and still holds the idle; the option lies. A repair
+//     dated now is strictly newer than that idle, so the daemon takes it,
+//     finishedAt moves, and every device badges a finish it already cleared.
+//
+// Dating the write one millisecond after the report the writer READ makes it a
+// compare-and-swap: it is newer than the standing report and nothing else, so
+// the daemon takes it exactly when the standing report is still what the daemon
+// holds. reassertion_integration_test.go runs both interleavings end to end
+// against a real server and the real filter; this is the writer's own half,
+// where the value on the wire can be read directly.
+func TestAReassertionDatedFromTheStandingReportWritesItsTimestamp(t *testing.T) {
+	standing := time.Now().Add(-2 * time.Second).UnixMilli()
+
+	for _, tc := range []struct {
+		name, event, stdin string
+		wantStamp          func(before, after int64) (int64, string)
+	}{
+		{
+			"idle_prompt dates from the standing report",
+			"Notification", `{"hook_event_name":"Notification","notification_type":"idle_prompt"}`,
+			func(int64, int64) (int64, string) {
+				return standing + 1, "one millisecond after the report it read: the smallest stamp " +
+					"the daemon's strictly-newer filter will take over that report, and one that " +
+					"anything the daemon accepted since will outrank"
+			},
+		},
+		{
+			"quota_auto_resume_disabled dates from the standing report",
+			"Notification", `{"hook_event_name":"Notification","notification_type":"quota_auto_resume_disabled"}`,
+			func(int64, int64) (int64, string) {
+				return standing + 1, "same event class as idle_prompt: it re-asserts a rest that " +
+					"something else began, and it does not know when"
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &recordingTmux{standing: "1;working;" + strconv.FormatInt(standing, 10)}
+			runReportWith(t, r, []string{"--agent", "claude", "--event", tc.event}, withStdin(tc.stdin))
+			if r.sets != 1 {
+				t.Fatalf("made %d writes, want 1: the standing report disagrees and is older", r.sets)
+			}
+			rep := wroteReport(t, r)
+			want, why := tc.wantStamp(0, 0)
+			if rep.Timestamp != want {
+				t.Errorf("wrote timestamp %d, want %d -- %s", rep.Timestamp, want, why)
+			}
+			if rep.State != tmux.StateIdle {
+				t.Errorf("wrote %q, want idle", rep.State)
+			}
+		})
+	}
+}
+
+// opencode's session.idle is the one re-assertion dated from NOW, and it needs
+// its own test because it is the exception the whole column exists to preserve.
+//
+// It can fire twice inside one resting period -- measured on opencode 1.18.30,
+// on a turn that died at the provider -- which makes it a re-assertion. But the
+// FIRST time it fires the turn really has just ended, and this event is the
+// thing that knows. Dated from the standing report its finish would carry that
+// turn's last working write, which is its last tool call: up to a minute early,
+// on every opencode turn, every time. That is the certain regression this
+// column refuses to trade for a rare race.
+func TestOpencodesTurnEndIsStillDatedNow(t *testing.T) {
+	standing := time.Now().Add(-30 * time.Second).UnixMilli()
+	before := time.Now().UnixMilli()
+
+	r := &recordingTmux{standing: "1;working;" + strconv.FormatInt(standing, 10)}
+	runReportWith(t, r, []string{"--agent", "opencode", "--event", "session.idle"},
+		withStdin(`{"type":"session.idle","properties":{"sessionID":"ses_root"}}`))
+	after := time.Now().UnixMilli()
+
+	if r.shows != 1 {
+		t.Errorf("read the standing option %d times, want 1: it is still a re-assertion", r.shows)
+	}
+	if r.sets != 1 {
+		t.Fatalf("made %d writes, want 1: the standing working disagrees and is older", r.sets)
+	}
+	rep := wroteReport(t, r)
+	if rep.Timestamp < before || rep.Timestamp > after {
+		t.Errorf("wrote timestamp %d, want one from this turn end itself (between %d and %d). "+
+			"Dated from the standing report it would read %d -- thirty seconds before the turn "+
+			"actually ended, which is a visible regression on every opencode turn",
+			rep.Timestamp, before, after, standing+1)
+	}
+}
+
+// A repair on a pane with no readable standing report is dated NOW, whatever
+// its column says, because there is nothing to date from.
+//
+// It is the same three cases the write/no-write decision already treats as "no
+// report" -- unset, another schema, dated past the future skew -- and the
+// answer has to be the same one for the same reason: ParseReport refuses the
+// value, so the DAEMON has no report for this pane either. Observe deletes its
+// memory of a pane whose value it cannot parse, so the next value it sees is a
+// first sight and is accepted whatever its timestamp. There is nothing to
+// compare-and-swap against, and dating from a report nobody could read is not
+// an option that exists.
+func TestARepairWithNoReadableStandingReportIsDatedNow(t *testing.T) {
+	for _, tc := range []struct {
+		name, standing, why string
+	}{
+		{"an unset option", "",
+			"the ordinary case for the first report a pane ever gets"},
+		{"a value from another schema", "2;idle;" + strconv.FormatInt(time.Now().UnixMilli(), 10),
+			"unreadable is unreadable however new it claims to be"},
+		{"a value more than five seconds ahead",
+			"1;working;" + strconv.FormatInt(time.Now().Add(30*time.Second).UnixMilli(), 10),
+			"ParseReport discards it and so does the daemon; this write is what repairs an " +
+				"option some other clock poisoned"},
+		{"a truncated value", "1;idle",
+			"three fields is the minimum and this has two"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := time.Now().UnixMilli()
+			r := &recordingTmux{standing: tc.standing}
+			runReportWith(t, r, []string{"--agent", "claude", "--event", "Notification"},
+				withStdin(`{"hook_event_name":"Notification","notification_type":"idle_prompt"}`))
+			after := time.Now().UnixMilli()
+			if r.sets != 1 {
+				t.Fatalf("made %d writes over standing %q, want 1 -- %s", r.sets, tc.standing, tc.why)
+			}
+			if rep := wroteReport(t, r); rep.Timestamp < before || rep.Timestamp > after {
+				t.Errorf("wrote timestamp %d, want one from now (between %d and %d): there is no "+
+					"readable report to date from, and the daemon has none either -- %s",
+					rep.Timestamp, before, after, tc.why)
+			}
+		})
+	}
+}
+
+// A read that FAILED is the same answer again, and it has its own test because
+// it is a different branch: tmux exits 1 on an unset user option, so this is
+// what every pane looks like before its first report.
+func TestARepairWhoseReadFailsIsDatedNow(t *testing.T) {
+	before := time.Now().UnixMilli()
+	r := &recordingTmux{err: errTmuxFailed}
+	runReportWith(t, r, []string{"--agent", "claude", "--event", "Notification"},
+		withStdin(`{"hook_event_name":"Notification","notification_type":"idle_prompt"}`))
+	after := time.Now().UnixMilli()
+	if r.sets != 1 {
+		t.Fatalf("made %d writes, want 1", r.sets)
+	}
+	if rep := wroteReport(t, r); rep.Timestamp < before || rep.Timestamp > after {
+		t.Errorf("wrote timestamp %d, want one from now (between %d and %d)", rep.Timestamp, before, after)
+	}
+}
+
+// wroteReport is the last value this stub was asked to store, parsed.
+//
+// Parsed rather than compared as a string, because the claim in this file is
+// about the TIMESTAMP: a test that compared whole values would need to build
+// the activity field and the version prefix as well, and would then be
+// asserting against its own copy of FormatReport.
+func wroteReport(t *testing.T, r *recordingTmux) tmux.Report {
+	t.Helper()
+	last := r.lastSet()
+	if last == nil {
+		t.Fatal("nothing was written")
+	}
+	rep, ok := tmux.ParseReport(last[len(last)-1], time.Now())
+	if !ok {
+		t.Fatalf("wrote %q, which is not a readable report", last[len(last)-1])
+	}
+	return rep
 }

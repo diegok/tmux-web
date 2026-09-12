@@ -1,7 +1,12 @@
 # tmux-web v3 — agent-side reporting
 
 Date: 2026-09-10
-Status: design, not agreed. Revision 6 is a **correction of a justification, not
+Status: design, not agreed. Revision 7 is written **after the plan was executed**
+and records the only rule the shipped code states differently from this
+document: the re-assertion criterion has gained a second clause and a second
+column, both of them from failures found after Task 14 landed. See "Revision 7";
+everything below it is unchanged and is the design as it was agreed.
+Revision 6 is a **correction of a justification, not
 of a decision**: the exposure argument that revisions 1–5 used to choose activity
 over prompt and to shred tool arguments does not survive the threat model, and it
 had quietly distorted one rule. See "Revision 6". Revision 5 was written against
@@ -18,6 +23,106 @@ Depends on: the hardening of `internal/tmux/snapshot.go` against hostile
 not a thing this design is waiting on. It is a prerequisite, it answers one of
 the questions this document opened with, and it constrains the transport more
 than expected — see "The hazard" and "Why the report is not a fourteenth field".
+
+## Revision 7
+
+**Written after the fact, and it changes one rule.** Revisions 1-6 were design
+rounds; this one is a record of what the implementation had to add to the
+edge/re-assertion criterion once the code was running, so that a reader of this
+document is not left holding a criterion the code no longer states. Two things
+were added, in two commits, and neither of them was foreseen here.
+
+**1. A re-assertion also compares the TIMESTAMP** (`ba544cd`). Revision 4 wrote
+the rule as:
+
+> An edge writes unconditionally; a re-assertion **reads the standing option
+> first** and writes only if the standing report's state differs from the one it
+> would write.
+
+That is one clause and it needed two. A re-assertion stamps when its process
+starts and can be descheduled for any length of time before it reaches tmux, so
+an edge from a **later** event -- a turn start, the user typing -- can land in
+between and be standing there when the read finally happens. The one-clause rule
+saw a state it disagreed with and overwrote fresh news with stale news. Nothing
+moves that day, because the daemon refuses the older value; what it leaves
+behind is a **resting report standing on a working pane**, and the next FIRST
+SIGHT -- a restart, a tmux-server generation change, a pane that left `keep` and
+came back -- has no ordering filter to protect it, accepts what the option
+holds, and with no client connected derives `finishedAt` from it immediately.
+The rule as shipped:
+
+> An edge writes unconditionally; a re-assertion **reads the standing option
+> first** and writes only if the standing report both **differs in state** from
+> the one it would write **and is older than it**.
+
+Not-older rather than strictly-newer, and the equal case is not a rounding
+detail: a report stamped in the same millisecond is one the daemon has already
+accepted and would refuse this write against, so writing can only swap the
+option's contents for a value no reader will take.
+
+**2. A re-assertion is dated per event, and that needed a criterion of its own.**
+The second clause closed the serious case and left the pure jitter race open,
+and the reason it could not close it is that **the writer cannot see what the
+daemon holds**:
+
+> `Stop` at T writes `idle;T`. The daemon accepts it, every device badges and
+> stores T. A `working` write from EARLIER in the turn, stamped T-d, was
+> descheduled and lands afterwards: the daemon refuses it for being older and
+> goes on holding `idle;T`, but the OPTION now reads `working;T-d`. Sixty
+> seconds later `idle_prompt` reads `working;T-d` -- a state it disagrees with,
+> older than its own stamp, so every clause above says repair -- and writes
+> `idle;T+60`. That is strictly newer than the `idle;T` the daemon holds, so the
+> daemon takes it, `finishedAt` moves to T+60, and **every device that had
+> already cleared this finish badges again**.
+
+What the writer sees there is byte-for-byte what a **lost `Stop`** leaves
+behind, which is the case the repair exists for. No comparison can separate
+them; what can is the timestamp the repair writes. So the table gained a second
+column, with its own criterion:
+
+> **A re-assertion that CANNOT KNOW when the state was entered dates its write
+> FROM THE STANDING REPORT. One that IS ITSELF the transition into that state
+> dates it FROM NOW.**
+
+Dating from the standing report means **one millisecond after the report the
+writer read**, which makes the write a compare-and-swap against the daemon's own
+strictly-newer filter: it is accepted exactly when the report the writer read is
+still the newest the daemon has accepted, and refused when the daemon knows
+something the option has since lost. Exactly the standing report's own timestamp
+would not do -- the daemon's filter is strictly newer, so the repair would be a
+no-op in the case it exists for. One millisecond is the unit the wire format is
+denominated in.
+
+| Dating | Re-assertions |
+| --- | --- |
+| From the standing report | `claude/Notification(idle_prompt)`, `claude/Notification(quota_auto_resume_disabled)`, `pi/session_start(idle)` |
+| From now | `opencode/session.idle` |
+
+**Why not date every re-assertion this way**, which also closes the race and is
+simpler: `opencode/session.idle` is a re-assertion **and** a genuine turn end. It
+can fire twice inside one resting period, which is the revision 4 criterion, but
+when it fires the first time the turn really did just end and this event is the
+thing that knows. Dated from the standing report its finish would carry that
+turn's last `working` write -- its last tool call, up to a minute earlier -- **on
+every opencode turn, visibly, forever**. A rare race is not worth a certain
+regression, which is why this is a column and not a rule.
+
+**Where the standing report is absent, unparseable or future-dated, the write is
+dated from now**, and that is the existing rule rather than a new one:
+`ParseReport` refuses all three, and `Reports.Observe` **deletes its memory** of
+a pane whose value it cannot parse, so the daemon's next sight of that pane is a
+first sight and accepts whatever it is handed. There is nothing to
+compare-and-swap against because the daemon is not holding anything either, and
+both ends reach that conclusion through the same function.
+
+**The default for an unclassified row is the opposite way round from the
+kind's**, because the costs are. An unclassified *kind* defaults to
+re-assertion, because an unnecessary read costs one fork and a missing one costs
+a badge storm. An unclassified *dating* defaults to **from the standing report**,
+because dating an unknown re-assertion from now re-dates a finish on the jitter
+race and storms every device, while dating it from the standing report can at
+worst stamp a genuine transition early -- a finish shown as older than it was,
+never a badge nobody earned.
 
 ## Revision 6
 

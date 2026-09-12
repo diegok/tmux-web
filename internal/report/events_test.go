@@ -310,3 +310,133 @@ func TestTheUnclassifiedDefault(t *testing.T) {
 		t.Error("an explicit re-assertion writing working does not reassert")
 	}
 }
+
+// Which repairs date from the standing report, written out in full for the same
+// reason the blocked mappings and the repairs themselves are.
+//
+// It decides how a badge is DATED, and dating is what every device's `seen`
+// marker is compared against, so a row that changes here changes whether
+// somebody's phone lights up. idle_prompt fires about sixty seconds after every
+// turn and knows nothing about when the turn ended; opencode's session.idle IS
+// the turn ending. Both are re-assertions and they must not be dated the same
+// way -- the first re-dates a finish that a device already cleared, and dating
+// the second from the standing report would stamp every opencode finish at that
+// turn's last tool call, up to a minute early, every time.
+//
+// TestAReassertionDatedFromTheStandingReportWritesItsTimestamp drives the
+// behaviour, and reassertion_integration_test.go drives the interleaving. This
+// is the roll call.
+func TestTheRepairsDatedFromTheStandingReportAreExactlyThese(t *testing.T) {
+	want := map[string]bool{
+		// "Claude finished responding about sixty seconds ago." About. The
+		// event does not know when, and its own stamp is a minute of guesswork.
+		"claude/Notification(idle_prompt)": true,
+		// The quota wait ended and the task was not continued. Like
+		// idle_prompt, it re-asserts a rest that something else began.
+		"claude/Notification(quota_auto_resume_disabled)": true,
+		// An extension reload. The agent was already idle, for an unknown
+		// length of time, and this event is the extension asking what it
+		// missed.
+		"pi/session_start(idle)": true,
+		// And the one re-assertion that is NOT here, named so that a reader
+		// finds the exception where the rule is: opencode/session.idle is a
+		// re-assertion AND a genuine turn end, so it dates from now.
+	}
+	reassertions := 0
+	for _, m := range allMappings() {
+		if !reassertsFor(m) {
+			continue
+		}
+		reassertions++
+		if got := datesFromStandingReport(m); got != want[m.name] {
+			t.Errorf("%s dates from the standing report = %v, want %v", m.name, got, want[m.name])
+		}
+	}
+	if reassertions == 0 {
+		t.Fatal("no mapping reasserts at all; this test then proves nothing")
+	}
+	// The exception, asserted rather than implied by the map above: a mutant
+	// that made every re-assertion date from now would fail the rows above, and
+	// one that made every re-assertion date from the standing report has to
+	// fail somewhere too.
+	for _, m := range allMappings() {
+		if m.name == "opencode/session.idle" && datesFromStandingReport(m) {
+			t.Error("opencode/session.idle dates from the standing report. It is the one " +
+				"re-assertion that is also a genuine turn end: dating it that way stamps every " +
+				"opencode finish at that turn's last working write, up to a minute early, on " +
+				"every turn -- a certain regression traded for a rare race")
+		}
+	}
+}
+
+// Every re-assertion says where it dates from, in the table, next to the
+// reason -- and nothing else carries a dating at all.
+//
+// The zero value is deliberately NOT "from now", which is what every write did
+// before this column existed, and the reason is the reason kindUnclassified is
+// not "edge": a row added without a decision must not inherit the answer that
+// storms. An event nobody has thought about is an event whose knowledge of the
+// entry time is unknown, and the unknown case is the one that cannot re-date a
+// finish somebody already cleared.
+func TestEveryReassertionSaysWhereItDates(t *testing.T) {
+	seen := 0
+	for _, m := range allMappings() {
+		if !reassertsFor(m) {
+			// An edge never reads the standing report, so there is nothing to
+			// date from. Carrying a dating here would be as meaningless as
+			// carrying a form on a mapping that does not rest -- and would make
+			// the roll call above pass on a row that never reads.
+			if m.dates != dateUnclassified {
+				t.Errorf("%s is an edge and carries a dating; only a re-assertion has a report to date from", m.name)
+			}
+			continue
+		}
+		seen++
+		if m.dates == dateUnclassified {
+			t.Errorf("%s is a re-assertion and nobody said whether it dates from now or from the "+
+				"standing report. The criterion: a re-assertion that CANNOT KNOW when the state was "+
+				"entered dates from the standing report; one that IS ITSELF the transition dates "+
+				"from now", m.name)
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no mapping reasserts at all; this test then proves nothing")
+	}
+}
+
+// The dating default, which no table row can exercise because the test above
+// forbids an unclassified re-assertion from existing.
+//
+// It is the opposite asymmetry from reassertsFor's, because the costs are the
+// opposite way round: dating an unknown re-assertion from NOW re-dates a finish
+// on the jitter race and storms every enrolled device, while dating it from the
+// standing report can at worst stamp a genuine transition early -- a finish
+// shown as older than it was, never a badge nobody earned.
+func TestTheUnclassifiedDatingDefault(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		m    Mapping
+		want bool
+	}{
+		{"an unclassified re-assertion", Mapping{state: tmux.StateIdle, kind: kindReassertion}, true},
+		{"a re-assertion by the kind default", Mapping{state: tmux.StateIdle}, true},
+		{"a blocked re-assertion by the kind default", Mapping{state: tmux.StateBlocked}, true},
+		{"an explicit dateFromNow re-assertion",
+			Mapping{state: tmux.StateIdle, kind: kindReassertion, dates: dateFromNow}, false},
+		{"an explicit dateFromStandingReport re-assertion",
+			Mapping{state: tmux.StateIdle, kind: kindReassertion, dates: dateFromStandingReport}, true},
+		// An edge dates from now whatever the column says, because it never
+		// reads the standing report at all. The last row is the one that keeps
+		// a mutant which ignored the kind from surviving.
+		{"an edge", Mapping{state: tmux.StateIdle, kind: kindEdge}, false},
+		{"a working edge by the kind default", Mapping{state: tmux.StateWorking}, false},
+		{"an edge that somehow carries a dating",
+			Mapping{state: tmux.StateIdle, kind: kindEdge, dates: dateFromStandingReport}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := datesFromStandingReport(tc.m); got != tc.want {
+				t.Errorf("datesFromStandingReport(%+v) = %v, want %v", tc.m, got, tc.want)
+			}
+		})
+	}
+}

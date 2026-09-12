@@ -4067,3 +4067,42 @@ Carried from the design's open questions, and each is recorded here so that find
 - **Cross-agent and nested-CLI panes are not handled** (questions 9 and 11). The nested `claude` inside a `claude` is *certain*, not hypothetical, and no field test can close it. Whether teammate and background-session hook processes carry `TMUX_PANE` is measured in Task 19 and decides whether that class needs anything at all.
 - **A subagent false-idle on pi or opencode with no client connected is undefended.** The filters are absence-coded and fail open, and behind them there is one mechanism that only runs when somebody is watching — and that leaks at a measured rate even then.
 - **What cannot be tested in CI**: that a real agent, running a real integration, produces the events we mapped. That is a manual check per agent per upgrade, and the honest mitigation is that a wrong mapping degrades to no report, which degrades to v2.
+
+---
+
+## Amendments after this plan was executed
+
+This plan is a record of what was planned, and its tasks are not edited after
+they land. Two things about **Task 14** are now stated differently in the code
+than they are above, both of them from failures found after it shipped, and they
+are recorded here rather than folded into the task.
+
+**Task 14's criterion has a second clause** (`ba544cd`). As written above, a
+re-assertion "writes only if the standing report's state differs from the one it
+would write". As shipped it writes only if the standing report **differs in
+state AND is older than this event**. A re-assertion stamps at process start and
+can be descheduled past a later edge, and the one-clause rule then overwrote
+fresh news with stale news -- leaving a resting report standing on a working
+pane, which the next first sight reads as a finish and badges.
+
+**A second column decides how a repair is DATED, per event.** The clause above
+closed the case where the option is NEWER than the event and left the one where
+it is older and stale: the writer cannot tell `working;T-d` written late by a
+descheduled edge (the daemon holds a newer `idle;T`) from `working;T-d` left by
+a turn whose `Stop` was lost (the daemon holds that same working). Its criterion:
+
+> **A re-assertion that cannot know when the state was entered dates its write
+> from the standing report; one that is itself the transition dates from now.**
+
+Dating from the standing report means one millisecond past it, which makes the
+write a compare-and-swap against the daemon's strictly-newer filter.
+`idle_prompt`, `quota_auto_resume_disabled` and pi's `session_start(idle)` date
+that way; opencode's `session.idle` dates from now, because it is a re-assertion
+and a genuine turn end at once and dating it from the standing report would
+stamp every opencode finish at that turn's last tool call. See revision 7 of the
+design document for the full argument.
+
+**Both tables moved.** `cmd/tmux-web/events.go` and `cmd/tmux-web/activity.go`
+are now `internal/report`, so that the agent list, the screen grammars and the
+three integrations' event lists can be held to one source each. Every file path
+in the tasks above is the path as it was at the time.

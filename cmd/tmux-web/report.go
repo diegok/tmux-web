@@ -128,6 +128,11 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 	// would make `report --state idle` silently do nothing on a pane that is
 	// already idle.
 	reassert := false
+	// And, for a re-assertion, whether its write is dated from the standing
+	// report rather than from now. Meaningless unless reassert; false for the
+	// manual form for the same reason as above, and because a person typing
+	// --state is describing the pane at the moment they type.
+	fromStanding := false
 
 	if integration {
 		payload, overCap := readPayload(stdin)
@@ -171,6 +176,7 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 		}
 		*state = m.State()
 		reassert = m.Reasserts()
+		fromStanding = m.DatesFromStandingReport()
 		// *text was empty by construction -- --text belongs to the manual form
 		// and the two forms cannot be combined -- so the table's own reader is
 		// the only thing that can fill it. Most mappings have none, and that is
@@ -191,15 +197,6 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 		// Running an agent outside tmux is not an error, it is a no-op.
 		return 0
 	}
-	value := tmux.FormatReport(*state, ms, *text)
-	// The writer checks its own shape before the write. A botched write does
-	// not clear a report: a value of exactly ";" is refused by tmux with "empty
-	// value" and the option KEEPS its previous contents, which is the more
-	// dangerous of the two outcomes.
-	if _, ok := tmux.ParseReport(value, time.Now()); !ok {
-		fmt.Fprintf(stderr, "tmux-web report: refusing to write a value it could not read back\n")
-		return 0
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), reportTimeout)
 	defer cancel()
 	// One client for both calls. The timeout covers the pair: it is there so a
@@ -213,7 +210,31 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 	// opencode pays it once per turn, on session.idle, and on nothing else:
 	// its two hot events (session.status busy, 17 times in one three-tool
 	// turn, and tool.execute.before) are working edges and read nothing.
-	if reassert && standingSupersedes(ctx, tm, pane, *state, ms) {
+	//
+	// It decides two things from the one fork, not one: whether to write at
+	// all, and what timestamp to write under. The second is the mapping's own
+	// decision -- see internal/report's `dating` -- and it is the writer's half
+	// of it, because the standing report is the only thing here that knows when
+	// the state was entered.
+	if reassert {
+		stamp, write := reassertedStamp(ctx, tm, pane, *state, ms, fromStanding)
+		if !write {
+			return 0
+		}
+		ms = stamp
+	}
+
+	value := tmux.FormatReport(*state, ms, *text)
+	// The writer checks its own shape before the write. A botched write does
+	// not clear a report: a value of exactly ";" is refused by tmux with "empty
+	// value" and the option KEEPS its previous contents, which is the more
+	// dangerous of the two outcomes.
+	//
+	// After the re-assertion read rather than before it, because that read can
+	// change the timestamp: a shape check on a value the writer then edits
+	// checks a value nobody stores.
+	if _, ok := tmux.ParseReport(value, time.Now()); !ok {
+		fmt.Fprintf(stderr, "tmux-web report: refusing to write a value it could not read back\n")
 		return 0
 	}
 
@@ -226,12 +247,13 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 	return 0
 }
 
-// standingSupersedes reports whether the report already on this pane makes a
-// re-assertion's write unnecessary or wrong. It is the one read a re-assertion
-// pays for, and the whole decision comes out of it.
+// reassertedStamp is the one read a re-assertion pays for, and both halves of
+// its decision come out of it: whether to write at all, and what timestamp to
+// write under.
 //
-// Everything unreadable answers false -- no standing report, so nothing to
-// defer to, so the repair happens. That covers more cases than it looks:
+// Everything unreadable answers "write, dated now" -- no standing report, so
+// nothing to defer to and nothing to date from, so the repair happens as it
+// always did. That covers more cases than it looks:
 //
 //   - The option is unset, which is the ordinary case for the first report a
 //     pane ever gets. tmux does not answer that with an empty string: `show
@@ -245,6 +267,14 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 //     cannot read is a pane the daemon has no report for, and the write is what
 //     repairs an option some other clock poisoned.
 //
+// DATING FROM NOW IS THE RIGHT ANSWER IN ALL THREE, and it is the daemon's own
+// rule that makes it so rather than a convenience. Observe DELETES its memory
+// of a pane whose standing value it cannot parse, so the next value it sees is
+// a FIRST SIGHT and is accepted whatever its timestamp. There is nothing to
+// compare-and-swap against, because the daemon is not holding anything either.
+// Both ends reach that conclusion through ParseReport, so they cannot disagree
+// about which of these three cases they are in.
+//
 // -p is pane-scoped and, unlike the daemon's #{@tmux_web_agent} format read, does
 // NOT walk up to the window, session and global options (measured: with only a
 // session-level value set, this read still says "invalid option"). Nothing this
@@ -257,16 +287,33 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 // difference; what it buys is that the skew window and the comparison below are
 // measured from one instant, so the function cannot decide that a value is both
 // believable and from the future.
-func standingSupersedes(ctx context.Context, tm tmuxRunner, pane, state string, ms int64) bool {
+func reassertedStamp(ctx context.Context, tm tmuxRunner, pane, state string, ms int64, fromStanding bool) (stamp int64, write bool) {
 	out, err := tm.Run(ctx, "show-options", "-p", "-t", pane, "-v", tmux.AgentOption)
 	if err != nil {
-		return false
+		return ms, true
 	}
 	rep, ok := tmux.ParseReport(out, time.UnixMilli(ms))
 	if !ok {
-		return false
+		return ms, true
 	}
-	return reportSupersedes(rep, state, ms)
+	if reportSupersedes(rep, state, ms) {
+		return 0, false
+	}
+	if !fromStanding {
+		return ms, true
+	}
+	// One millisecond after the report this writer read, which makes the write
+	// a COMPARE-AND-SWAP against the daemon's ordering filter: the daemon takes
+	// it exactly when what it has accepted is still what the option holds, and
+	// refuses it when the daemon knows something newer that the option has
+	// since lost. See internal/report's `dating` for the two interleavings that
+	// separates, and for why the same timestamp rather than one past it would
+	// make the repair a no-op in the case it exists for.
+	//
+	// It cannot be in the future: reportSupersedes has already returned above
+	// for any standing report not older than this event, so rep.Timestamp < ms
+	// and rep.Timestamp+1 <= ms.
+	return rep.Timestamp + 1, true
 }
 
 // reportSupersedes is the comparison itself: does this standing report leave a

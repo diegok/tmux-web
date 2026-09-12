@@ -78,7 +78,7 @@ export function handlers(report: (item: ReportItem) => void): Record<string, Han
       // write idle;<now> and re-badge every device on every reload. `report`
       // knows that from its own table; the extension just names the event.
       //
-      // `tmux_web_is_idle` is the key cmd/tmux-web/events.go discriminates on,
+      // `tmux_web_is_idle` is the key internal/report/events.go discriminates on,
       // and the namespace is because the key is ours and not pi's. ctx is not
       // part of pi's event object and no recorded payload carries it, so this
       // is the only place it can come from. The Go side reads anything absent

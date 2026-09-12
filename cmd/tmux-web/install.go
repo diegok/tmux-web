@@ -90,6 +90,13 @@ const queueImport = "import { claimReporter, makeQueue, spawnReport } from './qu
 // Neither of the two new ones needs a user-owned file edited, and that is why
 // they are here: the bar is rule 2 above, and a directory drop clears it in a
 // way that a `plugin` array or a `pi install` does not. See globalSpec.note.
+//
+// ITS KEYS ARE tmux.Agents, and TestTheInstallableAgentsAreTheAgentsTheDaemonKnows
+// holds them there. This is the fourth place the list of agents was written out
+// and the only one that is not now derived from that one: an agent installable
+// here and unknown to the daemon installs an integration whose every report is
+// answered with `nothing known`, and an agent the daemon knows and this map does
+// not is one `tmux-web install` refuses by name.
 var agents = map[string]agentSpec{
 	"pi": {
 		file:   filepath.Join(".pi", "extensions", "tmux-web.ts"),

@@ -453,7 +453,7 @@ func TestIsBlockedOpencodeWantsTheWholeLine(t *testing.T) {
 // arrow pi highlights an option with, so the pairs that could plausibly cross
 // are not the ones that look alike from a distance.
 func TestBlockedRulesDoNotCrossAgents(t *testing.T) {
-	agents := []string{"claude", "opencode", "pi"}
+	agents := Agents
 	screens := map[string]string{}
 	for _, a := range agents {
 		screens[a] = readFixture(t, a+"-blocked.txt")
@@ -950,7 +950,7 @@ func (d markerDialog) extractQuestion(string) *Question {
 // and promoting a second is a decision with a capture behind it (open question
 // 10), not something a test gets to make. The registry is a package var, so it
 // is restored on the way out and no test in this package runs in parallel.
-func registerTestAgent(t *testing.T, name string, forms ...form) {
+func registerTestAgent(t *testing.T, name string, forms ...*Form) {
 	t.Helper()
 	if _, taken := blockedRules[name]; taken {
 		t.Fatalf("%q is a real agent: pick a name nothing ships", name)
@@ -964,13 +964,15 @@ func registerTestAgent(t *testing.T, name string, forms ...form) {
 	})
 }
 
-// Every form carries a non-empty, unique identifier.
+// Every form carries a non-empty, unique identifier, and FormsFor answers per
+// agent.
 //
-// Task 13's whitelist names one of these, and "every blocked entry names an
-// agent with a grammar" is VACUOUS -- claude is in the map whatever its forms
-// say -- so the id is the only thing that consistency test can fail on. A form
-// registered with "" would make RegisteredForm("") true and let a whitelist
-// entry naming nothing pass.
+// internal/report's blocked mappings hold these forms by pointer, so a name
+// nobody has can no longer be written down at all. What a pointer does NOT
+// settle is which agent a form belongs to -- every Form is reachable from every
+// package that imports this one -- and rule 2 only ever asks the pane's own
+// agent's grammars about the pane's screen. So FormsFor is the check that
+// matters now, and this is where it is held to the registry.
 func TestEveryRegisteredFormHasAUniqueID(t *testing.T) {
 	seen := map[string]string{}
 	for agent, forms := range blockedRules {
@@ -986,23 +988,47 @@ func TestEveryRegisteredFormHasAUniqueID(t *testing.T) {
 				t.Errorf("form id %q is registered for both %s and %s", f.ID, other, agent)
 			}
 			seen[f.ID] = agent
-			if !RegisteredForm(f.ID) {
-				t.Errorf("RegisteredForm(%q) = false for a form that is in the registry", f.ID)
+		}
+	}
+	// The three the design names, each under ITS OWN agent. A form that moved
+	// to another agent's list, or that a mapping reached for across agents, is
+	// a badge rule 2 deletes about 4.5 seconds after a client connects.
+	for _, tc := range []struct {
+		agent string
+		form  *Form
+	}{
+		{"claude", ClaudePermissionForm},
+		{"opencode", OpencodePermissionForm},
+		{"pi", PiSelectorForm},
+	} {
+		if !registeredFor(tc.agent, tc.form) {
+			t.Errorf("%s is not one of %s's registered forms", tc.form.ID, tc.agent)
+		}
+		// And not any other agent's, which is the half a membership test over
+		// every agent at once could never fail.
+		for _, other := range Agents {
+			if other != tc.agent && registeredFor(other, tc.form) {
+				t.Errorf("%s is registered for %s as well", tc.form.ID, other)
 			}
 		}
 	}
-	// The three the design names, exactly. A form renamed out from under the
-	// whitelist is a rename somebody makes on purpose.
-	for _, id := range []string{"claude/permission", "opencode/permission", "pi/selector"} {
-		if !RegisteredForm(id) {
-			t.Errorf("RegisteredForm(%q) = false: the whitelist names it", id)
+	// An agent nobody has captured a screen for has no forms, and an unknown
+	// name is not an error: both answer "nothing can confirm blocked here".
+	for _, agent := range []string{"", "claude-helper", "vim"} {
+		if got := FormsFor(agent); len(got) != 0 {
+			t.Errorf("FormsFor(%q) = %v, want none", agent, got)
 		}
 	}
-	for _, id := range []string{"", "claude", "claude/elicitation", "claude/permission "} {
-		if RegisteredForm(id) {
-			t.Errorf("RegisteredForm(%q) = true, want false", id)
+}
+
+// registeredFor is FormsFor's answer for one form, by identity.
+func registeredFor(agent string, want *Form) bool {
+	for _, f := range FormsFor(agent) {
+		if f == want {
+			return true
 		}
 	}
+	return false
 }
 
 // An agent with several forms is blocked when ANY of them matches, and the
@@ -1016,8 +1042,8 @@ func TestEveryRegisteredFormHasAUniqueID(t *testing.T) {
 // screen must not be treated as a screen with nothing on it.
 func TestIsBlockedMatchesAnyRegisteredForm(t *testing.T) {
 	registerTestAgent(t, "twoform",
-		form{ID: "twoform/first", dialog: markerDialog{marker: "FIRST FORM"}},
-		form{ID: "twoform/second", dialog: markerDialog{marker: "SECOND FORM"}})
+		&Form{ID: "twoform/first", dialog: markerDialog{marker: "FIRST FORM"}},
+		&Form{ID: "twoform/second", dialog: markerDialog{marker: "SECOND FORM"}})
 
 	second := "an elicitation-shaped screen\nSECOND FORM\nwaiting on you"
 	if blockedRules["twoform"][0].dialog.isBlocked(second) {

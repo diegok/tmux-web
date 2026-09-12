@@ -5,11 +5,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/diegok/tmux-web/internal/integrations"
+	"github.com/diegok/tmux-web/internal/tmux"
 )
 
 // Task 20's tests. Every one of them installs into a directory it created
@@ -1009,4 +1011,36 @@ func binOf(t *testing.T, script string) string {
 		t.Fatalf("the installed wrapper has no BIN assignment:\n%s", script)
 	}
 	return strings.ReplaceAll(m[1], `'\''`, `'`)
+}
+
+// The installable agents are exactly the agents the daemon recognises.
+//
+// FOUR PLACES USED TO WRITE THIS LIST OUT: tmux.Agents, the event table's keys,
+// the turn-start table's keys and this map. The first two are now one list and
+// internal/report's own init holds it to tmux.Agents; this is the last copy,
+// and it is held here because package main is where it lives.
+//
+// Both directions are a real defect, and neither is loud:
+//
+//   - An agent installable here that the daemon does not know writes an
+//     integration onto somebody's machine whose every event is answered with
+//     `nothing known about ...` on a stderr nobody reads. The install succeeds,
+//     the hooks fire, and no pane ever gets a badge.
+//   - An agent the daemon knows with nothing installable is an agent whose
+//     reports can only ever come from the screen classifier, and `tmux-web
+//     install <name>` refuses it as an unknown agent.
+func TestTheInstallableAgentsAreTheAgentsTheDaemonKnows(t *testing.T) {
+	installable := make([]string, 0, len(agents))
+	for name := range agents {
+		installable = append(installable, name)
+	}
+	sort.Strings(installable)
+	known := append([]string(nil), tmux.Agents...)
+	sort.Strings(known)
+	if strings.Join(installable, " ") != strings.Join(known, " ") {
+		t.Errorf("`tmux-web install` offers %v; the daemon treats %v as coding agents.\n"+
+			"An agent installable here and unknown to the daemon installs an integration whose "+
+			"every report is answered with `nothing known`; one the daemon knows with nothing "+
+			"installable can never report at all.", installable, known)
+	}
 }

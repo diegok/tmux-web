@@ -1309,8 +1309,8 @@ func TestRule2NeedsATruePremise(t *testing.T) {
 // showing an elicitation form.
 func TestRule2AsksAboutEveryRegisteredForm(t *testing.T) {
 	registerTestAgent(t, "twoform",
-		form{ID: "twoform/permission", dialog: markerDialog{marker: "FIRST FORM"}},
-		form{ID: "twoform/elicitation", dialog: markerDialog{marker: "SECOND FORM"}})
+		&Form{ID: "twoform/permission", dialog: markerDialog{marker: "FIRST FORM"}},
+		&Form{ID: "twoform/elicitation", dialog: markerDialog{marker: "SECOND FORM"}})
 
 	// The screen shows the SECOND form only, while the standing report is the
 	// one the first form's whitelist entry wrote.

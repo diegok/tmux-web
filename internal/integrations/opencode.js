@@ -33,12 +33,16 @@ import { claimReporter, makeQueue, spawnReport } from './queue.ts'
  * table would ignore them all -- an event it does not know writes nothing --
  * but it would ignore them one process at a time.
  *
- * These are exactly the bus events `eventRules["opencode"]` in
- * cmd/tmux-web/events.go maps. `session.created` is not among them on
- * purpose: it is this plugin's own bookkeeping, the one event that establishes
- * parentage, and not a state of the pane. `session.error` is not among them
- * either -- it is real and it does fire, but a failed provider call is not a
- * state this feature reports.
+ * These are exactly the bus events `rules["opencode"]` in
+ * internal/report/events.go maps, and
+ * TestTheOpencodePluginForwardsExactlyTheEventsTheTableKnows reads this very
+ * declaration and holds it to that table -- unconditionally, unlike the live
+ * wiring test, which skips wherever opencode is not installed.
+ *
+ * `session.created` is not among them on purpose: it is this plugin's own
+ * bookkeeping, the one event that establishes parentage, and not a state of the
+ * pane. `session.error` is not among them either -- it is real and it does
+ * fire, but a failed provider call is not a state this feature reports.
  *
  * @type {Set<string>}
  */

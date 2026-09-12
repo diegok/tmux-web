@@ -2,23 +2,23 @@ package main
 
 import (
 	"encoding/json"
-	"sort"
 	"strings"
 	"testing"
 
 	"github.com/diegok/tmux-web/internal/integrations"
+	"github.com/diegok/tmux-web/internal/report"
 )
 
-// Claude's integration is split across two packages that cannot see each other,
-// and this file is the seam.
+// Claude's integration is split across packages, and this file is what is left
+// of the seam once internal/report exists.
 //
 // internal/integrations owns WHICH HOOKS ARE REGISTERED -- it generates the
-// settings.json block -- and it cannot import package main, so nothing over
-// there can tell whether the names it registers are names anything maps.
-// events.go owns WHAT AN EVENT MEANS and never learns which of its rows a user
-// actually has installed. Between the two sits a mutant neither side can see
-// and the plan's own mutation table does not name: a hook registered under a
-// name events.go does not know.
+// settings.json block -- and internal/report owns WHAT AN EVENT MEANS. Between
+// the two sits a mutant neither side can see: a hook registered under a name
+// the table does not know. THAT TIE NOW LIVES IN internal/report, which can see
+// both halves; it used to live here because package main was the only place
+// that could. What is left here is the pair of claims that need a recorded
+// payload or the generated command line, which are this package's own.
 //
 // It is the quietest failure in this whole feature. The settings block is still
 // four hooks, every one still `"async": true`, still no asyncRewake and still no
@@ -32,36 +32,6 @@ import (
 //
 // So the two lists are held against each other here, in the only package that
 // can see both.
-
-// TestTheRegisteredClaudeHooksAreExactlyTheEventsTheTableKnows binds the
-// installer's hook set to events.go's claude table, in both directions.
-//
-// Both directions, because each is a different defect:
-//
-//   - A registered hook with no mapping fires into nothing. That is the quiet
-//     one above.
-//   - A mapped event nobody registers is a row that can never run. Harmless in
-//     itself, and a reliable sign that somebody added an event to the table and
-//     forgot that Claude has no runtime to discover it -- unlike pi and
-//     opencode, where the integration subscribes by name, Claude only ever
-//     sends what settings.json asked for.
-func TestTheRegisteredClaudeHooksAreExactlyTheEventsTheTableKnows(t *testing.T) {
-	registered := append([]string(nil), integrations.ClaudeHookEvents...)
-	sort.Strings(registered)
-
-	mapped := make([]string, 0, len(eventRules["claude"]))
-	for event := range eventRules["claude"] {
-		mapped = append(mapped, event)
-	}
-	sort.Strings(mapped)
-
-	if strings.Join(registered, " ") != strings.Join(mapped, " ") {
-		t.Errorf("the installer registers %v; events.go maps %v.\n"+
-			"A registered hook events.go does not map fires into nothing -- `report` prints one line to a stderr nobody reads and writes no state -- and every assertion in internal/integrations/claude_hooks_test.go passes while it does.\n"+
-			"A mapped event nobody registers can never fire: Claude sends only what settings.json asked for.",
-			registered, mapped)
-	}
-}
 
 // TestSubagentStopIsInNeitherHalf is the structural guard, asserted from the
 // side that can see both halves of it.
@@ -80,15 +50,14 @@ func TestSubagentStopIsInNeitherHalf(t *testing.T) {
 			t.Error("the installer registers SubagentStop. Not registering it is the whole of the structural guard against the Task-tool subagent class: agent_id is absence-coded, so the payload filter fails open")
 		}
 	}
-	if _, ok := eventRules["claude"]["SubagentStop"]; ok {
-		t.Error("events.go maps SubagentStop. Its absence is what makes even a hand-edited settings.json that registered the hook write nothing")
-	}
-	// And the recorded payload proves the fixture is a real one rather than a
-	// name nobody ever saw: a SubagentStop that DID arrive is refused twice
-	// over -- once for the unknown event, once for the agent_id it carries.
-	m, known := lookupMapping("claude", "SubagentStop", []byte(readFixture(t, "claude/subagent_stop.json")))
+	// The other half, through the recorded payload, which also proves the
+	// fixture is a real one rather than a name nobody ever saw: a SubagentStop
+	// that DID arrive is refused twice over -- once for the unknown event, once
+	// for the agent_id it carries. The table's absence is what makes even a
+	// hand-edited settings.json that registered the hook write nothing.
+	m, known := report.Lookup("claude", "SubagentStop", []byte(readFixture(t, "claude/subagent_stop.json")))
 	if known {
-		t.Errorf("lookupMapping knows claude/SubagentStop: %+v", m)
+		t.Errorf("the table knows claude/SubagentStop: %+v", m)
 	}
 }
 
@@ -121,8 +90,8 @@ func TestTheGeneratedBlockNamesTheEventArgumentTheWrapperPassesOn(t *testing.T) 
 			t.Errorf("the %s hook's command ends in %q: the wrapper passes its $1 on as --event, so that word is what reaches the table", event, arg)
 			continue
 		}
-		if _, known := lookupMapping("claude", arg, []byte(`{}`)); !known {
-			t.Errorf("the %s hook would send --event %q, which events.go does not map", event, arg)
+		if _, known := report.Lookup("claude", arg, []byte(`{}`)); !known {
+			t.Errorf("the %s hook would send --event %q, which internal/report does not map", event, arg)
 		}
 	}
 }

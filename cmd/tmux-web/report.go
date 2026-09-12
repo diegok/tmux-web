@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/diegok/tmux-web/internal/report"
 	"github.com/diegok/tmux-web/internal/tmux"
 )
 
@@ -151,7 +152,7 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 			fmt.Fprintf(stderr, "tmux-web report: refusing this %s %s payload: %s\n", *agent, *event, why)
 			return 0
 		}
-		m, known := lookupMapping(*agent, *event, payload)
+		m, known := report.Lookup(*agent, *event, payload)
 		if !known {
 			// A misconfigured integration, which is worth a line: an event
 			// name nobody recognises will never report anything, and silence
@@ -159,7 +160,7 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 			fmt.Fprintf(stderr, "tmux-web report: nothing known about %q's %q event\n", *agent, *event)
 			return 0
 		}
-		if m.state == "" {
+		if m.State() == "" {
 			// Expected traffic the table deliberately ignores -- an
 			// unrecognised notification_type, auth_success, a session.status
 			// that is not busy. No write, no state change, no timestamp
@@ -168,15 +169,15 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 			// enough that a line each would be a log of nothing.
 			return 0
 		}
-		*state = m.state
-		reassert = reassertsFor(m)
+		*state = m.State()
+		reassert = m.Reasserts()
 		// *text was empty by construction -- --text belongs to the manual form
 		// and the two forms cannot be combined -- so the table's own reader is
 		// the only thing that can fill it. Most mappings have none, and that is
 		// rung 4 of the ladder: a three-part value is the ordinary claude case
 		// and the reader accepts three parts or four. What no reader ever
 		// returns is the user's prompt; see activity.go.
-		*text = activityText(m.text, payload)
+		*text = m.Text(payload)
 	}
 
 	switch *state {
@@ -381,5 +382,5 @@ func payloadIsUsable(payload []byte, overCap bool) (ok bool, why string) {
 	if overCap {
 		return false, fmt.Sprintf("it ran past this hook's %d-byte cap on stdin, so what arrived is a truncated prefix", maxPayloadBytes)
 	}
-	return payloadIsRoot(payload)
+	return report.PayloadIsRoot(payload)
 }

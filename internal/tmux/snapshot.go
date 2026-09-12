@@ -126,14 +126,21 @@ type Row struct {
 	Question *Question `json:"question,omitempty"`
 }
 
-// labelField is #{@tmux_web_label} with the two bytes that break this wire format
+// sanitizedField is #{VARIABLE} with the two bytes that break this wire format
 // substituted out by tmux, before the value ever reaches Go.
+//
+// THREE FIELDS ARE BUILT FROM IT -- the label, the path and the agent report --
+// and it is a function so that there is one place to get the pattern right.
+// There were three copies of it, each with a paragraph warning the next person
+// not to retype the pattern from any rendering of it; a copy that cannot be
+// made needs no warning.
 //
 // tmux's s/// modifier is a POSIX regex substitution over the variable's value,
 // applied to every match, and its pattern can carry the raw bytes: probed on
 // tmux 3.7b, a label of "a\x1fb\nc" reports as "a b c" through this expression
 // and as itself through a bare #{@tmux_web_label}. The pattern is a bracket SET of
-// the two literal bytes rather than a range or a class, deliberately:
+// the two literal bytes rather than a range or a class, deliberately. Three
+// ways to get it wrong, all measured:
 //
 //   - [[:cntrl:]] does not survive tmux's own parse. The modifier's variable is
 //     introduced by ":", so the ":" inside the class terminates the pattern
@@ -143,19 +150,31 @@ type Row struct {
 //     bracket range to the locale's collation order, and the tmux server's
 //     locale is whatever started it. A set of literal bytes has no such
 //     freedom.
+//   - A bracket set RETYPED FROM A RENDERING of this pattern -- written out in
+//     prose it looks like `#{s/[\n\x1f]/ /:...}` -- is two characters where the
+//     byte should be: it leaves real newlines ALIVE and turns every lowercase
+//     "n" in a value into a space. The Go source works because "\n" in a source
+//     literal IS the byte, and Sep IS the 0x1f.
 //
-// A space rather than "": "EV\x1fIL" reads as "EV IL", which shows the label
-// was tampered with, where "EVIL" would read as a label somebody chose.
+// A space rather than "": "EV\x1fIL" reads as "EV IL", which shows the value
+// was tampered with, where "EVIL" would read as something somebody chose.
 //
 // This is the first of three defences, and the only one that can fail open: a
 // pattern that stopped compiling would leave tmux echoing the value untouched
 // and exiting 0 (measured with a deliberately broken "[" pattern). That is why
-// the label also sits in the last field, and why ParseRows sanitises what
-// arrives. TestFormatAloneKeepsEveryRecordWellFormed pins this layer on its own
-// terms, against a real server -- with a tolerant parser behind it, a pattern
-// that quietly stopped covering one of the two bytes produces identical rows,
-// so no test downstream of the parser can see it weaken.
-const labelField = "#{s/[\n" + Sep + "]/ /:" + LabelOption + "}"
+// each of the three fields also sits LAST in its own format string, and why the
+// parsers sanitise what arrives. TestFormatAloneKeepsEveryRecordWellFormed pins
+// this layer on its own terms, against a real server -- with a tolerant parser
+// behind it, a pattern that quietly stopped covering one of the two bytes
+// produces identical rows, so no test downstream of the parser can see it
+// weaken.
+func sanitizedField(variable string) string {
+	return "#{s/[\n" + Sep + "]/ /:" + variable + "}"
+}
+
+// labelField is the user's own label, sanitised. It is the field the whole
+// last-slot discipline in formatFields is arranged around.
+var labelField = sanitizedField(LabelOption)
 
 // formatFields are the -F fields in the order ParseRows indexes them. It is a
 // slice rather than one concatenated constant so that the field count is
@@ -217,16 +236,7 @@ var Format = strings.Join(formatFields, Sep)
 // anything.
 const PathVariable = "pane_current_path"
 
-// pathField is #{pane_current_path} with the two bytes that break this wire
-// format substituted out by tmux before the value reaches Go.
-//
-// It is labelField's pattern, built from the same two constants -- COPIED FROM
-// labelField ABOVE, NOT RETYPED FROM ANY RENDERING OF IT. Written out in prose
-// the pattern looks like `#{s/[\n\x1f]/ /:…}`, and a bracket set retyped from
-// that rendering is two characters: it leaves real newlines ALIVE and turns
-// every lowercase "n" in a path into a space. The Go source works because "\n"
-// in a source literal is the byte. See reportField for the other two ways to
-// get this pattern wrong, both measured.
+// pathField is the pane's working directory, sanitised.
 //
 // This field needs the substitution more than either of the others. tmux
 // normalises pane titles through its own OSC parser and refuses a newline in a
@@ -235,7 +245,7 @@ const PathVariable = "pane_current_path"
 // contained a newline forged a whole extra row in the sidebar -- a pane that
 // does not exist -- and one containing a 0x1f swallowed the following pane's
 // record, so a live pane disappeared.
-const pathField = "#{s/[\n" + Sep + "]/ /:" + PathVariable + "}"
+var pathField = sanitizedField(PathVariable)
 
 // pathFormatFields is the third -F of the batched read: one fork, N format
 // strings, each with at most one unsanitised field and that field last.

@@ -52,10 +52,12 @@ func TestPathFieldIsLabelFieldsPatternOverThePaneDirectory(t *testing.T) {
 	if !strings.Contains(pathField, PathVariable) {
 		t.Errorf("pathField = %q: does not read %s", pathField, PathVariable)
 	}
-	if want := strings.Replace(labelField, LabelOption, PathVariable, 1); pathField != want {
-		t.Errorf("pathField  = %q\nwant       = %q\nthe two fields must carry the "+
-			"same substitution; a pattern fixed on one and not the other is the bug back",
-			pathField, want)
+	// Since the pattern became sanitizedField this can no longer be the bug it
+	// was written for -- a pattern fixed on one field and not the other -- and
+	// the assertion is kept as what it now is: the path field must read the
+	// PANE DIRECTORY through it and not some other variable.
+	if want := sanitizedField(PathVariable); pathField != want {
+		t.Errorf("pathField  = %q\nwant       = %q", pathField, want)
 	}
 }
 

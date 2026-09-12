@@ -23,13 +23,13 @@ import (
 // What is NOT tested here, and where it is instead:
 //
 //   - What each hook MEANS -- the state, the whitelist, the edge/re-assertion
-//     split, the absence-coded agent_id filter -- is cmd/tmux-web/events.go's
+//     split, the absence-coded agent_id filter -- is internal/report/events.go's
 //     table over the eleven recorded payloads in
 //     cmd/tmux-web/testdata/hooks/claude/. This package has no opinion about
 //     any of it, which is the whole point of the split.
 //   - That the four registered names are names that table knows is
 //     cmd/tmux-web/integration_claude_test.go: this package cannot import
-//     package main, and a hook registered under a name events.go does not map
+//     this package, and a hook registered under a name events.go does not map
 //     reports NOTHING while passing every assertion in this file.
 
 // -- the settings block -----------------------------------------------------

@@ -96,7 +96,7 @@ describe('handlers', () => {
     const r = recorder()
     const h = handlers(r.report)
     h.session_start({ type: 'session_start', reason: 'startup' }, tui(true))
-    // `tmux_web_is_idle` is the contract with cmd/tmux-web/events.go, which
+    // `tmux_web_is_idle` is the contract with internal/report/events.go, which
     // discriminates pi's session_start on exactly this key -- ctx is not part
     // of pi's event object and no recorded payload carries it, so the
     // extension is the only thing that can put it there. A different key name
@@ -199,7 +199,11 @@ describe('the default export', () => {
     // The names are written out rather than taken from handlers() on purpose:
     // against `Object.keys(handlers(...))` a dropped handler would move both
     // sides of the comparison at once and survive. These five are the contract
-    // with cmd/tmux-web/events.go's pi table.
+    // with internal/report/events.go's pi table, and the Go side now holds the
+    // other end of it: TestThePiExtensionReportsExactlyTheEventsTheTableKnows
+    // reads this file's own `report({ event: '...' })` calls and compares them
+    // to that table. This test is what holds the REGISTERED names to the
+    // reported ones.
     const registered: string[] = []
     piExtension({
       on(name: string) {
@@ -237,7 +241,7 @@ describe('the default export', () => {
   })
 
   it('reports as pi, through a queue of its own', () => {
-    // `pi` is what cmd/tmux-web/events.go keys its table on and what the
+    // `pi` is what internal/report/events.go keys its table on and what the
     // daemon derives from pane_current_command; the wrong name here is a
     // silent no-op on every event, because an agent the table does not know
     // reports nothing.

@@ -1,7 +1,8 @@
-package main
+package report
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/diegok/tmux-web/internal/tmux"
 )
@@ -13,6 +14,21 @@ import (
 // judgement about what a hook firing tells you about a person's pane, and a
 // judgement spread across a TypeScript extension, a JavaScript plugin and a
 // settings.json the user owns is a judgement that drifts. One table, one test.
+//
+// WHY A PACKAGE OF ITS OWN, and not package main where it started. Everything
+// here is DOMAIN JUDGEMENT: nothing in this file parses a command line, opens a
+// socket or writes a tmux option. Sitting in package main it could import
+// internal/tmux and nothing could import it, and that one-way wall is where a
+// whole family of duplicate lists came from -- the agents were written out in
+// tmux.Agents, in this table's keys, in a turn-start table beside it, in the
+// installer's map and in two test literals, with nothing holding any of them
+// together; the grammars that confirm a blocked badge could only be named by
+// string; and each integration's event list was tied to this table by a test
+// that skipped, or by nothing at all. As a package it can hold a *tmux.Form
+// instead of an id, its keys can be checked against tmux.Agents at load, and
+// the tests that hold the three integrations' lists to it can live beside it
+// (integrations_test.go) instead of in the one package that happened to be able
+// to see both.
 //
 // Two costs of Claude's half of it, stated here rather than discovered:
 //
@@ -100,7 +116,7 @@ const (
 // working is not resting, so an unclassified working mapping stays an edge. It
 // is transient and cannot badge, and the worst a redundant one does is refresh
 // the 60-second expiry -- which is what the keepalive wants anyway.
-func reassertsFor(m mapping) bool {
+func reassertsFor(m Mapping) bool {
 	switch m.kind {
 	case kindEdge:
 		return false
@@ -162,21 +178,34 @@ const (
 	textPiPrompt
 )
 
-// mapping is what one (agent, event) means. The zero state is "ignore": no
+// Mapping is what one (agent, event) means. The zero state is "ignore": no
 // write, no state change, no timestamp refresh, and not an error.
-type mapping struct {
+type Mapping struct {
 	name  string
 	state string
 	// kind is edge or reassertion, and every mapping that writes a state names
 	// one: the zero value is "nobody decided", not "edge". See eventKind for
 	// the criterion and reassertsFor for what an undecided one falls back to.
 	kind eventKind
-	// form is the registered screen form a blocked mapping names. A blocked
-	// mapping may exist ONLY where a grammar can confirm it: the event says the
-	// agent is waiting and the grammar says the screen shows it waiting, and a
-	// resting claim for which no evidence can exist does not get to rest
-	// indefinitely.
-	form string
+	// form is the screen form a blocked mapping's badge rests on: THE GRAMMAR
+	// ITSELF, not its name. A blocked mapping may exist ONLY where a grammar
+	// can confirm it -- the event says the agent is waiting and the grammar
+	// says the screen shows it waiting -- and a resting claim for which no
+	// evidence can exist does not get to rest indefinitely.
+	//
+	// It was a string until this package existed, and it could not be anything
+	// else: the grammars live in internal/tmux and package main held the table,
+	// so the only thing a mapping could carry was an id and the only check
+	// available was RegisteredForm, a membership test over every agent's forms
+	// at once. Two lies fit through that. A mapping could name a form NOBODY
+	// HAS -- a typo, or a form deleted from the registry -- and a mapping could
+	// name ANOTHER AGENT'S form, which is the same badge with no grammar behind
+	// it, because rule 2 only ever asks this agent's forms about this screen. A
+	// pointer closes the first at compile time and checkRules closes the second
+	// at process start. What neither closes is a mapping naming its own agent's
+	// real form for a screen that form does not draw; that one is a judgement,
+	// and TestTheBlockedMappingsAreExactlyThese is where it is made.
+	form *tmux.Form
 	// text is which of activity.go's readers, if any, supplies this mapping's
 	// activity line. The zero value is rung 4 of the ladder -- no text -- and
 	// it is the right default for the three turn starts, whose only string is
@@ -186,6 +215,20 @@ type mapping struct {
 	text textSource
 }
 
+// State is what this mapping puts on the pane, or "" for an event the table
+// deliberately ignores. It is the whole of what the writer needs to decide
+// whether there is anything to write at all.
+func (m Mapping) State() string { return m.state }
+
+// Reasserts reports whether this mapping's write must read the standing report
+// first. See reassertsFor for the default an unclassified mapping gets.
+func (m Mapping) Reasserts() bool { return reassertsFor(m) }
+
+// Text is the activity line this mapping publishes, read out of the payload by
+// whichever of activity.go's readers the table named. "" is rung 4 of the
+// ladder -- a state-only report -- and is the ordinary answer.
+func (m Mapping) Text(payload []byte) string { return activityText(m.text, payload) }
+
 // eventRule is one row of an agent's event table.
 //
 // Two events do not decide alone -- claude's Notification and opencode's
@@ -193,30 +236,62 @@ type mapping struct {
 // rule either holds a mapping or holds a discriminator and a table keyed by
 // what it reads.
 type eventRule struct {
-	mapping      mapping
+	mapping      Mapping
 	discriminate func(payload []byte) string
-	byValue      map[string]mapping
+	byValue      map[string]Mapping
 }
 
-// eventRules is the whole table, per agent.
+// agentTable is everything this package knows about one agent: its events and
+// which of them is its turn start.
 //
-// The agent names are blockedRules' keys, which are what the daemon derives
-// from pane_current_command. An agent that is not here reports nothing, which
-// is the same answer an unknown event gets: this is a fail-closed table on
-// every axis, because every way of being wrong here writes a state onto
-// somebody's pane and two of the three states never expire.
-var eventRules = map[string]map[string]eventRule{
-	"claude": {
+// The two used to be separate maps keyed by the same names, and that is the
+// shape the drift came in through -- an agent could be in one and not the
+// other, and the only thing holding either to the list of agents the daemon
+// actually recognises was a literal in a test. One table means one key set, and
+// checkRules holds that key set to tmux.Agents at process start.
+type agentTable struct {
+	// turnStart names the event whose write is this agent's turn start -- and,
+	// where the event is discriminated, the discriminator value that means the
+	// turn started.
+	//
+	// It exists so the turn-start invariant can be asserted rather than
+	// believed. The three turn-end events are edges, which means they write a
+	// resting state without looking first, and that is only safe because a new
+	// turn has already written a non-resting one: with no working in front of
+	// it, a turn end would be the second idle of one resting period and the
+	// criterion would have called it a re-assertion. An agent whose turn start
+	// stopped writing working would still pass every other test in this
+	// package, and would lose one badge per turn in production.
+	turnStart turnStartRef
+	// events is what each of this agent's own event names means.
+	events map[string]eventRule
+}
+
+// turnStartRef points at a row of the agent's own events table, rather than
+// repeating what that row says. A mapping that changed underneath it is then
+// visible to turnStart instead of being shadowed by a copy.
+type turnStartRef struct{ event, value string }
+
+// rules is the whole table, per agent.
+//
+// The agent names are tmux.Agents, which is what the daemon derives from
+// pane_current_command, and checkRules refuses to let this process start if the
+// two lists disagree. An agent that is not here reports nothing, which is the
+// same answer an unknown event gets: this is a fail-closed table on every axis,
+// because every way of being wrong here writes a state onto somebody's pane and
+// two of the three states never expire.
+var rules = map[string]agentTable{
+	"claude": {turnStart: turnStartRef{event: "UserPromptSubmit"}, events: map[string]eventRule{
 		// The turn start. Load-bearing beyond "the agent is working": the
 		// three turn-end events are edges, and an edge is only safe because a
 		// new turn wrote a non-resting state before its end could fire.
-		"UserPromptSubmit": {mapping: mapping{
+		"UserPromptSubmit": {mapping: Mapping{
 			name: "claude/UserPromptSubmit", state: tmux.StateWorking, kind: kindEdge}},
 		// The hot hook. It is also the keepalive -- a long turn of many small
 		// tool calls keeps refreshing the 60-second working window -- and it is
 		// what the activity line comes from. It is also, see the file comment,
 		// what makes the connected-case blocked badge slower.
-		"PreToolUse": {mapping: mapping{name: "claude/PreToolUse", state: tmux.StateWorking,
+		"PreToolUse": {mapping: Mapping{name: "claude/PreToolUse", state: tmux.StateWorking,
 			kind: kindEdge, text: textClaudeTool}},
 		// Not a state on its own. See claudeNotifications.
 		"Notification": {discriminate: claudeNotificationType, byValue: claudeNotifications},
@@ -234,27 +309,27 @@ var eventRules = map[string]map[string]eventRule{
 		// fires while a subagent is still running. Not registering
 		// SubagentStop keeps the CHILD from reporting; it says nothing about
 		// the parent reporting too early.
-	},
-	"opencode": {
+	}},
+	"opencode": {turnStart: turnStartRef{event: "session.status", value: "busy"}, events: map[string]eventRule{
 		// The turn start, with the prompt text on it.
-		"chat.message": {mapping: mapping{name: "opencode/chat.message", state: tmux.StateWorking, kind: kindEdge}},
+		"chat.message": {mapping: Mapping{name: "opencode/chat.message", state: tmux.StateWorking, kind: kindEdge}},
 		// busy is the turn start proper, and it fires repeatedly within one
 		// turn -- 17 times in the three-tool turn Task 12 captured -- so
 		// nothing here may assume it arrives once.
 		"session.status": {discriminate: opencodeStatusType, byValue: opencodeStatuses},
-		"tool.execute.before": {mapping: mapping{name: "opencode/tool.execute.before",
+		"tool.execute.before": {mapping: Mapping{name: "opencode/tool.execute.before",
 			state: tmux.StateWorking, kind: kindEdge, text: textOpencodeTool}},
 		// The todo rung of the activity ladder. Rung 2, with the tool call
 		// underneath it, which is correct whether or not the list is empty.
-		"todo.updated": {mapping: mapping{name: "opencode/todo.updated", state: tmux.StateWorking,
+		"todo.updated": {mapping: Mapping{name: "opencode/todo.updated", state: tmux.StateWorking,
 			kind: kindEdge, text: textOpencodeTodo}},
 		// The one blocked event any agent has that arrives with no delay.
 		// There is no question string on it -- the design says there is and the
 		// recorded payload says there is not -- but there does not need to be
 		// one for the state, and the text is reduced from `metadata` per
 		// permission class, whose keys vary and one of which is a whole diff.
-		"permission.asked": {mapping: mapping{name: "opencode/permission.asked", state: tmux.StateBlocked,
-			kind: kindEdge, form: "opencode/permission", text: textOpencodePermission}},
+		"permission.asked": {mapping: Mapping{name: "opencode/permission.asked", state: tmux.StateBlocked,
+			kind: kindEdge, form: tmux.OpencodePermissionForm, text: textOpencodePermission}},
 		// The turn end. It carries a sessionID, and a subagent's arrives
 		// BEFORE the root's -- 2.05 s before, measured -- which is what Task
 		// 15's parentID filter is for. That filter lives in the plugin,
@@ -283,20 +358,20 @@ var eventRules = map[string]map[string]eventRule{
 		// fire, so the standing state disagrees and the finish is written. The
 		// one case it loses is a turn whose START write also failed, and that
 		// is a pane that never showed working either.
-		"session.idle": {mapping: mapping{name: "opencode/session.idle", state: tmux.StateIdle,
+		"session.idle": {mapping: Mapping{name: "opencode/session.idle", state: tmux.StateIdle,
 			kind: kindReassertion}},
 		// session.created is absent on purpose: it is the plugin's own
 		// bookkeeping, the event that establishes parentage, and not a state
 		// of the pane.
-	},
-	"pi": {
+	}},
+	"pi": {turnStart: turnStartRef{event: "input"}, events: map[string]eventRule{
 		// Not a state on its own, and the only event on any agent that is an
 		// edge on one branch and a re-assertion on the other. See
 		// piSessionStarts.
 		"session_start": {discriminate: piSessionStartIdle, byValue: piSessionStarts},
 		// The turn start.
-		"input": {mapping: mapping{name: "pi/input", state: tmux.StateWorking, kind: kindEdge}},
-		"tool_execution_start": {mapping: mapping{name: "pi/tool_execution_start",
+		"input": {mapping: Mapping{name: "pi/input", state: tmux.StateWorking, kind: kindEdge}},
+		"tool_execution_start": {mapping: Mapping{name: "pi/tool_execution_start",
 			state: tmux.StateWorking, kind: kindEdge, text: textPiTool}},
 		// Every kind of prompt, not only the numbered selector pi/selector was
 		// written against: one captured kind is "custom", an extension's own
@@ -306,14 +381,14 @@ var eventRules = map[string]map[string]eventRule{
 		// matches no registered form for the agent, so a custom overlay that
 		// pi/selector cannot read costs a badge that lasts N_blocked polls,
 		// not one that lasts forever.
-		"ui_prompt_start": {mapping: mapping{name: "pi/ui_prompt_start", state: tmux.StateBlocked,
-			kind: kindEdge, form: "pi/selector", text: textPiPrompt}},
+		"ui_prompt_start": {mapping: Mapping{name: "pi/ui_prompt_start", state: tmux.StateBlocked,
+			kind: kindEdge, form: tmux.PiSelectorForm, text: textPiPrompt}},
 		// The turn end. Its entire payload is {"type":"agent_settled"} -- no
 		// session id, no agent id, no parent -- so nothing downstream of here
 		// can tell a root settle from an async subagent's, and Task 15's pi
 		// filter has to work from ctx at registration time instead.
-		"agent_settled": {mapping: mapping{name: "pi/agent_settled", state: tmux.StateIdle, kind: kindEdge}},
-	},
+		"agent_settled": {mapping: Mapping{name: "pi/agent_settled", state: tmux.StateIdle, kind: kindEdge}},
+	}},
 }
 
 // claudeNotifications is the notification_type whitelist.
@@ -341,12 +416,12 @@ var eventRules = map[string]map[string]eventRule{
 // tell you the set is two, and nothing here may key off `message` -- one
 // permission_prompt read "Claude needs your permission" and another "Claude
 // Code needs your approval for the plan".
-var claudeNotifications = map[string]mapping{
+var claudeNotifications = map[string]Mapping{
 	// The only claude form any grammar can confirm, and the one claudeDialog
 	// was written against, so evidence rule 2 can adjudicate this badge rather
 	// than merely erase it.
 	"permission_prompt": {name: "claude/Notification(permission_prompt)", state: tmux.StateBlocked,
-		kind: kindEdge, form: "claude/permission", text: textClaudeNotification},
+		kind: kindEdge, form: tmux.ClaudePermissionForm, text: textClaudeNotification},
 	// Claude Code is continuing the task.
 	"quota_auto_resume_fired": {name: "claude/Notification(quota_auto_resume_fired)",
 		state: tmux.StateWorking, kind: kindEdge},
@@ -434,7 +509,7 @@ var claudeNotifications = map[string]mapping{
 // damage is unbounded only when NOBODY IS WATCHING, which is the case this
 // whole feature exists for. Failing to reproduce it with the app open is not
 // evidence that it is not there.
-var claudeStops = map[string]mapping{
+var claudeStops = map[string]Mapping{
 	// The ordinary turn end, and still an edge: the turn-start invariant put a
 	// working in front of it, and a Stop cannot fire twice inside one resting
 	// period.
@@ -518,7 +593,7 @@ func claudeStopSubagentRunning(payload []byte) string {
 // and no recorded payload carries it: ctx is not part of pi's event object, so
 // the extension adds `"tmux_web_is_idle": <ctx.isIdle()>` to the JSON it pipes to
 // this subcommand. The key is namespaced because it is ours and not pi's.
-var piSessionStarts = map[string]mapping{
+var piSessionStarts = map[string]Mapping{
 	"working": {name: "pi/session_start(working)", state: tmux.StateWorking, kind: kindEdge},
 	"idle":    {name: "pi/session_start(idle)", state: tmux.StateIdle, kind: kindReassertion},
 }
@@ -552,20 +627,20 @@ func piSessionStartIdle(payload []byte) string {
 // which is opencode's turn end and carries the sessionID that Task 15's filter
 // needs; reporting both would write idle twice under two timestamps, and the
 // second one re-dates a finish the first already dated.
-var opencodeStatuses = map[string]mapping{
+var opencodeStatuses = map[string]Mapping{
 	"busy": {name: "opencode/session.status(busy)", state: tmux.StateWorking, kind: kindEdge},
 }
 
-// lookupMapping is what one (agent, event, payload) means.
+// Lookup is what one (agent, event, payload) means.
 //
 // ok reports whether the agent and the event are known at all. A known event
 // whose payload discriminator is not on its whitelist returns ok=true with the
 // zero state: that is the whitelist doing its job on traffic we expect to see,
 // not a misconfigured integration, and the caller keeps quiet about it.
-func lookupMapping(agent, event string, payload []byte) (m mapping, ok bool) {
-	rule, ok := eventRules[agent][event]
+func Lookup(agent, event string, payload []byte) (m Mapping, ok bool) {
+	rule, ok := rules[agent].events[event]
 	if !ok {
-		return mapping{}, false
+		return Mapping{}, false
 	}
 	if rule.discriminate == nil {
 		return rule.mapping, true
@@ -575,57 +650,171 @@ func lookupMapping(agent, event string, payload []byte) (m mapping, ok bool) {
 	return rule.byValue[rule.discriminate(payload)], true
 }
 
-// turnStartEvent names, per agent, the event whose write is that agent's turn
-// start -- and, where the event is discriminated, the discriminator value that
-// means the turn started.
+// EventsFor is the event names this table maps for one agent, unsorted.
 //
-// It exists so the turn-start invariant can be asserted rather than believed.
-// The three turn-end events are edges, which means they write a resting state
-// without looking first, and that is only safe because a new turn has already
-// written a non-resting one: with no working in front of it, a turn end would
-// be the second idle of one resting period and the criterion would have called
-// it a re-assertion. An agent whose turn start stopped writing working would
-// still pass every other test in this package, and would lose one badge per
-// turn in production.
-var turnStartEvent = map[string]struct{ event, value string }{
-	"claude":   {event: "UserPromptSubmit"},
-	"opencode": {event: "session.status", value: "busy"},
-	"pi":       {event: "input"},
+// It exists so that a test outside this package does not have to write the list
+// out again. The live-bus wiring test is the caller: it watches what a real
+// opencode spawns and has to say which names are legitimate, and a literal
+// there was a fifth copy of a list this package already holds.
+func EventsFor(agent string) []string {
+	events := make([]string, 0, len(rules[agent].events))
+	for event := range rules[agent].events {
+		events = append(events, event)
+	}
+	return events
 }
 
 // turnStart is what that agent's turn start writes, resolved through the same
 // tables everything else goes through, so a mapping that changed underneath it
 // is visible here.
-func turnStart(agent string) (mapping, bool) {
-	ref, ok := turnStartEvent[agent]
+func turnStart(agent string) (Mapping, bool) {
+	table, ok := rules[agent]
 	if !ok {
-		return mapping{}, false
+		return Mapping{}, false
 	}
-	rule, ok := eventRules[agent][ref.event]
+	return table.resolveTurnStart()
+}
+
+// resolveTurnStart is turnStart for a table that is not necessarily the shipped
+// one, which is what lets checkRules be handed a drifted table and answer about
+// THAT table rather than about this package's own.
+func (at agentTable) resolveTurnStart() (Mapping, bool) {
+	rule, ok := at.events[at.turnStart.event]
 	if !ok {
-		return mapping{}, false
+		return Mapping{}, false
 	}
 	if rule.discriminate == nil {
-		return rule.mapping, ref.value == ""
+		return rule.mapping, at.turnStart.value == ""
 	}
-	m, ok := rule.byValue[ref.value]
+	m, ok := rule.byValue[at.turnStart.value]
 	return m, ok
 }
 
 // allMappings is every mapping in this file, for the tests that have to hold
 // this table against another one.
-func allMappings() []mapping {
-	var all []mapping
-	for _, events := range eventRules {
-		for _, rule := range events {
-			if rule.discriminate == nil {
-				all = append(all, rule.mapping)
-				continue
-			}
-			for _, m := range rule.byValue {
-				all = append(all, m)
+func allMappings() []Mapping {
+	var all []Mapping
+	for _, table := range rules {
+		for _, rule := range table.events {
+			all = append(all, rule.mappings()...)
+		}
+	}
+	return all
+}
+
+// init refuses to let a process start on a table that has drifted.
+//
+// A PANIC AT LOAD AND NOT A TEST, and the difference is the whole point of
+// moving this table into a package of its own. The lists it checks are static
+// data with no input: whatever checkRules says here, it says the same on every
+// machine, at every startup, forever. So a drifted table cannot reach a user's
+// machine and misbehave there -- it panics on the FIRST run of anything that
+// links this package, which is `go test`, long before it is a binary -- and
+// that is the difference between drift being impossible to ship and being
+// visible to whoever reads a test failure.
+//
+// It is not a compile error, and the distinction is worth keeping straight: `go
+// build` does not run init, so the wall is `go test ./...` and the first
+// `tmux-web serve`, not the build. Every package here is under test, so the
+// suite is the wall in practice.
+//
+// What it does NOT check is anything requiring judgement. Whether a blocked
+// mapping's form is the form that agent actually draws for that event, and
+// whether a mapping is an edge or a repair, are decisions; they live in the
+// roll-call tests, spelled out next to their reasons.
+func init() {
+	if err := checkRules(rules, tmux.Agents); err != nil {
+		panic("internal/report: " + err.Error())
+	}
+}
+
+// checkRules is what init asserts, as a function taking its inputs, so that a
+// test can hand it a drifted table and see it complain. A checker that is only
+// ever called on the shipped data proves nothing about what it would reject.
+//
+// THREE INVARIANTS, one per way these lists have drifted or could:
+//
+//  1. The agents are exactly tmux.Agents. That list gates whether a pane is
+//     captured, whether it gets a state and whether it gets a logo; an agent
+//     with a table here and no entry there is a table nothing can ever reach,
+//     and one there with no table here reports nothing with no sign that it
+//     was meant to.
+//  2. A blocked mapping's form is one of THIS agent's registered forms, and no
+//     other mapping carries one at all. Rule 2 in the daemon only ever asks
+//     the pane's own agent's forms about the pane's screen, so a mapping
+//     holding another agent's grammar is a badge with nothing behind it --
+//     which is exactly what a membership test over every agent's forms at once
+//     could not see.
+//  3. Every agent's turnStart resolves, through the events table, to a working
+//     EDGE. The three turn-end events write a resting state without reading
+//     what is standing, and that is safe only because a turn start put a
+//     non-resting state in front of them.
+func checkRules(table map[string]agentTable, agents []string) error {
+	known := make(map[string]bool, len(agents))
+	for _, a := range agents {
+		known[a] = true
+		if _, ok := table[a]; !ok {
+			return fmt.Errorf("the daemon treats %q as a coding agent and this table has no events for it: "+
+				"every event it sends would be answered with `nothing known`", a)
+		}
+	}
+	for agent, at := range table {
+		if !known[agent] {
+			return fmt.Errorf("this table maps events for %q, which is not one of tmux.Agents: "+
+				"the daemon never derives that name from pane_current_command, so no row of it can ever be reached", agent)
+		}
+		for event, rule := range at.events {
+			for _, m := range rule.mappings() {
+				if err := checkForm(agent, m); err != nil {
+					return fmt.Errorf("%s's %s event: %w", agent, event, err)
+				}
 			}
 		}
+		m, ok := at.resolveTurnStart()
+		if !ok || m.state != tmux.StateWorking || m.kind != kindEdge {
+			return fmt.Errorf("%q has no turn-start working edge (%+v, ok=%v): its turn end is an edge "+
+				"only because one exists in front of it", agent, m, ok)
+		}
+	}
+	return nil
+}
+
+// checkForm is invariant 2, for one mapping.
+func checkForm(agent string, m Mapping) error {
+	if m.state != tmux.StateBlocked {
+		// A form is a blocked mapping's evidence and means nothing anywhere
+		// else. Carrying one elsewhere would also make the check above pass by
+		// accident on a row that never rests.
+		if m.form != nil {
+			return fmt.Errorf("%s reports %q and names form %q; a form is a blocked mapping's evidence",
+				m.name, m.state, m.form.ID)
+		}
+		return nil
+	}
+	if m.form == nil {
+		return fmt.Errorf("%s reports blocked and names no form: blocked never expires, so a badge "+
+			"no grammar can confirm stands until a client connects and is then erased while the agent waits", m.name)
+	}
+	for _, f := range tmux.FormsFor(agent) {
+		if f == m.form {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s names form %q, which is not one of %s's own: rule 2 asks only the pane's "+
+		"agent's grammars about the pane's screen, so nothing can ever confirm that badge", m.name, m.form.ID, agent)
+}
+
+// mappings is every Mapping one rule can produce, discriminated or not. The
+// discriminated tables are the half that matters: claude's only blocked mapping
+// lives inside claudeNotifications, so a walk that read rule.mapping alone would
+// check everything except the table most in need of it.
+func (r eventRule) mappings() []Mapping {
+	if r.discriminate == nil {
+		return []Mapping{r.mapping}
+	}
+	all := make([]Mapping, 0, len(r.byValue))
+	for _, m := range r.byValue {
+		all = append(all, m)
 	}
 	return all
 }

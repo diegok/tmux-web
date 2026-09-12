@@ -205,24 +205,9 @@ func FormatReport(state string, ms int64, activity string) string {
 	return v
 }
 
-// reportField is #{@tmux_web_agent} with the two bytes that break this wire format
-// substituted out by tmux before the value reaches Go.
-//
-// It is labelField's pattern, built from the same two constants -- COPIED FROM
-// internal/tmux/snapshot.go, NOT RETYPED FROM ANY RENDERING OF IT. Three ways
-// to get this wrong, all measured:
-//
-//   - [[:cntrl:]] does not survive tmux's own parse: the modifier's variable is
-//     introduced by ":", so the ":" inside the class ends the pattern early and
-//     the whole expression expands to "" for EVERY value, including good ones.
-//   - A range such as [\x0a-\x1f] compiles but depends on the locale's
-//     collation order, and the tmux server's locale is whatever started it.
-//   - A bracket set retyped from a rendered "\n" is two characters, so it
-//     leaves real newlines alive AND puts a literal 'n' in the set: every
-//     lowercase "n" in a benign value becomes a space.
-//
-// The Go source works because "\n" in a Go string literal IS the byte.
-const reportField = "#{s/[\n" + Sep + "]/ /:" + AgentOption + "}"
+// reportField is the agent's own report, sanitised. See sanitizedField for the
+// pattern and the three ways to get it wrong.
+var reportField = sanitizedField(AgentOption)
 
 // reportFormatFields is the second -F of the batched read. The option is the
 // last and only variable field, so it gets all three of the label's defences;

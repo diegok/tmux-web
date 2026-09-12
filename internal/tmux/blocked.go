@@ -37,18 +37,63 @@ type dialog interface {
 	extractQuestion(screen string) *Question
 }
 
-// form is one screen shape an agent draws when it is waiting, with the
-// identifier a report can name.
+// Form is one screen shape an agent draws when it is waiting.
 //
-// The identifier exists because Claude's notification whitelist maps a
-// notification_type to blocked only where a grammar can confirm it, and the
-// test that holds those two tables together has to name something. "Every
-// blocked entry names an agent with a grammar" is VACUOUS -- claude is in the
-// map -- so the three types the design demoted would all have passed it.
-type form struct {
+// It is exported, and its three instances below are exported with it, so that
+// internal/report's blocked mappings can hold THE GRAMMAR ITSELF rather than
+// its name. The identifier survives for messages and for the roll-call test
+// that writes the blocked mappings out in full; it is no longer the only thing
+// tying a notification_type to the screen that confirms it.
+//
+// Referenced by pointer everywhere. A Form carries a dialog, whose grammars are
+// compiled regexps, and identity is the question every caller of FormsFor is
+// really asking -- "is this the very form the registry holds" -- which a value
+// copy would answer only by comparing incomparable fields.
+type Form struct {
 	ID     string // e.g. "claude/permission"
 	dialog dialog
 }
+
+// The registered forms, one per captured screen.
+//
+// Exported individually because a report mapping names exactly one of them, and
+// a name it can only get wrong at compile time is the point: the string form of
+// this reference let a mapping name a form nobody has, or another agent's form,
+// and RegisteredForm -- a membership test across every agent at once -- could
+// see neither.
+var (
+	// ClaudePermissionForm is the permission dialog: a region delimited by
+	// horizontal rules, holding numbered choices under a line that ends in a
+	// question mark. Claude's only captured screen, which is why every other
+	// notification_type that means a wait is ignored pending a capture.
+	ClaudePermissionForm = &Form{ID: "claude/permission", dialog: claudeDialog{
+		rules:        "─╌",
+		cursorChoice: regexp.MustCompile(`^❯ \d+\. `),
+		choice:       regexp.MustCompile(`^(?:❯ )?\d+\. `),
+		minChoices:   2,
+		question:     regexp.MustCompile(`\?$`),
+	}}
+	// OpencodePermissionForm is the left-guttered block whose first line says
+	// "Permission required" outright.
+	OpencodePermissionForm = &Form{ID: "opencode/permission", dialog: opencodeDialog{
+		gutter:  "┃",
+		header:  regexp.MustCompile(`^\W*Permission required$`),
+		request: regexp.MustCompile(`^→\s+(\S.*)$`),
+	}}
+	// PiSelectorForm is the closed box holding a two-pane selector. pi has no
+	// permission dialog of its own: it asks through a tool, and every kind of
+	// prompt it draws -- including an extension's own overlay with no title --
+	// arrives on this screen.
+	PiSelectorForm = &Form{ID: "pi/selector", dialog: piDialog{
+		top:          regexp.MustCompile(`╭.*╮`),
+		bottom:       regexp.MustCompile(`╰.*╯`),
+		wall:         "│",
+		cursorChoice: regexp.MustCompile(`^→ \d+\. `),
+		choice:       regexp.MustCompile(`^(?:→ )?\d+\. `),
+		minChoices:   2,
+		question:     regexp.MustCompile(`\?$`),
+	}}
+)
 
 // blockedRules is the whole of the detector's knowledge, per agent.
 //
@@ -63,48 +108,28 @@ type form struct {
 // markers, so each needs its own grammar beside it rather than instead of it.
 // claude still has EXACTLY ONE today, and until a second is captured the
 // whitelist may claim blocked for nothing this registry cannot confirm.
-var blockedRules = map[string][]form{
-	"claude": {{ID: "claude/permission", dialog: claudeDialog{
-		rules:        "─╌",
-		cursorChoice: regexp.MustCompile(`^❯ \d+\. `),
-		choice:       regexp.MustCompile(`^(?:❯ )?\d+\. `),
-		minChoices:   2,
-		question:     regexp.MustCompile(`\?$`),
-	}}},
-	"opencode": {{ID: "opencode/permission", dialog: opencodeDialog{
-		gutter:  "┃",
-		header:  regexp.MustCompile(`^\W*Permission required$`),
-		request: regexp.MustCompile(`^→\s+(\S.*)$`),
-	}}},
-	"pi": {{ID: "pi/selector", dialog: piDialog{
-		top:          regexp.MustCompile(`╭.*╮`),
-		bottom:       regexp.MustCompile(`╰.*╯`),
-		wall:         "│",
-		cursorChoice: regexp.MustCompile(`^→ \d+\. `),
-		choice:       regexp.MustCompile(`^(?:→ )?\d+\. `),
-		minChoices:   2,
-		question:     regexp.MustCompile(`\?$`),
-	}}},
+var blockedRules = map[string][]*Form{
+	"claude":   {ClaudePermissionForm},
+	"opencode": {OpencodePermissionForm},
+	"pi":       {PiSelectorForm},
 }
 
-// RegisteredForm reports whether an id names a form some agent's grammar can
-// confirm.
+// FormsFor is the forms whose grammar can confirm that THIS agent is waiting.
 //
-// Task 13's notification whitelist is the caller: a notification_type may claim
-// blocked only where a registered form can confirm it on the root screen, which
-// is why agent_needs_input and the MCP and quota types are ignored pending a
-// capture. The consequence, stated plainly so nobody reads it as a bug: an MCP
-// form or a quota banner left overnight produces no badge at all.
-func RegisteredForm(id string) bool {
-	for _, forms := range blockedRules {
-		for _, f := range forms {
-			if f.ID == id {
-				return true
-			}
-		}
-	}
-	return false
-}
+// internal/report is the caller: a mapping may claim blocked only where one of
+// its own agent's grammars can confirm it on the root screen, which is why
+// agent_needs_input and the MCP and quota types are ignored pending a capture.
+// The consequence, stated plainly so nobody reads it as a bug: an MCP form or a
+// quota banner left overnight produces no badge at all.
+//
+// PER AGENT, and that is the whole of what it does that RegisteredForm did not.
+// The old check asked whether an id was registered ANYWHERE, so a pi mapping
+// naming claude's form passed it -- and rule 2, which only ever asks the pane's
+// own agent's grammars about the pane's screen, would then delete that badge
+// about 4.5 seconds after a client connected, while the agent was still
+// waiting. An agent with no captured screen has no forms and can never report
+// blocked.
+func FormsFor(agent string) []*Form { return blockedRules[agent] }
 
 // IsBlocked reports whether an agent's screen shows a prompt waiting on the
 // user. It is deliberately strict and it never guesses: no match means the

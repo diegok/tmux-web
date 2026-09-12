@@ -5,7 +5,7 @@
 // It is deliberately thin, and the shape of it is the same for all three
 // agents: the integration transports an event name and the hook's own payload
 // to `tmux-web report`, and every judgement about what that event MEANS lives
-// in one Go table (cmd/tmux-web/events.go) instead of being spread across a
+// in one Go table (internal/report/events.go) instead of being spread across a
 // TypeScript extension, a JavaScript plugin and a settings.json the user owns.
 // Three copies of a judgement are three copies that drift.
 //
@@ -80,7 +80,7 @@ func ClaudeReportScript(bin string) []byte {
 //     avoiding. Claude's own subagent-launching tool is `Agent`, not `Task`,
 //     and its payloads carry `agent_id`; but agent_id is ABSENCE-coded, so the
 //     payload filter fails OPEN and not registering the hook is the only part
-//     of this that fails closed. cmd/tmux-web/events.go leaves SubagentStop
+//     of this that fails closed. internal/report/events.go leaves SubagentStop
 //     out of its table as well, so even a hand-edited settings.json that
 //     registered it writes nothing.
 //   - PreToolUse is the hot one, and it is a TRADE rather than an obvious win.

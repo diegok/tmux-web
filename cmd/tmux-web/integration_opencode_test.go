@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/diegok/tmux-web/internal/report"
 	"github.com/diegok/tmux-web/internal/tmux/testutil"
 )
 
@@ -43,16 +44,21 @@ import (
 
 // opencodeReportedEvents is every event name this plugin is allowed to spawn a
 // report for, and it is the whole of Task 18's forwarding whitelist held up
-// against a live bus. The six are exactly eventRules["opencode"]'s keys, which
-// is the point: a seventh here would be a fork for something the Go table
-// ignores, and dropping the whitelist entirely is dozens of forks per turn.
-var opencodeReportedEvents = map[string]bool{
-	"chat.message":        true,
-	"session.status":      true,
-	"tool.execute.before": true,
-	"todo.updated":        true,
-	"permission.asked":    true,
-	"session.idle":        true,
+// against a live bus.
+//
+// TAKEN FROM THE TABLE rather than written out. It used to be a literal of six,
+// with a comment saying they were exactly eventRules["opencode"]'s keys and
+// nothing making that so; internal/report holds the plugin's own busEvents to
+// the same list now, unconditionally, and this is the third end of it -- what a
+// REAL opencode actually spawned. A seventh name here would be a fork for
+// something the Go table ignores, and dropping the whitelist entirely is dozens
+// of forks per turn.
+func opencodeReportedEvents() map[string]bool {
+	allowed := map[string]bool{}
+	for _, event := range report.EventsFor("opencode") {
+		allowed[event] = true
+	}
+	return allowed
 }
 
 // TestOpencodePluginWiresTheBusToTheReportArgv runs a real opencode in a
@@ -102,6 +108,7 @@ func TestOpencodePluginWiresTheBusToTheReportArgv(t *testing.T) {
 	waitForEvent(t, log, "session.idle", opencodeTurn, "the turn to end and report session.idle")
 
 	calls := readCalls(t, log)
+	allowed := opencodeReportedEvents()
 	var events []string
 	for _, c := range calls {
 		name := eventOf(c.argv)
@@ -118,8 +125,8 @@ func TestOpencodePluginWiresTheBusToTheReportArgv(t *testing.T) {
 		// The live-bus half of the forwarding whitelist. Around sixty events
 		// reached the `event` hook in the run this was written against, and
 		// only the ones below may become a process.
-		if !opencodeReportedEvents[name] {
-			t.Errorf("the plugin reported %q, which eventRules[\"opencode\"] does not map. Forwarding the bus unfiltered is a fork per streamed chunk and per plugin.added; the payload was %.120q",
+		if !allowed[name] {
+			t.Errorf("the plugin reported %q, which internal/report does not map. Forwarding the bus unfiltered is a fork per streamed chunk and per plugin.added; the payload was %.120q",
 				name, c.stdin)
 		}
 	}

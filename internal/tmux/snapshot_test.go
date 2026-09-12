@@ -539,3 +539,46 @@ func TestDedupe(t *testing.T) {
 		}
 	})
 }
+
+// The one pattern all three sanitised fields are built from, checked once.
+//
+// It used to be three copies of the same expression, each with its own
+// paragraph telling the next person not to retype it and its own test asserting
+// the bytes. The builder is what makes the warning unnecessary; this is the
+// test that makes it true, and the per-field tests below are now about which
+// VARIABLE each field reads rather than about the pattern.
+func TestTheSanitisedFieldPattern(t *testing.T) {
+	got := sanitizedField("pane_title")
+	if got != "#{s/[\n\x1f]/ /:pane_title}" {
+		t.Errorf("sanitizedField = %q, want the s/// substitution over the two raw bytes", got)
+	}
+	// The three ways to get it wrong, all measured, all stated on the builder.
+	if !strings.Contains(got, "\n") {
+		t.Errorf("%q holds no real newline byte", got)
+	}
+	if !strings.Contains(got, Sep) {
+		t.Errorf("%q holds no real 0x1f byte", got)
+	}
+	if strings.Contains(got, `\n`) {
+		t.Errorf(`%q spells the newline as a two-character backslash-n: that leaves real `+
+			`newlines alive AND turns every lowercase "n" in a value into a space`, got)
+	}
+	if strings.Contains(got, "[:") || strings.Contains(got, "-\x1f") {
+		t.Errorf("%q uses a character class or a range: the class ends the pattern at its "+
+			"own colon and expands the whole field to \"\" for every value, and a range's "+
+			"endpoints depend on the tmux server's locale", got)
+	}
+	// And each of the three fields reads the variable it is meant to. The
+	// builder cannot get that wrong for you.
+	for _, tc := range []struct {
+		name, got, want string
+	}{
+		{"labelField", labelField, sanitizedField(LabelOption)},
+		{"pathField", pathField, sanitizedField(PathVariable)},
+		{"reportField", reportField, sanitizedField(AgentOption)},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
+}

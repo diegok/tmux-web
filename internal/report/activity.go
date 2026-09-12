@@ -1,4 +1,4 @@
-package main
+package report
 
 import (
 	"encoding/json"
@@ -351,11 +351,11 @@ func activityText(src textSource, payload []byte) string {
 // absence-coded filter cannot be inverted -- "missing means silence" silences
 // all normal reporting -- so it fails OPEN: a payload that lost the field to a
 // rename, a nesting change or a refactor reads as a root. It can only be
-// TIGHTENED, which payloadIsRoot does by requiring that the payload parsed and
+// TIGHTENED, which PayloadIsRoot does by requiring that the payload parsed and
 // is the shape a hook sends.
 var subagentKeys = []string{"agent_id", "parentID"}
 
-// payloadIsRoot is the Go-side half of the subagent filters.
+// PayloadIsRoot is the Go-side half of the subagent filters.
 //
 // WHAT LIVES WHERE: a filter needing runtime state or a runtime object stays in
 // the integration -- pi's ctx.mode and ctx.isIdle(), opencode's child-session
@@ -382,7 +382,7 @@ var subagentKeys = []string{"agent_id", "parentID"}
 //
 // Both are why this returns a reason: a refusal that cannot say why is a
 // refusal nobody can tell from a bug.
-func payloadIsRoot(payload []byte) (root bool, why string) {
+func PayloadIsRoot(payload []byte) (root bool, why string) {
 	// The parse requirement is the tightening, and it is the only one an
 	// absence-coded filter is allowed. A payload nobody could read is a
 	// payload in which agent_id is absent FOR THE WORST POSSIBLE REASON, and

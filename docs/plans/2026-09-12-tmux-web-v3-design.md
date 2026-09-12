@@ -1,7 +1,7 @@
 # tmux-web — the capture panel, the reply box, and the phone
 
 Date: 2026-09-12
-Status: design, not agreed. Revision 2. Six features in the owner's priority
+Status: design, not agreed. Revision 3. Six features in the owner's priority
 order, three of which press against a decision already recorded: item 1 against
 v2's "a general parsed-screen panel" being out of scope, item 6 against v1
 decision 5, and item 6's service worker against v2 decision 6. Two of those are
@@ -19,7 +19,38 @@ measured through the wrong transport and is worse than recorded (item 4);
 selection (item 1); and two records were misquoted — v2's reason for rejecting a
 panel, and the claim that installing the app makes a badge impossible (item 6).
 Item 5's third cost is reworded from a privacy claim, which it is not, into a
-scope choice, which it is. Smaller corrections are marked where they land.
+scope choice, which it is.
+
+**Revision 3 answers a review of revision 2, and its corrections are all in the
+fixes revision 2 made rather than in what it left alone.** Four things:
+
+- **The mode guard evaluated against the wrong pane** (item 4). `if-shell` takes
+  its own `-t target-pane`, and revision 2's expression had none, so
+  `#{pane_mode}` expanded against tmux's default pane — measured as failing in
+  *both* directions, and in one of them closing the owner's `choose-tree`, the
+  exact failure the guard existed to prevent. Worse, revision 2's specified test
+  would have passed anyway, because a single-pane fixture makes the default pane
+  the target. Modes also stack, which no `pane_mode` guard can see. The
+  instrument is now `send-keys -X -t %<id> cancel`, measured, and it is one fork
+  rather than two.
+- **The wake probe left the two wake paths in different end states** (item 2).
+  Revision 2 closed the badge bug by discarding the probe's answer, which is
+  sound — but the reconnect path `select`s and the probe path did not, so a live
+  socket came back with the terminal showing the owner's pane and the reply box
+  writing to it while every other surface named the tab's. The probe now
+  `select`s first and adopts through `#awaitingWhere`, as reconnect does. This
+  also falsifies item 1's "the panel and the reply box cannot diverge", which is
+  narrowed to a claim about the controls.
+- **The wake handler was not idempotent for an OPEN socket** (item 2). A second
+  wake sent a second probe and armed a second timer, and the orphan fired
+  `discard()` after the answer landed. `#wakeProbe` is now the in-flight flag,
+  and the test that was specified for this could not have caught it.
+- **The row's width claim was false and backwards** (item 3). `Badge` is
+  `shrink-0`, so the name cannot pay; the narrowest row is 150 px and the
+  desktop sidebar is 33 px *narrower* than the phone sheet, not wider. There is
+  now a width budget and open question 4 is corrected.
+
+Smaller corrections are marked where they land.
 Follows: `2026-09-09-tmux-web-design.md` (v1, shipped),
 `2026-09-10-tmux-web-v2-design.md` (v2, shipped),
 `2026-09-10-tmux-web-agent-reporting-design.md` (revision 7, shipped).
@@ -55,8 +86,11 @@ was suspended finally fires.
 2. **It is a snapshot and says so.** No auto-refresh; a manual recapture and a
    visible capture time.
 3. **The socket wakes on foreground, and the wake carries a liveness probe** —
-   because the failure that never heals is a socket that claims to be open. The
-   probe's *answer* is discarded; only the fact that one arrived is read.
+   because the failure that never heals in any time a person will wait is a
+   socket that claims to be open. **The probe is `select` then `where`, exactly
+   as the reconnect path already asks it**, so its answer is the tab's own pane
+   and is adopted through the existing `#awaitingWhere`. Both wake paths then
+   end in the same state.
 4. **The branch is read off `.git/HEAD` from the daemon, off the poll
    goroutine.** A hung `stat` must cost a branch, never a sidebar.
 5. **Dirty state is out of scope**, on the fork and the worktree walk.
@@ -77,8 +111,11 @@ was suspended finally fires.
     One current pane in the app, at the cost v1 already books for the shared
     active pane — because two would let a reply land on a pane the panel never
     showed.
-12. **The mode cancel before a reply is guarded on `#{pane_mode}`.** Typing into
-    a text box on a phone must never close the owner's `choose-tree`.
+12. **The mode cancel before a reply is `send-keys -X cancel -t %<id>`**, which
+    is targeted and pops only the copy-mode layer. Typing into a text box on a
+    phone must never close the owner's `choose-tree` — and a guard that reads
+    `#{pane_mode}` without its own `-t` reads the wrong pane, which is how
+    revision 2 would have closed it.
 
 ## Sequencing
 
@@ -176,11 +213,14 @@ tmux capture-pane -p -J -S -<N> -t %<id>
 
 Measured on tmux 3.7b against an isolated socket:
 
-- **`-p` alone is the visible screen only** — 24 lines on a 24-row pane, whatever
-  the history holds. This is what `Client.Capture` passes today, deliberately,
-  and the reporting design's reason for it is that scrollback is where a
-  just-answered approval box lives and it produces false `blocked`. That reason
-  is about the classifier, not about a panel.
+- **`-p` with no `-S` is the visible screen only** — 24 lines on a 24-row pane,
+  whatever the history holds. `Client.Capture` today passes
+  `capture-pane -p -J -t <paneID>` (`internal/tmux/client.go:497`) — `-J` as well
+  as `-p`, which revision 2 got wrong; what it omits is the `-S` range, and that
+  is the deliberate part. The reporting design's reason is that scrollback is
+  where a just-answered approval box lives and it produces false `blocked`. That
+  reason is about the classifier, not about a panel. So `-J` is not a new flag
+  here, only a kept one, and the only addition is the start line.
 - **`-S -<N>` takes N lines of scrollback plus the visible screen**, clamped to
   the available history: on a pane with 19 lines of history, `-S -100`,
   `-S -1000` and `-S -` all returned the same 43 lines.
@@ -228,8 +268,9 @@ the ones you opened the panel for — on a rune boundary, with `truncated: true`
 in the response and a line in the panel saying so. `truncateAtRuneBoundary`
 already exists in `internal/tmux` for `MaxTitle` and is the same instrument.
 
-`Client.Capture` gains a start line and this cap. Note that today it has **no
-output bound at all** — every other value that reaches the DOM has one
+`Client.Capture` gains a start line and this cap; `-p` and `-J` it already
+passes. Note that today it has **no output bound at all** — every other value
+that reaches the DOM has one
 (`MaxTitle`, `MaxLabel`, `MaxActivity`, `MaxQuestion`, `MaxReportBytes`) and the
 capture is the exception, justified by the classifier needing the whole screen
 to hash. That justification does not extend to a scrollback capture, and giving
@@ -264,10 +305,42 @@ what one does to the other, and on a phone the two cannot be seen at once: you
 would read pane A in the panel, close it, type into the box and send to pane B,
 with nothing on screen having lied to you at any point.
 
-**So the selector is the selection.** Changing pane in the panel calls the same
-`select` a sidebar row click calls, and then captures. There is one notion of
-"the pane I am on" in the app, the panel and the reply box cannot diverge, and
-closing the panel leaves the terminal showing the pane you were just reading.
+**So the selector is the selection.** Changing pane in the panel goes through
+the same `handleSelectPane` a sidebar row click goes through, and then captures.
+There is one notion of "the pane I am on" in the app, **no second selector can
+put the panel and the reply box on different panes**, and closing the panel
+leaves the terminal showing the pane you were just reading.
+
+Two qualifications, both of which revision 2 stated too strongly.
+
+**"The panel selector calls the same `select`" is only true within a group.**
+`handleSelectPane` (`App.tsx:258-284`) branches: same group is one
+`transport.select` on the live socket; a pane in **another** group sets
+`pendingPane` and `setPicked` and returns without touching the terminal. That
+changes `session`, which changes the `/ws?session=` URL, which **tears the
+socket down and brings up a new throwaway tmux session in the new group** — then
+the effect at `App.tsx:239-256` replays `pendingPane` once the new socket is
+`ready`, and the new socket's `#opened` selects it again before its own `where`.
+So a cross-group pick from the panel is a teardown, a new session, a PTY and a
+redraw, not one fork. That is the existing cost of a cross-group sidebar click
+and the panel inherits it rather than adding it — but the panel makes it much
+easier to reach, because **the palette's row source spans every session in the
+snapshot** (`Palette.tsx:117-171`: "Every pane, in snapshot order"; the current
+session is not a filter, only a flag), and the panel reuses that source, so its
+selector will too. The panel must therefore show the same `unreachable` flag the
+palette computes, and the plan should treat a cross-group capture as the
+expensive path it is rather than as a selector change.
+
+**"Cannot diverge" is about the controls, not about the pane.** One selector
+means the panel and the reply box always *name* the same pane. What neither of
+them controls is that pane moving underneath them: the active pane is shared,
+`App.tsx:314-321` records that `#pane` is written only by `select` and that
+nothing corrects it, and `App.tsx:288-295` deliberately declines to read
+`paneActive` back from the snapshot. So the app can still be showing one pane
+and naming another — not because two controls disagreed, but because the shared
+property moved. That is item 2's problem, not item 1's, and item 2's probe is
+what re-converges it on a wake; item 1's contribution is only that it does not
+add a *second* way to get there.
 
 The cost is stated rather than discovered: **the active pane is a tmux window
 property shared with every client** — one of v1's three recorded shared
@@ -322,10 +395,12 @@ drags nobody's view through scrollback.
   gesture, so the button must copy from state that is already in memory and must
   never fetch first. The design is written that way; whether it is sufficient
   needs a device.
-- **The pane selector** reuses the palette's row source (`Palette.tsx` already
-  fuzzy-matches `session/window/pane` over the snapshot), so there is one notion
-  of "the list of panes" and not two — and, per the section above, it moves the
-  tab's selection rather than keeping a second one.
+- **The pane selector** reuses the palette's row source (`Palette.tsx:117-171`
+  already fuzzy-matches `session/window/pane` over **every** session in the
+  snapshot), so there is one notion of "the list of panes" and not two — and,
+  per the section above, it moves the tab's selection rather than keeping a
+  second one, through `handleSelectPane`, including that function's cross-group
+  branch and its cost.
 
 ---
 
@@ -378,8 +453,14 @@ suspend and never completed: `readyState === WebSocket.CONNECTING`, no open
 event, no close event, and a transport object that exists. Revision 1 missed
 this case, and missing it is not harmless — `retryNow()` refuses to act while a
 transport exists, so the one tool the handler had was a no-op on exactly this
-state. It does not heal either, and from the outside it is indistinguishable
-from (b): a phase pill that says it is trying, forever.
+state. From the outside it is indistinguishable from (b): a phase pill that says
+it is trying. **It is not established that it never heals** — a stalled
+handshake eventually fails at the TCP or proxy layer and fires `onclose`, which
+puts it back on the backoff ladder — and revision 2 writing "does not heal
+either" overstated a case that did not need overstating. What is established is
+the timescale: that failure is minutes of somebody else's timeout, and a wake is
+about the seconds a person is willing to look at a frozen terminal. The case is
+real; "never" is not.
 
 `online` does not fire for any of them: it tracks interface transitions, not
 wake-ups, and on a captive portal it lies. `visibilitychange` is the trigger for
@@ -400,7 +481,8 @@ corrections change its shape rather than its intent:
   (`Terminal.tsx:538-543`). It covers case (a) — no transport, a backoff timer
   pending — and nothing else. A socket left in `CONNECTING` by a suspend still
   *has* a transport, so `retryNow()` is a no-op on it and no close event is
-  coming. That is a **third case**, and it heals no better than case (b).
+  coming. That is a **third case**, and it is no more self-healing than case (b)
+on any timescale a wake is about.
 - **`Transport.close()` suppresses its own `onClose`.** It sets
   `#closedByCaller`, and the close handler returns early on that flag
   (`transport.ts:166`, `:267`). So "close it and let the reconnect path fire"
@@ -421,57 +503,147 @@ wake():
         return
 
   (b) transport is OPEN:
+        if #wakeProbe !== null: return                          // one probe in flight
         if now - lastRecvAt <= LIVENESS_SLACK_MS: return        // it has been talking
-        send a `where` control frame                            // the probe
-        arm a PROBE_TIMEOUT_MS timer
-        on any inbound frame:  cancel the timer                 // answer ignored
-        on timeout:            discard()
+        if #pane: transport.select(#pane)                       // as reconnect does
+        #awaitingWhere = transport.where()                      // the probe
+        #wakeProbe = timer(PROBE_TIMEOUT_MS)
+        on any inbound frame:  clearTimeout(#wakeProbe); #wakeProbe = null
+        on timeout:            #wakeProbe = null; discard()
 
 discard():                             // close() alone fires nothing back
+  clearTimeout(#wakeProbe); #wakeProbe = null
   detach the transport from the session
   transport.close(4001, 'socket did not answer')
   attempt = 0
   connect now
 ```
 
-Four things about it are load-bearing.
+Six things about it are load-bearing.
 
 **The probe reuses machinery that is already on the wire, and it is not free.**
-`where` is the one control message the daemon *answers*: the client asks and the
-daemon replies with a `wsPaneMessage` naming the pane the tab landed on
+`where` and `select` are the control messages the reconnect path already sends,
+and `where` is the one the daemon *answers*: the client asks and the daemon
+replies with a `wsPaneMessage` naming the pane the tab landed on
 (`internal/front/ws.go`, and `0ded35a`). So the probe needs no new frame type,
-no new endpoint and no server change. But the daemon answers it through
-`tmux.Client.CurrentPane`, which runs `list-panes` — **one fork per probe**.
-Revision 1's cost table said none; it says one now. That is why the probe is
-gated behind `lastRecvAt` instead of being sent on every wake: a probe is much
-cheaper than a reconnect, but it is not free, and a phone glanced at twenty
-times an hour would otherwise be twenty forks.
+no new endpoint and no server change. But it is **three forks** — `select` is
+`SelectPane`, which runs `list-panes` and then `select-window` chained with
+`select-pane`, and `where` is `CurrentPane`, which runs `list-panes`. Revision 1
+said none, revision 2 said one, and it is three, for the reason the section
+below gives. That is why the probe is gated behind `lastRecvAt` instead of being
+sent on every wake: a probe is much cheaper than a reconnect, but it is not
+free, and a phone glanced at twenty times an hour would otherwise be sixty
+forks.
 
-**The answer is discarded on this path, and revision 1 adopting it was a bug.**
-`where` answers a different question depending on how it was asked:
+**The probe asks the question the reconnect path asks, because otherwise the
+two wake paths end in different states. Revision 2's "discard the answer" was a
+correct fix to the wrong layer.** `where` answers a different question depending
+on how it is asked:
 
 - **On reconnect** the tab `select`s its remembered pane and *then* asks
   (`Terminal.tsx:583-592`), so the answer is the tab's own pane. `#landed`
-  adopting it into `#pane` is correct there and is unchanged by this item.
-- **On a wake probe there is no `select`**, so the answer is what
-  `CurrentPane` actually reads: the active pane of the tab session's current
-  window. The active pane is one of v1's three shared window properties, and the
-  owner has had an hour at the keyboard to move it.
+  adopting it into `#pane` is correct there.
+- **Asked with no preceding `select`**, it is what `CurrentPane` actually reads:
+  the active pane of the tab session's current window. The active pane is one of
+  v1's three shared window properties, and the owner has had an hour at the
+  keyboard to move it. Adopting *that* is the bug revision 1 shipped: `#pane` is
+  what the app passes as `activePane` (`App.tsx:385`), and
+  `useSeenPanes(serverStart, activePane, rows)`
+  (`useSnapshot.ts:1476`) marks the pane you are "looking at" as seen, so an
+  adopted answer would **clear the finish badge on a pane nobody read** — the
+  exact failure the whole reporting line exists to prevent.
 
-Adopting that would drag the phone's selection onto whatever pane the owner is
-sitting on — and it would not stop there. `#pane` is what the app passes as
-`activePane`, and `useSeenPanes(serverStart, activePane, rows)` marks the pane
-you are "looking at" as seen. So an adopted answer would **clear the finish
-badge on a pane nobody read**, on the one device that was away, which is the
-exact failure the whole reporting line exists to prevent.
+Revision 2 closed that by leaving `#awaitingWhere` false so `#landed`'s existing
+guard drops the answer. **The badge bug is genuinely closed by that. What it
+leaves open is that the two wake paths now end somewhere different**, because
+the difference between them was never the question — it was the `select`:
 
-So the probe leaves `#awaitingWhere` false, and no new code is needed for that:
-`#landed`'s existing guard — *"an answer to a question this session did not
-ask"* — already drops it (`Terminal.tsx:620`). What the probe reads is only that
-*a frame arrived*, which is `lastRecvAt`'s job. The alternative, adopting it and
-teaching `useSeenPanes` to ignore an adopted pane, would put a wake-path
-exception inside the badge rule; that is a worse trade than discarding a pane id
-the tab did not ask a question about.
+| | reconnect path | revision 2's probe path |
+| --- | --- | --- |
+| calls `select(#pane)` | yes | **no** |
+| owner's active pane, after | pulled back to the tab's pane, A | **left where the owner put it, B** |
+| what the terminal shows | A | **B** |
+| `#pane`, the sidebar highlight, `useSeenPanes`, the capture panel | A | A |
+| where the reply box's bytes land | A | **B** |
+
+So on a live-but-quiet socket the app comes back reading the owner's pane and
+writing to it, while every surface in the app names a different one — and
+nothing existing catches it, because `App.tsx:314-321` documents that `#pane` is
+only ever written by `select` and *nothing corrects it*, and `App.tsx:288-295`
+deliberately rejects `paneActive` for the highlight. Round one's "a different
+question on each path" was relocated rather than removed: it became **a
+different end state on each path**.
+
+**So the probe does what the reconnect does: `select(#pane)`, then `where`,
+adopting the answer through the existing `#awaitingWhere`.** With the `select` in
+front, the answer is the tab's own pane again — the premise of revision 2's
+discard evaporates rather than being overridden, because the tab has now asked
+the question it is adopting the answer to. No wake-path exception goes anywhere
+near `useSeenPanes`, and `#landed` needs no change at all.
+
+**The alternative was re-selecting before every reply**, and it is rejected. It
+patches one symptom of the divergence and leaves the rest: between the wake and
+the first reply — which on a phone may be the whole session, because most wakes
+are a glance — the sidebar still highlights A, the capture panel still captures
+A, and `useSeenPanes` still clears A's badge while the terminal shows B. That
+last one puts the badge bug back through the other door: a pane whose finish
+nobody read is marked seen, not because an answer was adopted but because
+`#pane` was never corrected. It also costs a fork on every reply, unbounded in
+count, against three on a wake that already crossed the `LIVENESS_SLACK_MS`
+gate.
+Convergence at the wake is one place; convergence at every write is every place,
+forever, and still incomplete.
+
+**Two costs, both stated rather than discovered.** First, **the probe is three
+forks, not one.** `select` is `Client.SelectPane`, which forks `list-panes` and
+then `select-window` chained with `select-pane` (`internal/tmux/client.go:355`,
+`:395-400`); `where` is `CurrentPane`, which forks `list-panes`. Revision 2's
+cost table said one; it says three now, on a wake where `lastRecvAt` is already
+stale, which is exactly the wake that was about to cost a reconnect if the answer
+does not come. Second, **waking the phone now moves the owner's active pane**,
+because `select-pane` is what pulls it back. That is v1's already-accepted
+shared-active-pane cost reached through a new occasion, and it is the same cost
+item 1's panel selector accepts a section above — but it is new for a wake, and
+the honest reading is that a phone coming out of a pocket now nudges the owner's
+terminal. It is the price of the app agreeing with itself about which pane it is
+on, and the divergent alternative is worse.
+
+**Recorded, not chosen: probe first and select only on disagreement.** Ask
+`where` with `#awaitingWhere` false as revision 2 did, compare the reported pane
+to `#pane`, and send `select(#pane)` only when they differ — one fork in the
+common case, three in the divergent one, same end state. It is a real
+optimisation and the plan may take it, but not in this batch: it makes the
+coherent end state a consequence of a comparison the probe path has to get
+right, on a path that fires at most once per wake, instead of a consequence of
+doing what the other path already does. The forks are cheap enough that
+"identical to reconnect" is worth more than two of them.
+
+**The probe is single-flight, and revision 2's idempotence claim was false for
+the case that matters.** Revision 2's failure table said a second wake "finds
+either a connecting socket or a fresh `lastRecvAt` and returns". For an **OPEN**
+socket that is not true: after the first call the socket is still OPEN and
+`lastRecvAt` is still stale until the answer lands, so a second wake sends a
+second `where` and arms a second timer. Cancelling "the timer" cancels one
+handle; the orphan then fires `discard()` after the answer has already arrived —
+a spurious reconnect on every double-fired wake, which is the pair
+`visibilitychange` + `pageshow` this handler is explicitly written to tolerate.
+So `#wakeProbe` holds the timer handle and doubles as the in-flight flag: a
+non-null `#wakeProbe` returns immediately, and it is nulled in exactly three
+places — the inbound frame, the timeout, and `discard()`. `#checkGone()`'s
+`#probing` is the same pattern already in this file (`Terminal.tsx:418-419`,
+`:676-689`), and this should be written to look like it.
+
+**One invariant on the wire moves with this, and it is pinned in three places.**
+The probe makes a socket ask `where` **twice** — once on open, once per stale
+wake. `wsControlBuffer`'s comment says "A tab sends one `where` per socket"
+(`internal/front/ws.go:38-43`), the handler comment says "asked once per socket"
+(`ws.go:477-479`), and `Terminal.test.tsx:792` asserts *"accepts one answer per
+socket and no more"*. The buffer itself is 4 and does not overflow, so nothing
+breaks — but all three encode an invariant that is no longer true. It becomes
+**one answer per outstanding question**, which is what `#awaitingWhere` has
+always actually enforced, and both comments and that test must be moved to say
+so. A plan that changes the client without moving them leaves a green test
+asserting the opposite of the design.
 
 **`lastRecvAt` is a new field on `Transport` and it must count every inbound
 frame, not only data.** It cannot count pongs, because those are below the
@@ -602,7 +774,7 @@ element pays — a question revision 1 answered in a way that quietly made the r
 move with agent state.
 
 **The branch gets its own slot and never shares one.** Right-aligned on the
-first line, the same `Badge` geometry and `max-w-24`, an outline variant rather
+first line, `Badge` geometry with the width budget below, an outline variant rather
 than secondary so it and the command capsule are not confusable, and rendered
 **whenever `Branch` is non-empty — always, and on nothing else.**
 
@@ -626,15 +798,91 @@ chip's presence is a function of the pane's directory and of nothing else.** It
 changes when the pane changes directory, and at no other time, identically
 whether the pane is blocked, working, done or idle. The capsule keeps its own
 existing rule, untouched by this item. When both are present they sit side by
-side at the right edge, branch outermost, each `max-w-24` and each truncating.
+side at the right edge, branch outermost, sharing the budget below.
 
-The cost is width, and it is paid by the name, which already truncates. A row in
-a repository running a bare shell can show a cut-short name, a branch and a
-command all at once on a phone. That is accepted, and the alternative — dropping
-the capsule when a branch exists — is rejected for the same reason revision 1's
-rule was: it makes one element's presence depend on another whose own presence
-tracks agent state, which lets the forbidden coupling back in through the far
-door.
+### The width budget, because there is not enough room for two `max-w-24` chips
+
+**Revision 2 said "the cost is width, and it is paid by the name". That cannot
+happen as written, and it is backwards about which device is tight.** `Badge`'s
+base class string is `shrink-0` with `overflow-hidden`
+(`web/src/components/ui/badge.tsx:6-7`), so **neither chip yields** — the name
+cannot pay for something that refuses to be paid. What actually happens is that
+the row overflows and `SidebarMenuSubButton`'s own `overflow-hidden`
+(`ui/sidebar.tsx:667`) clips it, and the branch, being outermost, is the thing
+that disappears.
+
+Computed from the class chain, for a pane row inside a **split** window — the
+deepest nesting and the narrowest row:
+
+```
+256   --sidebar-width (16rem, ui/sidebar.tsx:27; App.tsx renders a bare provider)
+-  1  Sidebar border-r
+- 16  SidebarGroup p-2
+- 28  SidebarMenuSub mx-3.5
+-  1  SidebarMenuSub border-l
+- 20  SidebarMenuSub px-2.5
+- 16  SidebarMenuSubButton px-2
+- 16  RowIcon size-4
+-  8  SidebarMenuSubButton gap-2
+= 150 px   <- the whole first line
+```
+
+Against that: two chips at `max-w-24` are 192 px before the 6 px active dot and
+three 8 px gaps — **222 px into 150**. Even the realistic case does not fit: a
+`claude` capsule and a `main` chip are roughly 55 px and 43 px at `text-xs` with
+the badge's `px-2` and border, which with the dot and the gaps is about 128 px,
+leaving ~22 px for the name. So **the name already truncates to nothing on a
+desktop**, before any phone is involved.
+
+**And the phone is the roomier device, not the tighter one.** The mobile sheet is
+`--sidebar-width-mobile`, 18rem (`ui/sidebar.tsx:28`), and it has no `border-r`:
+the same chain gives **183 px**, **33 px more than the desktop sidebar**. Open
+question 4 asked how much name survives at 390 px, which is asking about the
+wrong device; it is corrected below.
+
+**So the budget is a shared cap on the chip pair, not two independent caps**, and
+three things have to change together or it is decorative:
+
+1. **The pair is one shrinkable flex box**, `flex min-w-0 items-center gap-1`,
+   capped at `max-w-20` (80 px). A cap on the group is what makes the two chips
+   trade against each other instead of each holding 96 px it cannot use.
+2. **Each chip overrides `Badge`'s `shrink-0`** inside that box and carries
+   `min-w-0 truncate`. Without this the group cap changes nothing, because the
+   children still refuse to compress and the overflow is clipped exactly as it is
+   today.
+3. **The branch is additionally capped at `max-w-16`** (64 px), four-fifths of the
+   group, so a long branch name cannot squeeze the command capsule out of
+   existence. The capsule's own `max-w-24` (`AppSidebar.tsx:508`) is left in
+   place and stops binding once the group cap does.
+
+The row's first-line `gap-2` drops to `gap-1.5`. The arithmetic it has to close:
+
+```
+150  available
+-  6  active dot (size-1.5, shrink-0)
+-  6  gap
+- 50  name floor -- below this "pane 3" is not readable
+-  6  gap
+- 80  chip pair, max-w-20
+=  2  px spare
+```
+
+The name still truncates in a repository with a long pane name, which is
+accepted and is what it already does. What the budget buys is that it truncates
+*gracefully* rather than the branch being silently clipped away, and that the
+element which disappears first is never the one whose whole design rule is that
+its presence is a fact about the directory.
+
+The shallower row — a pane that is its own window — sits one nesting level up and
+already carries the roomier `max-w-32` capsule (`AppSidebar.tsx:451`). The branch
+gets the same `max-w-16` there and the group cap does not bind.
+
+The alternative — dropping the capsule when a branch exists — stays rejected for
+the same reason revision 1's rule was: it makes one element's presence depend on
+another whose own presence tracks agent state, which lets the forbidden coupling
+back in through the far door. A shared *width* budget couples the two chips'
+sizes, which is a fact about the sidebar, and never their presence, which is the
+thing the rule is about.
 
 **Rejected: sharing the capsule's slot**, in either direction —
 chip-when-no-capsule or capsule-when-no-chip. Either way one element's presence is a function of the
@@ -817,10 +1065,12 @@ the feature is safe to ship at all.** Cancelling first is what makes a reply
 either arrive whole or not arrive, which is the only pair of outcomes a text box
 is allowed to have.
 
-`copy-mode -q -t %<id>` does the cancel with no attached client (measured:
-`pane_in_mode` 1 → 0). `send-keys -X cancel` also works but wants a current
-client and printed `no current client` in one of the probes, so `-q` is the one
-to use — **guarded**, for the reason the next section gives.
+`send-keys -X -t %<id> cancel` does the cancel with no attached client
+(measured: `pane_in_mode` 1 → 0) and does it to the pane named, not to whichever
+pane tmux would have picked. `copy-mode -q -t %<id>` also cancels, and is the
+wrong instrument for the two reasons the next section measures: it cancels modes
+this feature has no business cancelling, and the format guard revision 2 wrapped
+around it to fix that read the wrong pane.
 
 That is one extra fork per reply. A reply is a keystroke-initiated action at
 human cadence; one fork is free next to the 1.5 s budget this project counts
@@ -829,7 +1079,7 @@ forks against.
 And it is why item 1 earns item 4: with a capture panel, the pane is far less
 often in copy mode to begin with.
 
-### The wire for that, and why the cancel is guarded
+### The wire for that, and why a bare `copy-mode -q` is the wrong instrument
 
 A new control message type, sibling to the existing `copy-mode` one:
 
@@ -842,7 +1092,7 @@ Handled beside `copy-mode` in `internal/front/ws.go`, reusing
 would freeze the user's own pane. The client sends `end-mode` and then the
 `FrameData`; the socket orders them.
 
-**The cancel is conditional, and revision 1 calling it "unconditional and
+**The cancel is scoped, and revision 1 calling it "unconditional and
 idempotent" is withdrawn.** Revision 1's open question 7 — is a bare cancel safe
 on every reply — has been answered, and answered against that claim:
 `copy-mode -q` cancels `clock-mode` and `choose-tree` as well as copy mode
@@ -852,15 +1102,79 @@ leave the mode too. An unconditional cancel on every reply would therefore close
 the owner's `choose-tree` from a phone — including on a send with nothing in it,
 which nothing in revision 1 guarded.
 
-The guard is one fork, the same one the unguarded version cost:
+**Revision 2's guard did not work, and its own specified test would have passed
+anyway.** It read:
 
 ```
 tmux if-shell -F '#{==:#{pane_mode},copy-mode}' 'copy-mode -q -t %3'
 ```
 
-`#{pane_mode}` was re-measured here on 3.7b: empty when the pane is in no mode,
-`copy-mode` when it is in copy mode. So the guard cancels exactly the mode that
-truncates a reply and leaves every other mode alone.
+`if-shell` takes **its own `-t target-pane`**, and without one the format is
+expanded against tmux's default pane rather than against `%3`. Measured on 3.7b
+on a throwaway socket with two panes in one window:
+
+| Fixture | Revision 2's form, aimed at `%0` | With `-t %0` on `if-shell` |
+| --- | --- | --- |
+| `%0` inactive in `copy-mode`, `%1` active in no mode | condition read **false** — `%0` **left in copy mode** | condition true, `%0` cancelled |
+| `%0` inactive in `tree-mode` (`choose-tree`), `%1` active in `copy-mode` | condition read **true** — **`%0`'s `choose-tree` was closed** | condition false, tree untouched |
+
+So it failed in both directions, and the second row is precisely the failure the
+guard exists to prevent, reached by the guard itself. **And the trap is in the
+fixture:** on a single-pane fixture — which is what "put a pane in copy mode,
+send `end-mode`, assert the mode is gone" naturally becomes — the default pane
+*is* the target, so the broken expression passes. Any test that pins this must
+use **two panes with the target not the active one**; the Testing section is
+respecified accordingly.
+
+**Modes stack, which the `if-shell` form cannot survive even once corrected.**
+Also measured on 3.7b: `pane_in_mode` is a **count**, not a flag — entering
+`copy-mode` on top of `choose-tree` gives `pane_in_mode` 2 while `pane_mode`
+names only the top layer, `copy-mode`. So the corrected guard reads true, and
+then **one `copy-mode -q` popped both layers**: the pane came out at
+`pane_in_mode` 0 with the owner's tree gone. Scrolling up inside a `choose-tree`
+is an ordinary thing to do, so this is not a corner: the guard would have let
+the reply through and closed the tree anyway.
+
+**So the instrument changes, and it is cheaper rather than dearer:**
+
+```
+tmux send-keys -X -t %3 cancel
+```
+
+Measured on 3.7b, with and without a client attached, and with the target being
+the *inactive* pane in a two-pane window:
+
+| Target pane's state | Result |
+| --- | --- |
+| `copy-mode` alone | cancelled; `pane_in_mode` 1 → 0; exit 0 |
+| `copy-mode` stacked on `choose-tree` | **only the copy layer popped**; back to `tree-mode`, `pane_in_mode` 2 → 1; exit 0 |
+| `copy-mode` stacked on `clock-mode` | only the copy layer popped; back to `clock-mode`; exit 0 |
+| `tree-mode` alone | refused: `not in a mode`, exit 1, **mode unchanged** |
+| `clock-mode` alone | refused: `not in a mode`, exit 1, **mode unchanged** |
+| no mode | refused: `not in a mode`, exit 1, nothing happens |
+
+`send-keys -X` dispatches into the copy-mode command table, so a pane that is
+not in a copy-mode-family mode simply has nowhere to deliver it. That makes the
+instrument **intrinsically scoped to the mode this feature needs cancelled** —
+no format to get wrong, no default pane to expand against, and the stacking case
+handled by construction rather than by a guard that cannot see it. It is
+**one fork**, the same budget the guarded version was priced at, and one fewer
+than `if-shell` wrapping a command.
+
+**Revision 2 rejected `send-keys -X cancel` on a measurement that was taken
+without `-t`.** It recorded that the command "wants a current client and printed
+`no current client` in one of the probes". Re-measured here with an explicit
+`-t %<id>`, it succeeds against a specific pane with **no client attached to the
+server at all**, and behaves identically with one attached. The earlier probe was
+measuring the missing target, not a missing client. That rejection is withdrawn.
+
+**The one cost is the exit status.** The common case — a pane in no mode, which
+is most replies — exits 1 with `not in a mode` on stderr. So the daemon must
+treat this command's exit status as **not an error signal**: it runs the cancel,
+ignores a non-zero exit, never surfaces it to the browser, and proceeds to the
+PTY write regardless. A version that propagated the error would fail every
+ordinary reply. `ValidatePaneID` still runs first and is what guards the target;
+the exit status is not doing that job and must not be read as though it were.
 
 Two smaller consequences follow. **An empty reply sends nothing** — no bytes, no
 `end-mode`, no fork — because an empty send has nothing to protect and every
@@ -1277,12 +1591,14 @@ Branch string `json:"branch"` // "" when the path is not in a work tree;
                               // so up to a poll interval stale, like Path.
 ```
 
-**The contract test's literal must move.** `web/src/lib/useSnapshot.test.ts:107`
-extracts `type Row struct` from `internal/tmux/snapshot.go`, collects its json
-tags and asserts `toHaveLength(19)` against a hand-written literal — deliberately
+**The contract test's literal must move.** `web/src/lib/useSnapshot.test.ts:122`
+(*"uses the json names tmux.Row marshals"*) extracts `type Row struct` from
+`internal/tmux/snapshot.go` at `:123`, collects its json tags and asserts
+`toHaveLength(19)` at **`:132`** against a hand-written literal — deliberately
 not `Object.keys(row()).length`, "because a count derived from the TypeScript
 side would agree with itself forever". That test is *designed* to fail here.
-It becomes 20 and stays a literal.
+It becomes 20 at `:132` and stays a literal, and the companion assertion at
+`:133` means the TypeScript `row()` fixture gains the field in the same change.
 
 **One new HTTP route:**
 
@@ -1296,9 +1612,12 @@ pins `wsControlMessage`'s field names against `internal/front/ws.go`:
 
 ```go
 { "type": "end-mode", "pane": "%3" }
-// -> tmux if-shell -F '#{==:#{pane_mode},copy-mode}' 'copy-mode -q -t %3'
-// Guarded: a bare `copy-mode -q` also cancels clock-mode and choose-tree, and a
-// pane's mode is shared with the owner's local client.
+// -> tmux send-keys -X -t %3 cancel
+// Targeted and scoped: `-X` dispatches into the copy-mode command table, so it
+// pops the copy-mode layer and nothing else -- a pane in choose-tree or
+// clock-mode refuses it with `not in a mode`, exit 1, unchanged. A pane's mode
+// is shared with the owner's local client, which is why that matters. The
+// non-zero exit is expected on any pane not in copy mode and is not an error.
 ```
 
 **No new frame kind.** The reply is `FrameData`, which is what typing already
@@ -1360,9 +1679,9 @@ snapshot already carries). Against that budget:
 | Item | Forks per poll | Other per-poll cost | Per-action cost | Wire |
 | --- | --- | --- | --- | --- |
 | 1 capture panel | **0** | none | 1 fork per capture: 2.6 ms visible, 5.1–5.7 ms at 2 000 lines, 7.6–8.0 ms full history (measured, 3.7b, 200×50, 5 000-line history) | up to 256 KiB, once, on demand |
-| 2 wake | **0** | none | on a wake with a live socket that has been quiet: one `where` round trip, which is **1 fork** (`CurrentPane` → `list-panes`) — and none at all when `lastRecvAt` is fresh. On a dead socket: a reconnect — 1 fork, 1 PTY, 1 redraw, plus the old session's teardown | one control frame |
+| 2 wake | **0** | none | on a wake with a live socket that has been quiet: a `select` + `where` round trip, which is **3 forks** (`SelectPane` → `list-panes`, then `select-window` chained with `select-pane`; `CurrentPane` → `list-panes`) — and none at all when `lastRecvAt` is fresh or a probe is already in flight. On a dead socket: a reconnect — 1 fork, 1 PTY, 1 redraw, plus the old session's teardown | two control frames |
 | 3 branch | **0** | N `stat`s, N = distinct pane directories (**measured: 3 for 12 panes**), on a separate goroutine, one unit of work per directory | 1 `ReadFile` per changed HEAD | +1 field, ~20 bytes per row |
-| 4 reply | **0** | none | 1 fork per non-empty reply (`if-shell` guarding `copy-mode -q`, one command) + one PTY write. An empty reply costs nothing | one control frame + the bytes |
+| 4 reply | **0** | none | 1 fork per non-empty reply (`send-keys -X -t %<id> cancel`, one command, no `if-shell` wrapper) + one PTY write. An empty reply costs nothing | one control frame + the bytes |
 | 5a resume | **0** | none | 1 fork (`new-window -c`) | nothing |
 | 6 phone | **0** | none | none | nothing |
 
@@ -1391,16 +1710,37 @@ on a phone no surface left that could show them diverging — so a reply could
 land on a pane the panel never showed. The panel's selector moves the tab's
 selection instead, paying v1's already-accepted shared-active-pane cost.
 
-**An unguarded `copy-mode -q` before every reply.** It also cancels
+**`copy-mode -q` as the cancel, guarded or not.** Bare, it also cancels
 `clock-mode` and `choose-tree`, and a pane's mode is shared with the owner's
 local client, so a phone typing into a text box would close the owner's tree.
-Guarded with `if-shell -F '#{==:#{pane_mode},copy-mode}'`, for the same one
-fork.
+Guarded with revision 2's `if-shell -F '#{==:#{pane_mode},copy-mode}'`, it is
+worse than bare: `if-shell` takes its own `-t`, and without one the format
+expands against tmux's default pane — measured on 3.7b as **failing in both
+directions**, leaving a target pane in copy mode when the active pane was not,
+and closing a target pane's `choose-tree` when the active pane *was* in copy
+mode. Adding `-t` fixes the target and not the mechanism: modes stack, so
+`copy-mode` over `choose-tree` reads `pane_mode = copy-mode` with
+`pane_in_mode = 2`, the guard passes, and one `copy-mode -q` pops both layers
+(measured). `send-keys -X -t %<id> cancel` pops exactly the copy layer, needs no
+guard, and is one fork rather than two.
 
-**Adopting the wake probe's `where` answer.** On the probe path there is no
-preceding `select`, so it names the shared window's active pane — the owner's,
-if they moved it while the phone slept — and `#pane` feeds `useSeenPanes`, which
-would mark that pane's finish as seen on a device that never saw it.
+**Asking the wake probe's `where` with no preceding `select`, whether the answer
+is adopted or discarded.** Adopted, it names the shared window's active pane —
+the owner's, if they moved it while the phone slept — and `#pane` feeds
+`useSeenPanes`, which would mark that pane's finish as seen on a device that
+never saw it. Discarded, as revision 2 proposed, the badge is safe and the two
+wake paths end somewhere different: reconnect pulls the active pane back to the
+tab's pane and the probe does not, so the terminal shows the owner's pane and
+the reply box writes to it while every other surface names the tab's. The probe
+`select`s first, exactly as reconnect does, and adopts through `#awaitingWhere`.
+
+**Re-selecting the pane before every reply**, as the cheaper way to stop the
+reply box writing to the wrong pane. It fixes the reply and nothing else: the
+highlight, the capture panel and `useSeenPanes` stay pointed at a pane the
+terminal is not showing for the whole interval between the wake and the first
+reply, which on a phone is usually the entire visit. It also costs a fork per
+reply forever against three on a wake that had already crossed the liveness
+gate.
 
 **`send-keys -H` as the reply transport.** Solves a quoting problem this daemon
 does not have, since input goes to a PTY and is never an argv element. Kept as
@@ -1466,10 +1806,12 @@ so nothing here brings it closer.
 | Someone reads a badge or a state off the capture panel | Cannot happen from the code — the panel's text reaches no classifier — but it can happen in someone's head. The panel shows a capture time and ages it, which is the only honest defence |
 | Two lines that each merely ended at the pane width, captured with `-J` | Not joined. tmux joins only lines carrying its own wrapped flag — measured on an 80-column pane with an exactly-80-character line, which stayed separate. The cost revision 1 accepted here does not exist |
 | The panel's selector is changed to a pane the tab is not on | It moves the tab's selection, and therefore the shared active pane for the owner too — the same cost a sidebar row click already pays, stated rather than discovered. The alternative, a panel-local selection, would let the reply box send to a pane the panel never showed |
+| The panel's selector is changed to a pane in **another group** | Not one fork. `handleSelectPane` sets `pendingPane` and `setPicked`, the `/ws?session=` URL changes, the socket is torn down and a new throwaway session is brought up in the new group, and the pane is replayed once that socket is `ready` (`App.tsx:239-284`). The palette's row source spans all sessions and the panel's does too, so the panel makes this easy to reach; it must carry the same `unreachable` flag the palette computes |
 | The capture dialog opens on a phone | Focus goes to the dialog container, not to the pane selector. Radix autofocuses its first tabbable child by default, which would raise the soft keyboard on a read-and-copy surface; `onOpenAutoFocus` is prevented, and it is used nowhere else in the app |
-| The wake handler fires twice (`visibilitychange` and `pageshow` both) | Idempotent by construction: the second call finds either a connecting socket or a fresh `lastRecvAt` and returns |
+| The wake handler fires twice (`visibilitychange` and `pageshow` both) | Idempotent, but **not by the reason revision 2 gave**. Its claim — the second call finds a connecting socket or a fresh `lastRecvAt` — is false for the OPEN case, which is the one the feature exists for: the socket is still OPEN and `lastRecvAt` is still stale until the answer lands, so a second call would send a second `where` and arm a second timer, and the orphaned timer would fire `discard()` after the answer arrived — a spurious reconnect on every double-fired wake. `#wakeProbe` holds the timer handle and doubles as the in-flight flag; non-null returns immediately. Same shape as `#checkGone()`'s `#probing` |
 | The wake probe times out on a socket that was actually fine, just slow | Costs one unnecessary reconnect: a fork, a PTY, a redraw, and the pane the tab remembers is re-selected. Annoying, not destructive. `PROBE_TIMEOUT_MS` is a guess and is open question 2 |
-| The owner moved the window's active pane while the phone slept | The probe's answer names the owner's pane, not the tab's: `CurrentPane` reads the shared window property, and the probe does not `select` first. The answer is discarded — `#awaitingWhere` stays false and `#landed`'s existing guard drops it. Adopting it would move the phone's selection onto the owner's pane and, through `useSeenPanes`, mark that pane's finish as seen on a device that never saw it |
+| The owner moved the window's active pane while the phone slept | The probe `select`s the tab's remembered pane before asking, exactly as the reconnect path does, so `CurrentPane` answers with the tab's own pane and `#landed` adopts it through `#awaitingWhere`. The cost is that the owner's active pane is pulled back to the phone's pane on a stale-socket wake — v1's accepted shared-active-pane limitation, on a new occasion, stated rather than discovered. Asking with no `select` and adopting the answer would clear a finish badge on a pane nobody read; asking with no `select` and discarding it, as revision 2 proposed, leaves the terminal showing the owner's pane and the reply box writing to it while the sidebar, the capture panel and `useSeenPanes` all name the tab's |
+| The wake probe answers and the tab's remembered pane is gone | The same fallback the reconnect path already has: the server logs it, the session stays where it attached, and `where` answers with wherever that is — which `#landed` adopts, because the tab asked. This is why the probe adopts rather than discards: an answer to a question the tab did ask is the only thing that can correct a stale `#pane`, and `App.tsx:314-321` records that nothing else does |
 | A socket left in `CONNECTING` by a suspend | The third case. `retryNow()` is a no-op on it because `#transport` is non-null, and no close event is coming, so the wake handler drops the transport itself after `CONNECT_STALL_MS` and connects. Without this case the tab waits forever behind a pill that says it is trying |
 | The wake handler decides a socket is dead and calls `close()` | `Transport.close()` sets `#closedByCaller` and suppresses `onClose`, so the reconnect path never fires on its own. The handler starts the connect itself; a version that closed and waited would hang |
 | A wake while the daemon is restarting | The reconnect fails, the backoff restarts from attempt 0, and the phase pill says reconnecting — which is the existing behaviour and correct |
@@ -1483,9 +1825,11 @@ so nothing here brings it closer.
 | The git reader is still busy when the next poll hands it a path set | The new set replaces the pending one: the mailbox holds exactly one, and the newest is the only one worth having. A queue would build a backlog of sets that are stale before they are read |
 | One directory out of three is on a wedged mount | The other two still refresh. Each distinct directory is its own unit of work with its own in-flight flag; a serial walker would stop at the wedged one and let every branch in the sidebar go stale |
 | A repository with an unborn HEAD | Shows the branch name that HEAD points at, which is what `git branch --show-current` says too. Not distinguishable without reading refs, and not worth reading refs for |
-| A shell pane in a repository, on a narrow phone row | Shows a truncated name, the branch and the command capsule together. The branch never yields, because a chip that yielded to the capsule would be yielding to agent state; the name absorbs the loss, as it already does. How much name survives at 390 px is open question 4 |
-| A reply sent to a pane in copy mode | Cancelled first, behind the `pane_mode` guard. **Without the cancel the reply is not lost — it is truncated at the first cancel key and the remainder is executed**: measured through a client PTY, `echo quit PARTIAL` cancelled on the `q` and ran `uit PARTIAL`. The silent swallow revision 1 recorded belongs to `send-keys`, which is not our transport |
-| The owner is in `choose-tree` or `clock-mode` when the phone sends a reply | Untouched. The cancel is guarded by `#{==:#{pane_mode},copy-mode}`, so only copy mode is cancelled. An unguarded `copy-mode -q` cancels all three (measured), and a pane's mode is shared with the owner's local client |
+| A shell pane in a repository, on the narrowest row | Shows a truncated name, the branch and the command capsule together. The branch never *disappears*, because a chip whose presence yielded to the capsule would be yielding to agent state — but it does shrink: the two chips share an 80 px budget and each truncates, which requires overriding `Badge`'s base `shrink-0`. The narrowest row is a pane in a split window on the **desktop** sidebar, 150 px for the whole first line; the phone's sheet is 183 px, 33 px roomier. Without the shared budget nothing yields at all and `SidebarMenuSubButton`'s `overflow-hidden` clips the branch away silently |
+| A reply sent to a pane in copy mode | Cancelled first, with `send-keys -X -t %<id> cancel`. **Without the cancel the reply is not lost — it is truncated at the first cancel key and the remainder is executed**: measured through a client PTY, `echo quit PARTIAL` cancelled on the `q` and ran `uit PARTIAL`. The silent swallow revision 1 recorded belongs to `send-keys`, which is not our transport |
+| The owner is in `choose-tree` or `clock-mode` when the phone sends a reply | Untouched. `send-keys -X cancel` refuses on both — `not in a mode`, exit 1, mode unchanged (measured) — because `-X` dispatches into the copy-mode command table and there is nothing there to receive it. A bare `copy-mode -q` cancels all three, and a pane's mode is shared with the owner's local client, which is why the instrument had to change |
+| The owner is in `choose-tree` and scrolled up, so `copy-mode` is stacked on top of it, when the phone sends a reply | Only the copy layer is popped; the pane comes back to `tree-mode` and the tree is still there. Measured: `pane_in_mode` is a count, 2 for that stack, and `pane_mode` names only the top — so `copy-mode -q` pops both layers and any guard reading `pane_mode` cannot see the one underneath. This is the case that ruled out `copy-mode -q` even with a correct `-t` |
+| A reply's cancel runs against a pane in no mode, which is most replies | `send-keys -X cancel` exits 1 with `not in a mode`. Expected, and not an error: the daemon ignores this command's exit status and writes the bytes anyway. `ValidatePaneID` is what guards the target; the exit status is not doing that job |
 | An empty reply is sent | Nothing is sent: no bytes, no `end-mode`, no fork. An empty send has nothing to protect and every reason not to disturb the owner's pane |
 | A multi-line paste into the reply box | Wrapped in bracketed paste, no trailing CR. **If measurement shows the agents or tmux do not honour it, the paste is refused with a reason** — twelve submitted turns is not an acceptable failure |
 | `Ctrl+C` typed in the reply box | The browser's copy. Not fixable; the interrupt stays on the terminal and the placeholder must not imply otherwise |
@@ -1506,11 +1850,22 @@ so nothing here brings it closer.
 Following v1, v2 and the reporting design:
 
 - **Integration against real tmux** (`internal/tmux/testutil`, throwaway socket)
-  for: `Capture` with a start line returning scrollback plus the screen; the byte
-  cap truncating from the top on a rune boundary; and the guarded cancel —
-  cancelling a pane in `copy-mode`, and leaving a pane in `choose-tree` or
-  `clock-mode` exactly where it was, which is the assertion that pins the guard
-  rather than the cancel.
+  for: `Capture` with a start line returning scrollback plus the screen; and the
+  byte cap truncating from the top on a rune boundary.
+- **The cancel's integration fixture must be two panes, with the target not the
+  active one.** This is specified before the assertions because the fixture is
+  where revision 2's guard would have escaped: on a single-pane fixture — which
+  is what "put a pane in copy mode, cancel, assert the mode is gone" naturally
+  becomes — tmux's default pane *is* the target, so an expression that resolves
+  against the wrong pane passes every assertion. The fixture is a window with
+  `%a` and `%b`, `%b` made active, and every assertion aimed at `%a`. Four
+  cases, each of which fails on at least one instrument that looked correct:
+  `%a` in `copy-mode` and `%b` in no mode → `%a` cancelled (revision 2's
+  expression left it in copy mode); `%a` in `tree-mode` and `%b` in `copy-mode`
+  → **`%a` still in `tree-mode`** (revision 2's expression closed it);
+  `%a` in `copy-mode` stacked on `tree-mode` → `%a` back to `tree-mode`, not out
+  of both (`copy-mode -q` pops both); and `%a` in no mode → nothing changes and
+  the non-zero exit is swallowed rather than surfaced.
 - **The copy-mode reply test runs through `ptybridge`, not `send-keys`, and its
   payload contains a cancel key.** Revision 1 specified a test that would have
   passed while proving nothing: with a `send-keys` fixture, nothing arrives with
@@ -1540,17 +1895,33 @@ Following v1, v2 and the reporting design:
   far as the emulator can go, since it has no keyboard. Everything about the
   keyboard is a device measurement, not a test, and the plan must say so instead
   of pretending a green CI covers it.
-- **A regression test that the wake handler is idempotent**: fire
-  `visibilitychange` and `pageshow` together and assert exactly one connect
-  attempt.
+- **A regression test that the wake handler is idempotent on an OPEN socket**,
+  which is not the same test as the connect one and is the case revision 2's
+  claim was false about. Fire `visibilitychange` and `pageshow` together against
+  an OPEN transport whose `lastRecvAt` is stale, and assert **exactly one
+  `where` frame and exactly one armed timer** — then let the answer land and
+  advance past `PROBE_TIMEOUT_MS` and assert **no reconnect**. A test that only
+  counted connect attempts, as revision 2 specified, passes with two probes and
+  two timers and fails to notice the orphan.
 - **A regression test that a healthy socket is not reconnected on wake** — the
   positive control for the probe. Without it a handler that always reconnects
   passes every other test in this list.
-- **A regression test that a wake probe does not move the selection.** Answer a
-  probe with a `wsPaneMessage` naming a *different* pane and assert `#pane` is
-  unchanged and nothing was emitted. Without it, a later refactor that sets
-  `#awaitingWhere` before the probe "so the answer is not wasted" reintroduces
-  the badge-clearing bug with every other test still green.
+- **A regression test that the two wake paths end in the same state.** This
+  replaces revision 2's "a wake probe does not move the selection", which pinned
+  the divergence rather than the fix. Assert that a stale-socket wake emits
+  `select(#pane)` **before** `where`, in that order, and that the adopted answer
+  leaves `#pane` where the tab had it. Then the negative control that matters:
+  answer the probe with a `wsPaneMessage` naming a *different* pane — the
+  server's "your pane is gone, you are here now" case — and assert `#pane`
+  follows it, exactly as it does on reconnect. Without the ordering assertion a
+  refactor that drops the `select` "because the answer is what we wanted anyway"
+  puts the badge-clearing bug straight back.
+- **A test that `Terminal.test.tsx:792`'s invariant has moved.** It currently
+  asserts a socket "accepts one answer per socket and no more"; a socket now
+  asks `where` once per open plus once per stale wake. The replacement asserts
+  one answer per *outstanding question* — a second answer with `#awaitingWhere`
+  false is still dropped — and `wsControlBuffer`'s comment and the handler
+  comment in `internal/front/ws.go` move with it.
 - **A regression test for the third wake case**: a transport left in
   `CONNECTING` past `CONNECT_STALL_MS` is dropped and reconnected. `retryNow()`
   cannot do it, and a test written against case (a) alone will not notice.
@@ -1564,8 +1935,9 @@ ahead/behind and anything else needing a `git status`; bare repositories; Web
 Push and any notification that is not the tab title, the favicon or the
 installed app's icon badge; a second layout for the phone; a native shell;
 replying to a pane the tab is not attached to; a panel-local pane selection;
-an unguarded mode cancel; a control-mode sidecar; making the capture panel
-live; and reading anything under `~/.claude`, `~/.pi` or opencode's database.
+`copy-mode -q` as the reply's mode cancel, guarded or bare; a control-mode
+sidecar; making the capture panel live; and reading anything under `~/.claude`,
+`~/.pi` or opencode's database.
 Each is argued above.
 
 ## Open questions that need measurement before a plan can be written
@@ -1586,12 +1958,18 @@ Each is argued above.
    program that never asked, so there is no literal-`[200~` failure to design
    around. What remains is three programs and three answers, and the fallback
    (refuse the paste) depends on the result.
-4. **Whether a name, a branch chip and a command capsule all fit a phone row.**
-   No longer a tie-break question: the slot rule settles which element yields,
-   and it is neither chip. What is unmeasured is how much of the name survives
-   at 390 px with both chips present, and whether `max-w-24` is the right budget
-   for the branch. Answerable by looking at it on a phone, which item 6's
-   measurement session is already for.
+4. **Whether a name, a branch chip and a command capsule all fit the narrowest
+   row — which is the desktop sidebar, not the phone.** Revision 2 asked this
+   about 390 px and had it backwards: the mobile sheet is 18rem and the desktop
+   sidebar 16rem, so the phone row is 33 px *wider* (183 px against 150 px, both
+   computed from the class chain above). The arithmetic settles that two
+   `max-w-24` chips cannot fit and that the fix is a shared 80 px budget with
+   both chips shrinkable; what is unmeasured is the **name floor**. 50 px is
+   asserted from where "pane 3" stops being readable at `text-sm` and has not
+   been looked at. If it is wrong the group cap moves, not the slot rule.
+   Answerable by opening the app on a desktop with a split window in a
+   repository — no device session needed, which is a correction to revision 2
+   filing this under item 6's phone measurement.
 5. **What `lines` should default to.** 1 000 is a guess sized against the
    measured 5 KB-per-1 000-lines-at-80-columns figure. The real question is how
    far back a person actually scrolls to answer an agent, and nobody has measured
@@ -1618,7 +1996,9 @@ Each is argued above.
 
 **Answered since revision 1, and recorded above rather than here:** whether
 `copy-mode -q` is safe unconditionally (no — it cancels `clock-mode` and
-`choose-tree` too, so the cancel is guarded on `#{pane_mode}`); whether `-J`
+`choose-tree` too, and revision 2's `#{pane_mode}` guard around it was measured
+wrong in both directions and blind to stacked modes, so the instrument is now
+`send-keys -X -t %<id> cancel`); whether `-J`
 joins lines that merely ended at the pane width (no); and what a program that
 never enabled `DECSET 2004` sees of the paste wrappers (nothing — tmux strips
 them client-side).

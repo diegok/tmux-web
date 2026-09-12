@@ -223,6 +223,51 @@ func TestSelectPaneMovesOnlyThisTabsSession(t *testing.T) {
 	}
 }
 
+// CurrentPane is asked before anything has waited for the attach, which is the
+// only way a browser can ask it.
+//
+// Open returns as soon as the fork has happened: the tmux client has not
+// connected to the server or created the session yet. And the WebSocket
+// handshake was answered before Open was even called, so the browser's question
+// really does arrive in that gap. Without the wait inside CurrentPane the
+// answer is "can't find session" and the tab never learns which pane it is
+// showing -- for the whole life of that socket, because nothing asks twice.
+//
+// Repeated, because it is a race and one attempt proves nothing: measured
+// against a build with the wait removed, a single attach loses it about two
+// times in three, so a run of ten is the difference between a test that fails
+// and a test that sometimes fails.
+func TestCurrentPaneAnswersBeforeTheAttachHasSettled(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+	srv.Run(t, "split-window", "-t", "=work:0", "-d")
+	// The second pane, so a wrong answer is a different string and not the only
+	// pane there is.
+	panes := strings.Split(srv.Run(t, "list-panes", "-t", "=work:0", "-F", "#{pane_id}"), "\n")
+	if len(panes) != 2 {
+		t.Fatalf("want a split window, got %q", panes)
+	}
+	srv.Run(t, "select-pane", "-t", panes[1])
+
+	for i := range 10 {
+		s, err := ptybridge.Open(context.Background(), ptybridge.Config{
+			TmuxArgs: srv.Args(), Base: "work", Cols: 80, Rows: 24,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// No waitFor: asking immediately is the point.
+		got, err := s.CurrentPane(context.Background())
+		s.Close()
+		if err != nil {
+			t.Fatalf("attach %d: CurrentPane right after Open: %v", i, err)
+		}
+		if got != panes[1] {
+			t.Fatalf("attach %d: CurrentPane = %q, want %q", i, got, panes[1])
+		}
+	}
+}
+
 // A daemon serving tabs for weeks must not accumulate one zombie and one open
 // PTY per closed tab, so Close reaps the child it killed and releases the
 // master. Both survive the tmux session's death otherwise: killing the client

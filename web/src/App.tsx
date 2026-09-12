@@ -179,9 +179,16 @@ export default function App() {
   )
 
   // The pane the sidebar highlights and the breadcrumb describes: what the
-  // terminal says it is pinned to, with an optimistic override while a
-  // cross-session switch is in flight. Never `paneActive` -- that is tmux's
-  // current pane per window, which is shared by the group and up to 1.5s old.
+  // terminal says it is on, with an optimistic override while a cross-session
+  // switch is in flight.
+  //
+  // Never `paneActive`, and never it combined with a window: those are per
+  // *session*, the snapshot is deduplicated to one row per pane with the user's
+  // own session preferred, and this tab is attached through a throwaway session
+  // whose current window is deliberately its own. Reading the snapshot that way
+  // would highlight whatever the local terminal is looking at -- confidently,
+  // and up to 1.5s late. The terminal asks its own socket instead; see
+  // `TerminalSession`.
   const activePane = pendingPane ?? status?.pane ?? null
   const located = findPane(groups, activePane)
 
@@ -491,11 +498,13 @@ export default function App() {
  * moved to, which is the question it exists to answer.
  *
  * What is left here is the case where nothing better is known. Not the session
- * going: that is followed too, into whichever session the tab was moved to. It
- * is the pane already being gone when this tab loaded -- there is no remembered
- * location to succeed -- and a `?session=` tab pinned to a session that has
- * died, which must stay pinned rather than wander. Naming the dead pane is then
- * the honest reading, because it is all the tab has.
+ * going: that is followed too, into whichever session the tab was moved to. Nor
+ * a tab loading onto a pane that had already died: the socket now answers with
+ * the pane it actually landed on, so what is remembered being gone is corrected
+ * rather than printed. It is a pane that dies in the gap between the socket
+ * answering and the snapshot catching up, and a `?session=` tab pinned to a
+ * session that has died, which must stay pinned rather than wander. Naming the
+ * dead pane is then the honest reading, because it is all the tab has.
  */
 function Breadcrumb({
   session,

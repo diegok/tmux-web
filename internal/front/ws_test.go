@@ -2,6 +2,7 @@ package front_test
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -524,6 +525,94 @@ func TestCopyModeRejectsATargetThatIsNotAPaneID(t *testing.T) {
 	}
 }
 
+// --- where am I -------------------------------------------------------------
+
+// The question a tab cannot answer for itself.
+//
+// Its own throwaway session has a current window independent of the user's --
+// that is what grouping buys, and what lets a browser and a local terminal look
+// at different things -- so nothing the tab can read tells it which pane it
+// landed on. Every fixture here parks the user's own session somewhere else, so
+// the pane the daemon reports can never be mistaken for the user's.
+func TestWhereAnswersWithThePaneThisTabLandedOn(t *testing.T) {
+	f := defaultWSFixture(t)
+	// Window 0 is split, so "the active pane" is not "the first pane" either.
+	f.srv.Run(t, "split-window", "-t", "=work:0", "-d")
+	f.srv.Run(t, "new-window", "-t", "=work", "-d")
+	panes := strings.Split(f.srv.Run(t, "list-panes", "-t", "=work:0", "-F", "#{pane_id}"), "\n")
+	if len(panes) != 2 {
+		t.Fatalf("want a split window to land on, got %q", panes)
+	}
+	// Where the tab will land: `new-session -t` starts its session on the
+	// group's FIRST window (measured on 3.7b -- not on the base session's
+	// current window, which is what this file used to say), and the active pane
+	// within a window belongs to the window, so it is shared with the group.
+	f.srv.Run(t, "select-pane", "-t", panes[1])
+	want := panes[1]
+
+	// The user, meanwhile, is somewhere else entirely.
+	f.srv.Run(t, "select-window", "-t", "=work:1")
+
+	// Asked without waiting for the tab's session to exist, deliberately: the
+	// daemon answers the WebSocket handshake before it forks the attach, so a
+	// browser really does ask this before there is a session to ask about.
+	c := f.dial(t, wsCanonical, "?session=work")
+	wsWrite(t, c, ptybridge.EncodeControl([]byte(`{"type":"where"}`)))
+
+	if got := wsReadPane(t, c, 15*time.Second); got != want {
+		t.Errorf("the tab was told it is on %q, want %q.\n"+
+			"the user's own session is looking at %q and window 0's first pane is %q -- "+
+			"either of those is a pane the browser is not showing",
+			got, want,
+			f.srv.Run(t, "list-panes", "-t", "=work:1", "-F", "#{pane_id}"), panes[0])
+	}
+}
+
+// "where" is not "where did I land": it is asked after the tab has replayed the
+// pane it remembered, and it has to describe the tab as it is by then.
+func TestWhereFollowsASelectRatherThanReportingTheLanding(t *testing.T) {
+	f := defaultWSFixture(t)
+	f.srv.Run(t, "new-window", "-t", "=work", "-d")
+	moved := f.srv.Run(t, "list-panes", "-t", "=work:1", "-F", "#{pane_id}")
+	landed := f.srv.Run(t, "list-panes", "-t", "=work:0", "-F", "#{pane_id}")
+
+	c := f.dial(t, wsCanonical, "?session=work")
+	f.tabSession(t)
+
+	// One loop reads these in order, so the answer is taken after the select.
+	wsWrite(t, c, ptybridge.EncodeControl([]byte(`{"type":"select","pane":"`+moved+`"}`)))
+	wsWrite(t, c, ptybridge.EncodeControl([]byte(`{"type":"where"}`)))
+
+	if got := wsReadPane(t, c, 15*time.Second); got != moved {
+		t.Errorf("the tab was told it is on %q, want %q (it selected that); it landed on %q",
+			got, moved, landed)
+	}
+}
+
+// The case that makes one question enough for both.
+//
+// A tab reloads and replays the pane it remembered, but that pane died while it
+// was away. The select fails, tmux leaves the tab where it attached, and the
+// answer has to be that pane -- not the dead one, and not nothing. Without it
+// the tab goes on naming a corpse over a terminal showing something else.
+func TestWhereReportsRealityAfterASelectThatCouldNotBeCarriedOut(t *testing.T) {
+	f := defaultWSFixture(t)
+	f.srv.Run(t, "new-window", "-t", "=work", "-d")
+	// The user is on window 1; the tab lands on window 0, the group's first.
+	f.srv.Run(t, "select-window", "-t", "=work:1")
+	alive := f.srv.Run(t, "list-panes", "-t", "=work:0", "-F", "#{pane_id}")
+
+	c := f.dial(t, wsCanonical, "?session=work")
+	f.tabSession(t)
+
+	wsWrite(t, c, ptybridge.EncodeControl([]byte(`{"type":"select","pane":"%9999"}`)))
+	wsWrite(t, c, ptybridge.EncodeControl([]byte(`{"type":"where"}`)))
+
+	if got := wsReadPane(t, c, 15*time.Second); got != alive {
+		t.Errorf("after a select that failed the tab was told it is on %q, want %q", got, alive)
+	}
+}
+
 // A message this daemon understands but cannot carry out is not a reason to
 // destroy a terminal. The sidebar is up to 1.5s stale, so selecting a pane that
 // just died is an ordinary race, not a broken client.
@@ -734,6 +823,49 @@ func wsWantStatus(t *testing.T, resp *http.Response, err error, want int) {
 	if resp.StatusCode != want {
 		t.Fatalf("status = %d, want %d (%v)", resp.StatusCode, want, err)
 	}
+}
+
+// wsReadPane waits for the daemon's answer to "where": a control frame naming
+// the pane this tab is on. Data frames are skipped -- the attach paints a shell
+// prompt over the same socket -- and any other control message is a protocol
+// the browser does not implement, so it fails rather than being skipped.
+func wsReadPane(t *testing.T, c *websocket.Conn, d time.Duration) string {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
+		typ, msg, err := c.Read(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if typ != websocket.MessageBinary {
+			t.Fatalf("message type = %v, want binary", typ)
+		}
+		kind, payload, err := ptybridge.Decode(msg)
+		if err != nil {
+			t.Fatalf("undecodable frame %v: %v", msg, err)
+		}
+		if kind != ptybridge.FrameControl {
+			continue
+		}
+		var got struct {
+			Type string `json:"type"`
+			Pane string `json:"pane"`
+		}
+		if err := json.Unmarshal(payload, &got); err != nil {
+			t.Fatalf("control message is not JSON: %q", payload)
+		}
+		// Pinned literally, in both this suite and the TypeScript one: these
+		// two strings are the whole contract, and a rename on one side only
+		// leaves a tab that never learns where it is.
+		if got.Type != "pane" {
+			t.Fatalf("control message type = %q, want \"pane\": %q", got.Type, payload)
+		}
+		return got.Pane
+	}
+	t.Fatal("the daemon never said which pane this tab is on")
+	return ""
 }
 
 func wsCurrentWindow(t *testing.T, f *wsFixture, session string) string {

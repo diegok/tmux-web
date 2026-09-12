@@ -380,6 +380,93 @@ func TestKillSessionRefusesAPartialName(t *testing.T) {
 	}
 }
 
+// CurrentPane answers for the session it is given and not for the group, which
+// is the only reason it can be the thing that tells a browser tab which pane it
+// is showing.
+//
+// The fixture is built so that no other answer coincides with the right one.
+// Three sessions share the same windows: the user's own "work", parked on
+// window 0, and two tabs, parked on windows 1 and 2. Every candidate wrong
+// answer is a *different* pane id from the right one -- the user's current
+// pane, the other tab's, the first pane of the window rather than its active
+// one -- so a reading that mixes up whose current window is whose cannot pass.
+//
+// This is the route the previous design took and it is what the test would have
+// caught: combining `#{window_active}` and `#{pane_active}` from a snapshot row
+// answers with `work`'s pane here, because the snapshot the browser gets keeps
+// one row per pane and prefers the user's own session's copy of it.
+func TestCurrentPaneAnswersForOneSessionOfAGroupAndNotTheOthers(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+	srv.Run(t, "new-window", "-t", "=work")
+	srv.Run(t, "new-window", "-t", "=work")
+	// Window 2 is split so that "the active pane" and "the first pane" are
+	// different panes: without this, dropping the -f filter would still pass.
+	srv.Run(t, "split-window", "-t", "=work:2")
+	srv.Run(t, "new-session", "-d", "-t", "work", "-s", "_web-a")
+	srv.Run(t, "new-session", "-d", "-t", "work", "-s", "_web-b")
+
+	srv.Run(t, "select-window", "-t", "=work:0")
+	srv.Run(t, "select-window", "-t", "=_web-a:1")
+	srv.Run(t, "select-window", "-t", "=_web-b:2")
+	want := paneAt(t, srv, "=work:2", 1)
+	srv.Run(t, "select-pane", "-t", want)
+
+	c := tmux.NewClient(srv.Args())
+	got, err := c.CurrentPane(context.Background(), "_web-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("CurrentPane(_web-b) = %q, want %q (window 2's active pane).\n"+
+			"work is on %q, _web-a on %q, and window 2's first pane is %q -- "+
+			"a tab told any of those is looking at somebody else's pane",
+			got, want,
+			activePane(t, srv, "=work:0"), activePane(t, srv, "=work:1"),
+			paneAt(t, srv, "=work:2", 0))
+	}
+
+	// The same call against each of the others, so the test cannot pass by
+	// answering "window 2's active pane" for every session it is handed.
+	for _, tc := range []struct{ session, window string }{
+		{"work", "=work:0"},
+		{"_web-a", "=work:1"},
+	} {
+		want := activePane(t, srv, tc.window)
+		got, err := c.CurrentPane(context.Background(), tc.session)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("CurrentPane(%s) = %q, want %q", tc.session, got, want)
+		}
+	}
+}
+
+// A session that does not exist is an error and not an empty string, because
+// ptybridge waits that error out while a freshly spawned attach creates its
+// session. `display-message -p -t '=nosuch:' '#{pane_id}'` prints an empty line
+// and exits 0 -- measured on 3.7b -- which is why this does not use it.
+func TestCurrentPaneFailsForASessionThatIsNotThere(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
+
+	c := tmux.NewClient(srv.Args())
+	got, err := c.CurrentPane(context.Background(), "_web-nope")
+	if err == nil {
+		t.Fatalf("CurrentPane for a missing session = %q, want an error", got)
+	}
+	if !tmux.IsMissingSession(err) {
+		t.Errorf("IsMissingSession(%v) = false; the attach race would fail instead of waiting", err)
+	}
+
+	// An empty session is the shape a frontend bug takes, and tmux reads it as
+	// "whatever is current" -- it must never answer about the user's session.
+	if got, err := c.CurrentPane(context.Background(), ""); err == nil {
+		t.Errorf(`CurrentPane("") = %q, want an error`, got)
+	}
+}
+
 // currentWindow is the index of the window the session is on. Grouped sessions
 // share a window list but not a current window, which is the whole point of
 // selecting against the tab's own session.

@@ -5,9 +5,8 @@
  * `Transport` (see `@/lib/transport`) owns exactly one WebSocket for its whole
  * life and never reopens, because a reopen here is not a reopen at all -- the
  * server answers a new socket with a *new* throwaway tmux session, grouped onto
- * the same base session but landing on whatever window that group's active
- * window happens to be. Everything that makes a reconnect safe therefore lives
- * in this file:
+ * the same base session but landing on the group's first window, wherever this
+ * tab was. Everything that makes a reconnect safe therefore lives in this file:
  *
  *   - Nothing typed at a dead socket is kept. `write` returns false and says so
  *     in the UI instead of queueing, because the only place a queue could be
@@ -18,7 +17,16 @@
  *     re-selected on the new socket *before* input is enabled, so the first
  *     keystroke after a blip cannot land in window 0. If that pane died in the
  *     meantime the server logs the failure and carries on, which leaves the tab
- *     on the group's active window: the fallback the design asks for, for free.
+ *     where it attached -- the group's *first* window, measured on tmux 3.7b,
+ *     not the base session's current one: the fallback the design asks for, for
+ *     free.
+ *   - Every socket then *asks* where it landed, and the answer is what makes
+ *     that fallback visible. Nothing else can tell the tab: its own throwaway
+ *     tmux session has a current window independent of the user's terminal --
+ *     which is why the session exists at all -- and no snapshot row names it.
+ *     Without the question, a tab that had never clicked anything reported no
+ *     pane at all, so the sidebar highlighted nothing and the breadcrumb said
+ *     only the session's name over a terminal full of somebody's work.
  *   - Resize is debounced. tmux sizes a window to its most recently active
  *     client, so an undebounced drag would repeatedly yank the dimensions of
  *     the terminal the user is sitting in front of locally.
@@ -232,6 +240,30 @@ export function paneStorageKey(session: string): string {
 }
 
 /**
+ * The `type` of the server's answer to `where`. Mirrors `wsPaneType` in
+ * `internal/front/ws.go`.
+ */
+export const PANE_MESSAGE = 'pane'
+
+/**
+ * The pane id in a `{type:'pane',pane:'%3'}` control message, or null for
+ * anything else that arrived.
+ *
+ * Everything off the socket is validated here rather than trusted, and the
+ * reason is not hypothetical politeness: what this returns is written straight
+ * into the tab's idea of where it is, which drives the sidebar highlight, the
+ * breadcrumb, the pane re-selected on the next reconnect, and which pane's
+ * "finished" badge gets cleared. A "" that slipped through would clear the
+ * badge on nothing and re-select nothing, silently.
+ */
+export function parsePaneMessage(message: unknown): string | null {
+  if (typeof message !== 'object' || message === null) return null
+  const m = message as { type?: unknown; pane?: unknown }
+  if (m.type !== PANE_MESSAGE) return null
+  return typeof m.pane === 'string' && isPaneId(m.pane) ? m.pane : null
+}
+
+/**
  * The terminal socket's url for a base session.
  *
  * Same-origin by construction -- the daemon serves both the SPA and `/ws`, and
@@ -269,7 +301,17 @@ export interface TerminalStatus {
   attempt: number
   /** Delay until the scheduled retry, when phase is "reconnecting". */
   retryDelayMs: number
-  /** Pane id this tab is pinned to, or null for the group's active window. */
+  /**
+   * The pane this tab is looking at, and the app's whole answer to "which of
+   * these am I in".
+   *
+   * Null only before the first socket has opened and been answered. It used to
+   * stay null for the entire life of a tab that never clicked anything -- the
+   * field was only ever written by `select()` -- so a freshly loaded tab
+   * highlighted no row and printed a breadcrumb with only a session name in it,
+   * while showing a live pane. It is now also written by the server's answer to
+   * `where`; see `#landed`.
+   */
   pane: string | null
   /**
    * Something the user typed was discarded because the socket was not open.
@@ -347,6 +389,19 @@ export class TerminalSession {
   #retryDelayMs = 0
   #pane: string | null = null
   #inputDropped = false
+
+  /**
+   * A `where` is outstanding on the current socket and its answer may still be
+   * adopted.
+   *
+   * This is what keeps the server's answer from ever overruling the user.
+   * `select()` clears it, so a click that happens while the question is in
+   * flight wins and the reply is discarded rather than dragging the tab back to
+   * where it was a few milliseconds ago. Set on each open and cleared on each
+   * close, so an answer from a socket that has been replaced is inert twice
+   * over -- the transport identity check catches it too.
+   */
+  #awaitingWhere = false
 
   /** Last size wterm reported; 0 until it has laid out. */
   #cols = 0
@@ -457,6 +512,9 @@ export class TerminalSession {
     }
     this.#pane = pane
     this.#writePane(pane)
+    // The user has answered "where am I" by moving, so a reply still in flight
+    // is stale before it lands. See #awaitingWhere.
+    this.#awaitingWhere = false
     // Not an error when the socket is down: it is remembered, and every open
     // replays it before enabling input.
     if (this.#phase === 'ready') this.#transport?.select(pane)
@@ -492,6 +550,9 @@ export class TerminalSession {
       onData: (bytes) => {
         if (transport === this.#transport) this.#opts.onData(bytes)
       },
+      onControl: (message) => {
+        if (transport === this.#transport) this.#landed(message)
+      },
       onOpen: () => this.#opened(transport),
       onClose: (event) => this.#closed(transport, event),
     })
@@ -517,16 +578,56 @@ export class TerminalSession {
     this.#sendResize()
 
     // Before 'ready'. If this pane is gone the server logs it and the session
-    // stays on the group's active window, which is the intended fallback.
+    // stays where it attached, which is the intended fallback -- and which the
+    // `where` below is what turns into something the tab can actually show.
     if (this.#pane) transport.select(this.#pane)
 
+    // And then: "so where am I?". After the select, never before, because the
+    // server answers with where the tab actually *is* -- which is the
+    // remembered pane when it was still alive, and the pane tmux left this tab
+    // on when it was not. One question covers both, and covers the case this
+    // exists for: a tab that has just attached and remembers nothing at all,
+    // which until now had no idea which pane it was showing. See
+    // `Transport.where`.
+    this.#awaitingWhere = transport.where()
+
     this.#phase = 'ready'
+    this.#emit()
+  }
+
+  /**
+   * The server said which pane this tab is on.
+   *
+   * Adopted into the same field a click writes, so everything downstream --
+   * the sidebar highlight, the breadcrumb, the pane replayed on the next
+   * reconnect, the "finished" badge that viewing a pane clears -- needs to know
+   * nothing about where the value came from.
+   *
+   * Deliberately not written to `sessionStorage`. What is remembered there is
+   * where the *user* put themselves, and it is the only thing allowed to
+   * outlive the tab's socket; an observation does not need to be, because a
+   * reload asks this question again and gets a current answer, while persisting
+   * it would quietly turn "the window this group is on" into a pin.
+   */
+  #landed(message: unknown): void {
+    const pane = parsePaneMessage(message)
+    if (pane === null) {
+      console.warn('terminal: ignoring an unusable control message', message)
+      return
+    }
+    // A click since the question was asked outranks the answer to it, and so
+    // does an answer to a question this session did not ask.
+    if (!this.#awaitingWhere) return
+    this.#awaitingWhere = false
+    if (pane === this.#pane) return
+    this.#pane = pane
     this.#emit()
   }
 
   #closed(transport: Transport, event: TransportClose): void {
     if (transport !== this.#transport) return
     this.#transport = null
+    this.#awaitingWhere = false
     if (this.#resizeTimer) {
       clearTimeout(this.#resizeTimer)
       this.#resizeTimer = null

@@ -109,6 +109,22 @@ function frames(ws: MockWebSocket): SentFrame[] {
 }
 
 const controls = (ws: MockWebSocket) => frames(ws).filter((f) => f.kind === FRAME_CONTROL)
+
+/**
+ * Deliver a control frame from the server, as the daemon frames one.
+ *
+ * Built here from the raw bytes rather than from a helper the production code
+ * shares, so that the JSON on the wire is what this suite asserts against and
+ * not a shape both sides agree on by construction. `internal/front/ws_test.go`
+ * pins the same two strings from the other end.
+ */
+function serverControl(ws: MockWebSocket, json: unknown): void {
+  const body = new TextEncoder().encode(JSON.stringify(json))
+  const frame = new Uint8Array(body.length + 1)
+  frame[0] = FRAME_CONTROL
+  frame.set(body, 1)
+  ws.receive(frame)
+}
 const data = (ws: MockWebSocket) => frames(ws).filter((f) => f.kind === FRAME_DATA)
 const types = (ws: MockWebSocket) => controls(ws).map((f) => f.json?.type)
 
@@ -383,11 +399,17 @@ describe('resize', () => {
     for (const cols of [80, 90, 100, 110]) term.noteResize(cols, 24)
     vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS - 1)
     // tmux sizes a window to its most recently active client: an intermediate
-    // size sent here would yank the user's own local attach mid-drag.
-    expect(types(ws)).toEqual([])
+    // size sent here would yank the user's own local attach mid-drag. The
+    // `where` is the one control message an open always sends -- see the
+    // "where am I" block below -- and is asserted here rather than filtered out
+    // so that these tests stay a statement about the whole wire.
+    expect(types(ws)).toEqual(['where'])
 
     vi.advanceTimersByTime(1)
-    expect(controls(ws).map((f) => f.json)).toEqual([{ type: 'resize', cols: 110, rows: 24 }])
+    expect(controls(ws).map((f) => f.json)).toEqual([
+      { type: 'where' },
+      { type: 'resize', cols: 110, rows: 24 },
+    ])
   })
 
   it('does not repeat a size the socket already has', () => {
@@ -400,11 +422,12 @@ describe('resize', () => {
     vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
     term.noteResize(100, 40)
     vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
-    expect(controls(ws)).toHaveLength(1)
+    // The `where` every open sends, plus one resize.
+    expect(types(ws)).toEqual(['where', 'resize'])
 
     term.noteResize(101, 40)
     vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
-    expect(controls(ws)).toHaveLength(2)
+    expect(types(ws)).toEqual(['where', 'resize', 'resize'])
   })
 
   it('ignores a zero size, which is a terminal that has not laid out', () => {
@@ -415,7 +438,7 @@ describe('resize', () => {
     term.noteResize(0, 0)
     term.noteResize(80, 0)
     vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
-    expect(types(ws)).toEqual([])
+    expect(types(ws)).toEqual(['where'])
   })
 
   it('does not let a zero size overwrite the last real one', () => {
@@ -436,7 +459,10 @@ describe('resize', () => {
     vi.advanceTimersByTime(BACKOFF_BASE_MS)
     const second = MockWebSocket.last
     second.open()
-    expect(controls(second).map((f) => f.json)).toEqual([{ type: 'resize', cols: 120, rows: 50 }])
+    expect(controls(second).map((f) => f.json)).toEqual([
+      { type: 'resize', cols: 120, rows: 50 },
+      { type: 'where' },
+    ])
   })
 
   it('re-sends the size on a new socket, which attaches at 80x24', () => {
@@ -446,14 +472,21 @@ describe('resize', () => {
     first.open()
     term.noteResize(120, 50)
     vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
-    expect(controls(first).map((f) => f.json)).toEqual([{ type: 'resize', cols: 120, rows: 50 }])
+    expect(controls(first).map((f) => f.json)).toEqual([
+      { type: 'where' },
+      { type: 'resize', cols: 120, rows: 50 },
+    ])
 
     first.emitClose(1006)
     vi.advanceTimersByTime(BACKOFF_BASE_MS)
     const second = MockWebSocket.last
     expect(second).not.toBe(first)
     second.open()
-    expect(controls(second).map((f) => f.json)).toEqual([{ type: 'resize', cols: 120, rows: 50 }])
+    // The resize goes out from `#opened` here, so it precedes the `where`.
+    expect(controls(second).map((f) => f.json)).toEqual([
+      { type: 'resize', cols: 120, rows: 50 },
+      { type: 'where' },
+    ])
   })
 
   it('sends a size measured before the socket opened', () => {
@@ -466,7 +499,10 @@ describe('resize', () => {
     vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
     expect(types(ws)).toEqual([])
     ws.open()
-    expect(controls(ws).map((f) => f.json)).toEqual([{ type: 'resize', cols: 90, rows: 30 }])
+    expect(controls(ws).map((f) => f.json)).toEqual([
+      { type: 'resize', cols: 90, rows: 30 },
+      { type: 'where' },
+    ])
   })
 })
 
@@ -478,7 +514,7 @@ describe('position', () => {
     MockWebSocket.last.open()
 
     expect(term.select('%7')).toBe(true)
-    expect(types(MockWebSocket.last)).toEqual(['select'])
+    expect(types(MockWebSocket.last)).toEqual(['where', 'select'])
     expect(storage.map.get('tmux-web:pane:work')).toBe('%7')
     expect(term.status.pane).toBe('%7')
   })
@@ -491,7 +527,7 @@ describe('position', () => {
 
     // `tmux select-pane -t work` exits 0 and moves the pane the user is in.
     expect(term.select('work')).toBe(false)
-    expect(types(MockWebSocket.last)).toEqual([])
+    expect(types(MockWebSocket.last)).toEqual(['where'])
     expect(storage.map.size).toBe(0)
   })
 
@@ -501,7 +537,12 @@ describe('position', () => {
     expect(term.status.pane).toBe('%4')
     term.start()
     MockWebSocket.last.open()
-    expect(controls(MockWebSocket.last).map((f) => f.json)).toEqual([{ type: 'select', pane: '%4' }])
+    // The select first, then the question -- the order is the contract: asked
+    // afterwards, the server's answer accounts for a select that failed.
+    expect(controls(MockWebSocket.last).map((f) => f.json)).toEqual([
+      { type: 'select', pane: '%4' },
+      { type: 'where' },
+    ])
   })
 
   it('ignores a stored value that is not a pane id', () => {
@@ -510,7 +551,7 @@ describe('position', () => {
     expect(term.status.pane).toBeNull()
     term.start()
     MockWebSocket.last.open()
-    expect(types(MockWebSocket.last)).toEqual([])
+    expect(types(MockWebSocket.last)).toEqual(['where'])
   })
 
   it('re-selects the remembered pane on every reconnect', () => {
@@ -524,9 +565,12 @@ describe('position', () => {
     vi.advanceTimersByTime(BACKOFF_BASE_MS)
     const second = MockWebSocket.last
     second.open()
-    // Without this the tab silently lands on the group's active window --
-    // window 0 -- after every blip.
-    expect(controls(second).map((f) => f.json)).toEqual([{ type: 'select', pane: '%9' }])
+    // Without this the tab silently lands on the group's first window after
+    // every blip.
+    expect(controls(second).map((f) => f.json)).toEqual([
+      { type: 'select', pane: '%9' },
+      { type: 'where' },
+    ])
   })
 
   it('keeps a pane selected while disconnected and applies it on reopen', () => {
@@ -540,7 +584,10 @@ describe('position', () => {
     vi.advanceTimersByTime(BACKOFF_BASE_MS)
     const second = MockWebSocket.last
     second.open()
-    expect(controls(second).map((f) => f.json)).toEqual([{ type: 'select', pane: '%5' }])
+    expect(controls(second).map((f) => f.json)).toEqual([
+      { type: 'select', pane: '%5' },
+      { type: 'where' },
+    ])
   })
 
   it('puts the select on the wire before any input can be', () => {
@@ -573,6 +620,7 @@ describe('position', () => {
     expect(frames(second).map((f) => (f.kind === FRAME_CONTROL ? f.json?.type : 'data'))).toEqual([
       'resize',
       'select',
+      'where',
       'data',
     ])
   })
@@ -586,9 +634,171 @@ describe('position', () => {
     expect(term.copyMode()).toBe(true)
     expect(term.copyMode('%3')).toBe(true)
     expect(controls(ws).map((f) => f.json)).toEqual([
+      { type: 'where' },
       { type: 'copy-mode' },
       { type: 'copy-mode', pane: '%3' },
     ])
+  })
+})
+
+/**
+ * Where the tab is, when nobody has clicked anything.
+ *
+ * This is the hole these tests exist for: `#pane` used to be written only by
+ * `select()`, so a tab that had just attached reported no pane at all -- the
+ * sidebar highlighted nothing and the breadcrumb was a session name over a
+ * terminal full of somebody's work. The tab cannot work it out for itself
+ * either: its own throwaway tmux session has a current window independent of
+ * the user's terminal, and no snapshot row names it. So it asks, and this is
+ * what it does with the answer.
+ */
+describe('where am I', () => {
+  it('adopts the pane the server says this tab landed on', () => {
+    const { term, statuses } = makeSession({ storage: memoryStorage() })
+    term.start()
+    const ws = MockWebSocket.last
+    ws.open()
+    // Nothing was clicked and nothing was remembered: this is a fresh tab, and
+    // before the answer it has no idea which pane it is showing.
+    expect(term.status.pane).toBeNull()
+    expect(types(ws)).toEqual(['where'])
+
+    serverControl(ws, { type: 'pane', pane: '%5' })
+
+    expect(term.status.pane).toBe('%5')
+    // And the parent is told, or the sidebar and the breadcrumb never repaint.
+    expect(statuses.at(-1)?.pane).toBe('%5')
+  })
+
+  it('does not disturb a remembered pane that is still alive', () => {
+    const storage = memoryStorage({ 'tmux-web:pane:work': '%4' })
+    const { term, statuses } = makeSession({ storage })
+    term.start()
+    const ws = MockWebSocket.last
+    ws.open()
+
+    // The select went out first, so this is the server confirming it.
+    serverControl(ws, { type: 'pane', pane: '%4' })
+
+    expect(term.status.pane).toBe('%4')
+    // Nothing changed, so nothing was announced: a status per poll would be a
+    // render per poll.
+    expect(statuses.filter((s) => s.phase === 'ready')).toHaveLength(1)
+  })
+
+  it('corrects a remembered pane that died while the tab was away', () => {
+    const storage = memoryStorage({ 'tmux-web:pane:work': '%4' })
+    const { term } = makeSession({ storage })
+    term.start()
+    const ws = MockWebSocket.last
+    ws.open()
+    expect(controls(ws).map((f) => f.json)).toEqual([
+      { type: 'select', pane: '%4' },
+      { type: 'where' },
+    ])
+
+    // %4 is gone: the daemon logged the refusal, tmux left the tab where it
+    // attached, and the answer says so. Without adopting it the tab would
+    // highlight nothing and print "%4 is gone" over a live pane.
+    serverControl(ws, { type: 'pane', pane: '%7' })
+
+    expect(term.status.pane).toBe('%7')
+    // Storage still says %4, and deliberately: what is remembered is where the
+    // *user* put themselves, and it is worth one failed select per reload to
+    // keep it rather than overwriting it with wherever tmux happened to land.
+    // The answer above is what makes that failure harmless.
+    expect(storage.map.get('tmux-web:pane:work')).toBe('%4')
+  })
+
+  it('lets a click that happened while the question was in flight win', () => {
+    const { term } = makeSession({ storage: memoryStorage() })
+    term.start()
+    const ws = MockWebSocket.last
+    ws.open()
+
+    // The user clicked a pane in the milliseconds the round trip took. The
+    // answer describes the tab as it was before that click.
+    expect(term.select('%9')).toBe(true)
+    serverControl(ws, { type: 'pane', pane: '%5' })
+
+    expect(term.status.pane, 'the server dragged the tab back off the pane the user just picked').toBe('%9')
+    // And the select really did go out, so this is not "the click was lost".
+    expect(controls(ws).map((f) => f.json)).toEqual([
+      { type: 'where' },
+      { type: 'select', pane: '%9' },
+    ])
+  })
+
+  it('ignores an answer that does not name a pane', () => {
+    for (const bad of [
+      { type: 'pane' },
+      { type: 'pane', pane: '' },
+      // `tmux select-pane -t work` exits 0 and moves the pane the *user* is
+      // sitting in front of, so a session name here must never be adopted and
+      // then replayed as a select on the next reconnect.
+      { type: 'pane', pane: 'work' },
+      { type: 'pane', pane: 3 },
+      { type: 'resize', cols: 80, rows: 24 },
+      'pane',
+      null,
+    ]) {
+      const { term } = makeSession({ storage: memoryStorage() })
+      term.start()
+      const ws = MockWebSocket.last
+      ws.open()
+      serverControl(ws, bad)
+      expect(term.status.pane, `adopted ${JSON.stringify(bad)}`).toBeNull()
+    }
+  })
+
+  it('ignores an answer from a socket that has been replaced', () => {
+    const { term } = makeSession({ storage: memoryStorage() })
+    term.start()
+    const first = MockWebSocket.last
+    first.open()
+    first.emitClose(1006)
+    vi.advanceTimersByTime(BACKOFF_BASE_MS)
+    const second = MockWebSocket.last
+    expect(second).not.toBe(first)
+
+    // A reply that raced the drop. It describes a tmux session that has already
+    // been destroyed, and the tab is attached through a new one.
+    serverControl(first, { type: 'pane', pane: '%5' })
+
+    expect(term.status.pane).toBeNull()
+  })
+
+  it('replays the pane it was told about on the next reconnect', () => {
+    const { term } = makeSession({ storage: memoryStorage() })
+    term.start()
+    const first = MockWebSocket.last
+    first.open()
+    serverControl(first, { type: 'pane', pane: '%5' })
+
+    first.emitClose(1006)
+    vi.advanceTimersByTime(BACKOFF_BASE_MS)
+    const second = MockWebSocket.last
+    second.open()
+
+    // A blip must not move the tab. The pane the server named is held the same
+    // way a clicked one is -- it is the same field -- so it is replayed before
+    // input goes live.
+    expect(controls(second).map((f) => f.json)).toEqual([
+      { type: 'select', pane: '%5' },
+      { type: 'where' },
+    ])
+  })
+
+  it('accepts one answer per socket and no more', () => {
+    const { term } = makeSession({ storage: memoryStorage() })
+    term.start()
+    const ws = MockWebSocket.last
+    ws.open()
+    serverControl(ws, { type: 'pane', pane: '%5' })
+    // A second, unasked-for answer -- a daemon that decided to announce every
+    // move it saw -- must not be able to move the tab behind the user's back.
+    serverControl(ws, { type: 'pane', pane: '%6' })
+    expect(term.status.pane).toBe('%5')
   })
 })
 
@@ -1066,7 +1276,7 @@ describe('stop', () => {
     term.noteResize(120, 50)
     term.stop()
     vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
-    expect(types(ws)).toEqual([])
+    expect(types(ws)).toEqual(['where'])
   })
 
   it('refuses input after stopping', () => {

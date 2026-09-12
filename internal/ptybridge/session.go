@@ -24,6 +24,17 @@ const outputBuffer = 256
 // with a reader still waiting to learn the session ended.
 const killTimeout = 5 * time.Second
 
+// How long CurrentPane waits for a freshly spawned attach to have created its
+// session, and how often it asks. The wait is generous because losing it is
+// permanent for that socket -- nothing asks again -- and cheap because the
+// normal answer arrives on the first or second attempt; it is bounded well
+// inside the caller's own tmux timeout so that a session which never appears
+// fails as a warning rather than as a stalled read loop.
+const (
+	currentPaneWait  = 2 * time.Second
+	currentPaneRetry = 25 * time.Millisecond
+)
+
 type Config struct {
 	TmuxArgs []string // server selection, e.g. {"-L", "sock"}; nil for default
 	Base     string   // the real session to group onto
@@ -149,6 +160,41 @@ func (s *Session) Resize(cols, rows uint16) error {
 // SelectPane navigates this tab's own session only.
 func (s *Session) SelectPane(ctx context.Context, paneID string) error {
 	return s.tm.SelectPane(ctx, s.name, paneID)
+}
+
+// CurrentPane is the pane this tab is looking at right now: the active pane of
+// its own session's current window.
+//
+// It waits for the session to exist rather than failing on it, and that is the
+// whole reason this method is not one line. Open returns as soon as
+// pty.StartWithSize has forked -- the tmux client has not connected to the
+// server or created the session yet -- and the WebSocket handshake was answered
+// *before* Open was even called, so the browser can and does ask this question
+// before there is anything to answer it with. Measured on this machine the gap
+// is a few milliseconds; it is a race either way, and losing it would leave the
+// tab with no idea which pane it landed on, which is the bug this exists to
+// fix.
+//
+// Only "can't find session" is waited out. Any other failure is returned at
+// once: a wedged server or an unreadable socket does not get better by being
+// asked again, and this runs on the read goroutine, where waiting costs the
+// user's keystrokes.
+func (s *Session) CurrentPane(ctx context.Context) (string, error) {
+	deadline := time.Now().Add(currentPaneWait)
+	for {
+		pane, err := s.tm.CurrentPane(ctx, s.name)
+		if err == nil {
+			return pane, nil
+		}
+		if !tmux.IsMissingSession(err) || !time.Now().Before(deadline) {
+			return "", err
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(currentPaneRetry):
+		}
+	}
 }
 
 // Close ends the session. It is safe to call more than once and from several

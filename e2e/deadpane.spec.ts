@@ -20,7 +20,7 @@
  * follow disabled; they passed. Naming the commands apart is what fixed them:
  * every assertion now names a string that cannot already be on screen.
  */
-import { BASE_SESSION, breadcrumb, enroll, expect, test } from './harness'
+import { BASE_SESSION, breadcrumb, enroll, expect, selectedRow, test } from './harness'
 import type { Locator, Page } from '@playwright/test'
 
 test('a pane that dies hands the tab to its neighbour in the same window', async ({
@@ -112,27 +112,6 @@ test('a pane that takes its window with it falls back to the first window', asyn
  * `toHaveCount(0)` here -- a state no assertion about breadcrumb text can tell
  * apart from a breadcrumb that has simply not caught up.
  */
-
-/**
- * Every row the sidebar is marking as the selected one.
- *
- * Both kinds of row can carry it: a pane row under a split window, and the
- * window row itself when the window has only one pane -- `WindowItem` marks one
- * or the other, never both, because two highlights would read as two
- * selections. Counting them together is what makes "exactly one thing is
- * selected" expressible.
- *
- * `data-sidebar` and not the `data-slot` that names the same rows: a pane row
- * is wrapped in a `ContextMenuTrigger` with `asChild`, whose own `data-slot`
- * lands on the button and overwrites shadcn's. `sessionLabel` in the harness
- * carries the same note for the same reason.
- */
-function selectedRow(page: Page): Locator {
-  return page
-    .locator('[data-sidebar="content"]')
-    .locator('[data-sidebar="menu-button"][data-active="true"], ' +
-      '[data-sidebar="menu-sub-button"][data-active="true"]')
-}
 
 /** Open a row's context menu, over its text rather than its padding. */
 async function rightClick(row: Locator, text: string): Promise<void> {

@@ -13,8 +13,8 @@
  * That class buffers `send()` while the socket is not OPEN and flushes the
  * buffer on the next open (`_flushBuffer`). For a plain shell that is a
  * convenience; here it is a hazard. A reconnect in this app creates a *new*
- * throwaway tmux session, which lands on whatever window and pane the group's
- * active window happens to be. Keystrokes typed into a dead socket would then
+ * throwaway tmux session, which lands on the group's first window and whatever
+ * pane is active there. Keystrokes typed into a dead socket would then
  * be replayed into a different agent's shell some seconds later. There is no
  * safe place to put those bytes, so they are dropped at the point of the write
  * and `send` says so by returning false.
@@ -69,6 +69,7 @@ export type ControlMessage =
   | { type: 'resize'; cols: number; rows: number }
   | { type: 'select'; pane: string }
   | { type: 'copy-mode'; pane?: string }
+  | { type: 'where' }
 
 /** Why the socket ended, as far as the caller needs to decide what to do next. */
 export interface TransportClose {
@@ -92,8 +93,12 @@ export interface TransportOptions {
   onData: (bytes: Uint8Array) => void
 
   /**
-   * Sink for `0x01` frames, parsed as JSON. The server sends none today; this
-   * exists so that when it does, the byte stream is not where they land.
+   * Sink for `0x01` frames, parsed as JSON.
+   *
+   * The server sends exactly one kind today -- `{type:'pane',pane:'%3'}`, its
+   * answer to `where()` -- and it is `unknown` here on purpose: this class owns
+   * the framing, not the meaning, and the caller validates what arrived. See
+   * `parsePaneMessage` in `@/components/Terminal`.
    */
   onControl?: (message: unknown) => void
 
@@ -231,6 +236,22 @@ export class Transport {
    */
   select(pane: string): boolean {
     return this.sendControl({ type: 'select', pane })
+  }
+
+  /**
+   * Ask the server which pane this tab is looking at. The answer arrives as a
+   * control message, `{type:'pane',pane:'%3'}`.
+   *
+   * It has to be asked, because the browser cannot work it out: this tab's own
+   * throwaway tmux session has a current window of its own -- that is the whole
+   * point of grouping -- and the snapshot names no session's current window
+   * that the tab could read as its own. Ordering matters and is the caller's
+   * job: sent *after* the remembered pane's `select`, the reply is the
+   * remembered pane when it is still alive and the pane tmux actually left this
+   * tab on when it is not.
+   */
+  where(): boolean {
+    return this.sendControl({ type: 'where' })
   }
 
   /** Put a pane into tmux copy-mode; omit the pane for this tab's current one. */

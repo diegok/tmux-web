@@ -35,6 +35,13 @@ const (
 // it feeds.
 const wsReadLimit = 1 << 20
 
+// wsControlBuffer bounds the queue of control messages waiting to go out to the
+// browser. A tab sends one "where" per socket and the answer is one small
+// frame, so this is slack rather than capacity; the send is non-blocking so
+// that a browser which has stopped reading cannot park the read goroutine, and
+// the ping loop is what eventually collects such a peer.
+const wsControlBuffer = 4
+
 // The size the attach starts at. A browser terminal has no dimensions until it
 // has laid out, so the first thing the frontend sends is a resize; this is only
 // what tmux draws in the meantime, and 80x24 is the conventional answer.
@@ -295,13 +302,19 @@ func (h *TerminalHandler) serve(ctx context.Context, conn *websocket.Conn, targe
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Where a control message bound for the browser is handed to the one
+	// goroutine allowed to write. The read loop must not write to the socket
+	// itself: coder/websocket supports one concurrent writer, and the write
+	// loop below is it.
+	ctrl := make(chan []byte, wsControlBuffer)
+
 	// Buffered for all three, so a loop that loses the race to report still
 	// returns instead of parking on the send forever.
 	done := make(chan wsExit, 3)
 	var wg sync.WaitGroup
 	wg.Add(3)
-	go func() { defer wg.Done(); done <- h.readLoop(ctx, conn, sess) }()
-	go func() { defer wg.Done(); done <- wsWriteLoop(ctx, conn, sess.Output()) }()
+	go func() { defer wg.Done(); done <- h.readLoop(ctx, conn, sess, ctrl) }()
+	go func() { defer wg.Done(); done <- wsWriteLoop(ctx, conn, sess.Output(), ctrl) }()
 	go func() { defer wg.Done(); done <- h.pingLoop(ctx, conn) }()
 
 	exit := <-done
@@ -327,7 +340,7 @@ func (h *TerminalHandler) serve(ctx context.Context, conn *websocket.Conn, targe
 // readLoop carries the browser's keystrokes and control messages. It is the
 // only caller of conn.Read, which is the one method on a Conn that is not safe
 // to call concurrently.
-func (h *TerminalHandler) readLoop(ctx context.Context, conn *websocket.Conn, sess *ptybridge.Session) wsExit {
+func (h *TerminalHandler) readLoop(ctx context.Context, conn *websocket.Conn, sess *ptybridge.Session, ctrl chan<- []byte) wsExit {
 	for {
 		typ, msg, err := conn.Read(ctx)
 		if err != nil {
@@ -352,7 +365,7 @@ func (h *TerminalHandler) readLoop(ctx context.Context, conn *websocket.Conn, se
 				return wsExit{} // the PTY is gone; the write loop is ending too
 			}
 		case ptybridge.FrameControl:
-			if exit, fatal := h.control(ctx, sess, payload); fatal {
+			if exit, fatal := h.control(ctx, sess, payload, ctrl); fatal {
 				return exit
 			}
 		}
@@ -375,6 +388,28 @@ type wsControlMessage struct {
 	Pane string `json:"pane"`
 }
 
+// wsPaneMessage is the one message this daemon sends to the browser, in answer
+// to a "where": the pane the tab is looking at, as a tmux pane id.
+//
+// It is the only way a tab can know that. Its own throwaway session has a
+// current window of its own -- that is what a grouped session is for -- and
+// nothing in the snapshot names it: the rows are deduplicated to one per pane
+// with the user's own session preferred, so a tab reading `window_active` from
+// there would be reading the *local terminal's* current window. See
+// tmux.Client.CurrentPane.
+//
+// The field names are the same cross-language contract as wsControlMessage's;
+// `parsePaneMessage` in web/src/components/Terminal.tsx is the other half.
+type wsPaneMessage struct {
+	Type string `json:"type"`
+	Pane string `json:"pane"`
+}
+
+// wsPaneType is the "type" of that message. Named because the Go test and the
+// TypeScript one both pin the literal, and a rename that changed only one of
+// them would leave a tab that never learns where it is.
+const wsPaneType = "pane"
+
 // control applies one control message.
 //
 // The split between fatal and not is deliberate. A payload that is not this
@@ -388,7 +423,7 @@ type wsControlMessage struct {
 // sidebar is up to 1.5s stale, so selecting a pane that has just died is an
 // ordinary race rather than a broken client, and destroying a working terminal
 // over it would be hostile. Those are logged and the socket carries on.
-func (h *TerminalHandler) control(ctx context.Context, sess *ptybridge.Session, payload []byte) (wsExit, bool) {
+func (h *TerminalHandler) control(ctx context.Context, sess *ptybridge.Session, payload []byte, ctrl chan<- []byte) (wsExit, bool) {
 	var m wsControlMessage
 	if err := json.Unmarshal(payload, &m); err != nil {
 		return wsExit{websocket.StatusUnsupportedData, "malformed control message", true}, true
@@ -421,6 +456,34 @@ func (h *TerminalHandler) control(ctx context.Context, sess *ptybridge.Session, 
 	case "copy-mode":
 		if err := h.copyMode(ctx, sess, m.Pane); err != nil {
 			slog.Warn("terminal: copy-mode failed", "pane", m.Pane, "err", err)
+		}
+	case "where":
+		// "Which pane did I land on?", asked once per socket, immediately
+		// after the tab has replayed the pane it remembered. Answering *after*
+		// that select is what makes one answer cover both cases: the remembered
+		// pane when it is still alive, and the pane tmux actually left the tab
+		// on when the select failed because that pane had died.
+		//
+		// A failure is logged and dropped, like every other message this daemon
+		// cannot carry out. The tab is then no worse off than it was before
+		// this message existed.
+		pane, err := sess.CurrentPane(ctx)
+		if err != nil {
+			slog.Warn("terminal: cannot say which pane this tab is on", "err", err)
+			break
+		}
+		msg, err := json.Marshal(wsPaneMessage{Type: wsPaneType, Pane: pane})
+		if err != nil {
+			slog.Warn("terminal: cannot encode the pane message", "pane", pane, "err", err)
+			break
+		}
+		select {
+		case ctrl <- msg:
+		default:
+			// A peer that is not draining. Dropping is right: the write loop
+			// is already behind, and the ping loop collects a peer that has
+			// stopped reading altogether.
+			slog.Warn("terminal: dropping the pane message, the browser is not reading", "pane", pane)
 		}
 	default:
 		slog.Warn("terminal: ignoring unknown control message", "type", m.Type)
@@ -469,11 +532,21 @@ func (h *TerminalHandler) copyMode(ctx context.Context, sess *ptybridge.Session,
 // peer that is not draining, and the ping loop is what notices that -- its own
 // control frame queues behind this one and times out. Two overlapping timeouts
 // would only make it harder to say which one collected a connection.
-func wsWriteLoop(ctx context.Context, conn *websocket.Conn, out <-chan []byte) wsExit {
+//
+// ctrl carries control messages for the browser -- today only the answer to a
+// "where". They go out through this loop rather than from the read goroutine
+// that produced them because coder/websocket supports one writer at a time, and
+// two goroutines writing frames onto the same socket is a corrupted stream
+// rather than a race that shows up as a test failure.
+func wsWriteLoop(ctx context.Context, conn *websocket.Conn, out <-chan []byte, ctrl <-chan []byte) wsExit {
 	for {
 		select {
 		case <-ctx.Done():
 			return wsExit{}
+		case m := <-ctrl:
+			if err := conn.Write(ctx, websocket.MessageBinary, ptybridge.EncodeControl(m)); err != nil {
+				return wsExit{}
+			}
 		case b, ok := <-out:
 			if !ok {
 				// The session ended: the user typed exit, the base session was

@@ -1,6 +1,8 @@
 import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { PANE_MESSAGE, parsePaneMessage } from '@/components/Terminal'
+
 import { FRAME_CONTROL, FRAME_DATA, MAX_DATA_PAYLOAD, Transport } from './transport'
 import type { ControlMessage, TransportClose, TransportOptions } from './transport'
 
@@ -161,6 +163,7 @@ describe('wire contract with the Go implementation', () => {
     transport.select('%3')
     transport.copyMode('%7')
     transport.copyMode()
+    transport.where()
     for (const sentFrame of ws.sent) {
       for (const key of Object.keys(JSON.parse(text(sentFrame.subarray(1))))) {
         expect(fields).toContain(key)
@@ -168,16 +171,36 @@ describe('wire contract with the Go implementation', () => {
     }
   })
 
+  // The one message that travels the other way. Both halves are pinned: the
+  // literal the daemon marshals, and the literal the browser matches on. A
+  // rename on one side only leaves a tab that never learns which pane it is
+  // showing -- silently, because an unrecognised control message is dropped.
+  it('reads the daemon pane message by the type wsPaneType declares', () => {
+    const src = goSource('internal/front/ws.go')
+    const m = src.match(/const wsPaneType = "([^"]+)"/)
+    if (!m) throw new Error('wsPaneType not found in internal/front/ws.go')
+    expect(PANE_MESSAGE).toBe(m[1])
+    expect(PANE_MESSAGE).toBe('pane')
+
+    // And the field it carries is one the browser reads off the same struct.
+    const struct = src.match(/type wsPaneMessage struct \{([\s\S]*?)\n\}/)
+    if (!struct) throw new Error('wsPaneMessage not found in internal/front/ws.go')
+    const fields = new Set([...struct[1].matchAll(/`json:"([^"]+)"`/g)].map((m) => m[1]))
+    expect(fields).toEqual(new Set(['type', 'pane']))
+    expect(parsePaneMessage({ type: PANE_MESSAGE, pane: '%3' })).toBe('%3')
+  })
+
   it('emits only message types the Go control switch handles', () => {
     const src = goSource('internal/front/ws.go')
     const handled = new Set([...src.matchAll(/\n\tcase "([^"]+)":/g)].map((m) => m[1]))
-    expect(handled).toEqual(new Set(['resize', 'select', 'copy-mode']))
+    expect(handled).toEqual(new Set(['resize', 'select', 'copy-mode', 'where']))
 
     const { transport, ws } = makeTransport()
     ws.open()
     transport.resize(80, 24)
     transport.select('%3')
     transport.copyMode()
+    transport.where()
     for (const sentFrame of ws.sent) {
       expect(handled).toContain(JSON.parse(text(sentFrame.subarray(1))).type)
     }
@@ -460,6 +483,7 @@ describe('control message types', () => {
       { type: 'select', pane: '%3' },
       { type: 'copy-mode', pane: '%3' },
       { type: 'copy-mode' },
+      { type: 'where' },
     ]
     const { transport, ws } = makeTransport()
     ws.open()

@@ -273,6 +273,66 @@ func (c *Client) SelectPane(ctx context.Context, session, paneID string) error {
 	return err
 }
 
+// CurrentPane answers "which pane is this session looking at": the active pane
+// of the session's own current window.
+//
+// It is the read half of SelectPane and exists because a browser tab cannot
+// work this out for itself. The current window belongs to the *session*, which
+// is the whole reason each tab gets a throwaway session grouped onto the user's
+// real one -- so `#{window_active}` in a snapshot row answers for whichever
+// session that row was listed under, and the snapshot the browser gets is
+// deduplicated to one row per pane with the user's own session preferred. Read
+// from there, "the active pane of the active window" is the pane the *local
+// terminal* is sitting on, which is exactly the pane the browser tab is not.
+// Measured on 3.7b: with the base session on window 0 and its grouped member on
+// window 2, `list-panes -a` reports window_active=1 on window 0 for the base and
+// on window 2 for the member, for the same shared windows.
+//
+// list-panes rather than display-message, for the reason SelectPane gives at
+// length and re-measured here: `display-message -p -t '=nosuch:' '#{pane_id}'`
+// prints an empty line and exits 0, while list-panes exits 1 with "can't find
+// session". This runs against a session that may not have been created yet --
+// see ptybridge.Session.CurrentPane -- so an error is the answer that has to be
+// distinguishable from a pane id, not one that has to be guessed at from an
+// empty string.
+//
+// The "-f" filter keeps the active pane. Without it this returns whichever pane
+// tmux lists first, which is the same answer for an unsplit window and a
+// different one the moment the user splits -- a bug that would look like it
+// works. The result is validated for the same reason every id here is: a
+// format that stopped expanding would otherwise hand "" to the browser as a
+// pane it is looking at.
+func (c *Client) CurrentPane(ctx context.Context, session string) (string, error) {
+	if session == "" {
+		// tmux resolves an empty target to "whatever is current" and exits 0,
+		// so an unset session would answer about an arbitrary one.
+		return "", fmt.Errorf("current pane: no session given")
+	}
+	out, err := c.Run(ctx, "list-panes", "-t", "="+session+":", "-F", "#{pane_id}", "-f", "#{pane_active}")
+	if err != nil {
+		return "", err
+	}
+	// One line per active pane, and a window has exactly one. Cut rather than
+	// trust: a window that somehow reported two would otherwise return both
+	// joined by a newline, which no validator would accept and no caller wants.
+	pane, _, _ := strings.Cut(out, "\n")
+	if err := ValidatePaneID(pane); err != nil {
+		return "", fmt.Errorf("current pane of %s: %w", session, err)
+	}
+	return pane, nil
+}
+
+// IsMissingSession reports whether err is tmux saying the session does not
+// exist, as opposed to any other failure.
+//
+// Matched on message text for the same reason as noServer: tmux exits 1 for
+// every failure alike, so the text is the only discriminator there is. It is
+// exported because ptybridge waits out exactly this error while a freshly
+// spawned attach creates its session, and must not wait out any other.
+func IsMissingSession(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "can't find session")
+}
+
 // KillSession removes a throwaway session explicitly. destroy-unattached is the
 // crash net; this is the normal teardown path.
 //

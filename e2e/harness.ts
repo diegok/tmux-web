@@ -386,6 +386,29 @@ export function sessionLabel(page: Page, name: string): Locator {
 }
 
 /**
+ * Every row the sidebar is marking as the selected one.
+ *
+ * Both kinds of row can carry it: a pane row under a split window, and the
+ * window row itself when the window has only one pane -- `WindowItem` marks one
+ * or the other, never both, because two highlights would read as two
+ * selections. Counting them together is what makes "exactly one thing is
+ * selected" expressible.
+ *
+ * `data-sidebar` and not the `data-slot` that names the same rows: a pane row
+ * is wrapped in a `ContextMenuTrigger` with `asChild`, whose own `data-slot`
+ * lands on the button and overwrites shadcn's. `sessionLabel` above carries the
+ * same note for the same reason.
+ */
+export function selectedRow(page: Page): Locator {
+  return page
+    .locator('[data-sidebar="content"]')
+    .locator(
+      '[data-sidebar="menu-button"][data-active="true"], ' +
+        '[data-sidebar="menu-sub-button"][data-active="true"]',
+    )
+}
+
+/**
  * The agent state dot on a row, if it has one.
  *
  * `data-agent-state` is the only thing about the dot that is not a colour, and

@@ -105,6 +105,43 @@ export const BACKOFF_MAX_MS = 15_000
 export const BACKOFF_JITTER = 0.25
 
 /**
+ * How long a socket may have been silent before a wake will probe it.
+ *
+ * A GUESS -- nobody has measured this, and design open question 2 is still
+ * open. Anchored at one end only: it must sit below what a person would call
+ * frozen. It cannot be anchored at the other end, because the traffic that
+ * would anchor it -- the server's 20s ping -- is answered below the JavaScript
+ * API and never touches `lastRecvAt`.
+ *
+ * Wrong high costs a zombie socket that survives one wake and waits for the
+ * next. Wrong low costs two tmux forks per glance at a phone -- three when the
+ * window-id hint is stale or absent. Measurable by backgrounding a real phone
+ * for an hour and recording how long a wake takes to produce a frame.
+ */
+export const LIVENESS_SLACK_MS = 45_000
+
+/**
+ * How long the wake probe waits for an answer before deciding the socket is
+ * dead and reconnecting.
+ *
+ * A GUESS -- nobody has measured this either; same open question. Wrong low
+ * costs one unnecessary reconnect: a fork, a PTY, a redraw, and the remembered
+ * pane re-selected. Annoying, not destructive.
+ */
+export const PROBE_TIMEOUT_MS = 5_000
+
+/**
+ * How long a socket may sit in CONNECTING before a wake gives up on it.
+ *
+ * A GUESS, like the two above. This case is not established to be permanent: a
+ * stalled handshake eventually fails at the TCP or proxy layer and fires
+ * onclose, which puts it back on the backoff ladder. What is established is the
+ * timescale -- that failure is minutes of somebody else's timeout, and a wake
+ * is about the seconds a person will look at a frozen terminal.
+ */
+export const CONNECT_STALL_MS = 10_000
+
+/**
  * Reconnect delay for the nth consecutive failure (n counted from zero).
  *
  * Exponential from BACKOFF_BASE_MS, capped at BACKOFF_MAX_MS, then jittered.
@@ -348,6 +385,12 @@ export interface TerminalSessionOptions {
   /** Injectable for tests. */
   random?: () => number
   /**
+   * Injectable clock. Defaults to Date.now, and is handed to every Transport
+   * this session builds so that one clock answers for the whole session's
+   * `lastRecvAt` and `connectStartedAt`.
+   */
+  now?: () => number
+  /**
    * Answers whether the base session still exists, after a socket dropped.
    * Defaults to a `/api/snapshot` probe; injectable for tests.
    */
@@ -375,6 +418,7 @@ export class TerminalSession {
   readonly #opts: TerminalSessionOptions
   readonly #storage: PaneStorage | null
   readonly #random: () => number
+  readonly #now: () => number
 
   /**
    * The one live socket, or null between attempts. Every callback checks its
@@ -429,6 +473,7 @@ export class TerminalSession {
     this.#opts = opts
     this.#storage = opts.storage === undefined ? defaultStorage() : opts.storage
     this.#random = opts.random ?? Math.random
+    this.#now = opts.now ?? Date.now
     this.#probe = opts.probe ?? (() => probeSession(opts.session))
     this.#pane = this.#readPane()
   }
@@ -547,6 +592,7 @@ export class TerminalSession {
     this.#phase = this.#attempt === 0 ? 'connecting' : 'reconnecting'
     const transport = new Transport({
       url: this.#opts.url,
+      now: this.#now,
       onData: (bytes) => {
         if (transport === this.#transport) this.#opts.onData(bytes)
       },

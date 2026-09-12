@@ -359,6 +359,112 @@ describe('incoming frames', () => {
   })
 })
 
+// --- liveness, which the wake handler reads ---------------------------------
+//
+// Two timestamps. Nothing in this class reads either of them; they exist for
+// `TerminalSession`'s wake handler to tell a socket that is merely quiet from
+// one that is dead, so they are tested from the outside the way it sees them.
+
+describe('lastRecvAt', () => {
+  it('is stamped at construction, so a socket that has said nothing is not instantly stale', () => {
+    let now = 1_000
+    const { transport } = makeTransport({ now: () => now })
+    expect(transport.lastRecvAt).toBe(1_000)
+
+    // A fixture true by accident is the trap here: assert the clock has moved
+    // and the field has not, so a `now()` getter would be caught.
+    now = 9_000
+    expect(transport.lastRecvAt).toBe(1_000)
+  })
+
+  it('is re-stamped when the socket opens', () => {
+    let now = 1_000
+    const { transport, ws } = makeTransport({ now: () => now })
+    now = 6_000
+    ws.open()
+    expect(transport.lastRecvAt).toBe(6_000)
+  })
+
+  it('counts a control frame, not only data', () => {
+    let now = 1_000
+    const { transport, ws } = makeTransport({ now: () => now })
+    ws.open()
+    now = 2_000
+    // A `pane` answer is the only inbound control frame the daemon sends, and
+    // it is the whole point: a probe's answer is what proves the socket alive.
+    ws.receive(frame(FRAME_CONTROL, '{"type":"pane","pane":"%3"}'))
+    expect(transport.lastRecvAt).toBe(2_000)
+  })
+
+  it('counts a data frame', () => {
+    let now = 1_000
+    const { transport, ws } = makeTransport({ now: () => now })
+    ws.open()
+    now = 3_000
+    ws.receive(frame(FRAME_DATA, 'output'))
+    expect(transport.lastRecvAt).toBe(3_000)
+  })
+
+  it('counts a frame the transport goes on to reject as unusable', () => {
+    // An empty frame, a non-binary message, an unknown kind: still a peer that
+    // is talking. Liveness is about the socket, not about the payload being
+    // useful, so the stamp sits in front of every validity check.
+    let now = 1_000
+    const { transport, ws } = makeTransport({ now: () => now })
+    ws.open()
+
+    now = 4_000
+    ws.receiveRaw('0x00 as text')
+    expect(transport.lastRecvAt).toBe(4_000)
+
+    now = 5_000
+    ws.receive(new Uint8Array([]))
+    expect(transport.lastRecvAt).toBe(5_000)
+
+    now = 6_000
+    ws.receive(frame(0x02, 'a kind neither end knows'))
+    expect(transport.lastRecvAt).toBe(6_000)
+  })
+
+  it('does not count a frame that arrives after close(), which suppresses everything', () => {
+    let now = 1_000
+    const { transport, ws } = makeTransport({ now: () => now })
+    ws.open()
+
+    // Stamped once while the socket is live, so that the assertion after the
+    // close is a field that stopped moving rather than one that never moved.
+    now = 2_000
+    ws.receive(frame(FRAME_DATA, 'output'))
+    expect(transport.lastRecvAt).toBe(2_000)
+
+    transport.close()
+    now = 5_000
+    ws.receive(frame(FRAME_DATA, 'late output'))
+    expect(transport.lastRecvAt).toBe(2_000)
+  })
+})
+
+describe('connectStartedAt', () => {
+  it('is the construction time and does not move when the socket opens', () => {
+    let now = 1_000
+    const { transport, ws } = makeTransport({ now: () => now })
+    expect(transport.connectStartedAt).toBe(1_000)
+
+    // The open is the point. The mutant this test exists for is "re-stamp
+    // connectStartedAt in ws.onopen", beside the `lastRecvAt` stamp that
+    // legitimately goes there -- and the wake handler's CONNECTING case cannot
+    // kill it, because that fixture's socket never opens and nothing that
+    // never opens can catch a re-stamp on open. So the kill is here: advance
+    // the clock, open, and assert the field did not follow.
+    now = 7_000
+    ws.open()
+    expect(transport.connectStartedAt).toBe(1_000)
+
+    now = 9_000
+    expect(transport.connectStartedAt).toBe(1_000)
+  })
+})
+
 // --- the reason this class exists -------------------------------------------
 
 describe('nothing is buffered across a close', () => {

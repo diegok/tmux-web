@@ -114,6 +114,9 @@ export interface TransportOptions {
   onClose?: (event: TransportClose) => void
 
   onError?: (event: Event) => void
+
+  /** Injectable clock, for `lastRecvAt` and `connectStartedAt`. Defaults to Date.now. */
+  now?: () => number
 }
 
 /** Where a Transport is in its one and only life. */
@@ -134,8 +137,21 @@ const decoder = new TextDecoder()
 export class Transport {
   readonly url: string
 
+  /**
+   * When this Transport was constructed, by the injected clock.
+   *
+   * The wake handler's third case needs it: a socket left in CONNECTING by a
+   * suspend has no open event, no close event and a transport object that
+   * exists, so the only thing that distinguishes "give it another moment" from
+   * "this handshake is never completing" is how long it has been trying.
+   */
+  readonly connectStartedAt: number
+
   readonly #ws: WebSocket
   readonly #opts: TransportOptions
+  readonly #now: () => number
+
+  #lastRecvAt: number
 
   /**
    * Set by `close()`. Suppresses every callback from that point on, so a
@@ -147,6 +163,9 @@ export class Transport {
   constructor(opts: TransportOptions) {
     this.#opts = opts
     this.url = opts.url
+    this.#now = opts.now ?? Date.now
+    this.connectStartedAt = this.#now()
+    this.#lastRecvAt = this.connectStartedAt
 
     const ws = new WebSocket(opts.url)
 
@@ -159,7 +178,9 @@ export class Transport {
     ws.binaryType = 'arraybuffer'
 
     ws.onopen = () => {
-      if (!this.#closedByCaller) this.#opts.onOpen?.()
+      if (this.#closedByCaller) return
+      this.#lastRecvAt = this.#now()
+      this.#opts.onOpen?.()
     }
     ws.onmessage = (event: MessageEvent) => this.#receive(event)
     ws.onclose = (event: CloseEvent) => {
@@ -192,6 +213,24 @@ export class Transport {
 
   get connected(): boolean {
     return this.state === 'open'
+  }
+
+  /**
+   * When a frame last arrived from the server.
+   *
+   * Every inbound frame counts, not only data -- but pongs do not, because they
+   * are answered below the JavaScript API and are invisible here. That cuts
+   * both ways: the server's 20s ping never refreshes this field, so it anchors
+   * no threshold, and nothing on a healthy but idle socket refreshes it at all.
+   * An idle pane can be silent for an hour and be perfectly alive. This is
+   * evidence of life, never proof of death.
+   *
+   * Stamped at construction so that a socket which has not spoken yet is not
+   * instantly stale: a probe two seconds after a connect is two forks spent on
+   * a pane that has simply printed nothing.
+   */
+  get lastRecvAt(): number {
+    return this.#lastRecvAt
   }
 
   /**
@@ -280,6 +319,12 @@ export class Transport {
 
   #receive(event: MessageEvent): void {
     if (this.#closedByCaller) return
+
+    // Before the validity checks, deliberately. A frame we cannot parse is
+    // still a peer that is talking, and this field is about the socket rather
+    // than the payload. Behind the guard above, though: a caller that closed
+    // this Transport is told nothing more by it, liveness included.
+    this.#lastRecvAt = this.#now()
 
     // The server sends binary only, and `binaryType` above asks for buffers.
     // Anything else means the two ends disagree about the protocol; it is

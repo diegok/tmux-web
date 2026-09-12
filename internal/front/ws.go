@@ -36,10 +36,11 @@ const (
 const wsReadLimit = 1 << 20
 
 // wsControlBuffer bounds the queue of control messages waiting to go out to the
-// browser. A tab sends one "where" per socket and the answer is one small
-// frame, so this is slack rather than capacity; the send is non-blocking so
-// that a browser which has stopped reading cannot park the read goroutine, and
-// the ping loop is what eventually collects such a peer.
+// browser. A tab asks "where" once on open and again on any wake that finds
+// this socket claiming OPEN while quiet, and each answer is one small frame, so
+// this is slack rather than capacity; the send is non-blocking so that a
+// browser which has stopped reading cannot park the read goroutine, and the
+// ping loop is what eventually collects such a peer.
 const wsControlBuffer = 4
 
 // The size the attach starts at. A browser terminal has no dimensions until it
@@ -474,11 +475,14 @@ func (h *TerminalHandler) control(ctx context.Context, sess *ptybridge.Session, 
 			slog.Warn("terminal: copy-mode failed", "pane", m.Pane, "err", err)
 		}
 	case "where":
-		// "Which pane did I land on?", asked once per socket, immediately
-		// after the tab has replayed the pane it remembered. Answering *after*
-		// that select is what makes one answer cover both cases: the remembered
-		// pane when it is still alive, and the pane tmux actually left the tab
-		// on when the select failed because that pane had died.
+		// "Which pane did I land on?", asked once per outstanding question
+		// rather than once per socket: on open, immediately after the tab has
+		// replayed the pane it remembered, and again on a wake that found this
+		// socket claiming OPEN while quiet. Both ask it the same way -- select
+		// first, then where -- which is what makes one answer cover both cases:
+		// the remembered pane when it is still alive, and the pane tmux
+		// actually left the tab on when the select failed because that pane had
+		// died. The browser drops an answer to a question it did not ask.
 		//
 		// A failure is logged and dropped, like every other message this daemon
 		// cannot carry out. The tab is then no worse off than it was before

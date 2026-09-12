@@ -789,14 +789,23 @@ describe('where am I', () => {
     ])
   })
 
-  it('accepts one answer per socket and no more', () => {
+  it('accepts one answer per outstanding question and drops every unasked-for one', () => {
     const { term } = makeSession({ storage: memoryStorage() })
     term.start()
     const ws = MockWebSocket.last
     ws.open()
+
+    // One question was asked on open (`#opened` selects nothing here, having
+    // nothing remembered, and then asks `where`), so the first answer is
+    // adopted.
     serverControl(ws, { type: 'pane', pane: '%5' })
+    expect(term.status.pane).toBe('%5')
+
     // A second, unasked-for answer -- a daemon that decided to announce every
     // move it saw -- must not be able to move the tab behind the user's back.
+    // This is what `#awaitingWhere` is for, and it is not a count of sockets:
+    // a socket may ask `where` more than once (the wake probe does), and each
+    // question gets exactly one answer.
     serverControl(ws, { type: 'pane', pane: '%6' })
     expect(term.status.pane).toBe('%5')
   })

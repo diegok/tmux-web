@@ -39,7 +39,10 @@ import (
 //	and the event that produces it can fire more than once within one resting
 //	period. Everything else is an EDGE. An edge writes unconditionally; a
 //	re-assertion reads the standing option first and writes only if the
-//	standing report's state differs from the one it would write.
+//	standing report both differs in state from the one it would write AND is
+//	older than it. See reportSupersedes: the second half is what keeps a
+//	re-assertion that was descheduled past a later edge from overwriting fresh
+//	news with stale news.
 //
 // It is per (event, state) pair and not per event: an event that writes working
 // on one branch and a resting state on another is an edge on the first and a

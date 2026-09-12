@@ -212,7 +212,7 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 	// opencode pays it once per turn, on session.idle, and on nothing else:
 	// its two hot events (session.status busy, 17 times in one three-tool
 	// turn, and tool.execute.before) are working edges and read nothing.
-	if reassert && standingState(ctx, tm, pane) == *state {
+	if reassert && standingSupersedes(ctx, tm, pane, *state, ms) {
 		return 0
 	}
 
@@ -225,12 +225,12 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 	return 0
 }
 
-// standingState is the state of the report already on this pane, or "" if there
-// is not one this daemon can read.
+// standingSupersedes reports whether the report already on this pane makes a
+// re-assertion's write unnecessary or wrong. It is the one read a re-assertion
+// pays for, and the whole decision comes out of it.
 //
-// Everything unreadable answers "", which equals no state and therefore
-// disagrees with anything a caller might write, so the repair still happens.
-// That covers more cases than it looks:
+// Everything unreadable answers false -- no standing report, so nothing to
+// defer to, so the repair happens. That covers more cases than it looks:
 //
 //   - The option is unset, which is the ordinary case for the first report a
 //     pane ever gets. tmux does not answer that with an empty string: `show
@@ -238,26 +238,77 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 //     option" (measured on 3.7b), and Client.Run returns "" on error.
 //   - The value is from another schema version, or truncated, or something
 //     else entirely put there by hand. ParseReport refuses it whole.
+//   - The value is dated more than reportFutureSkew ahead. ParseReport refuses
+//     that too, and the writer asks THE SAME FUNCTION rather than holding a
+//     second opinion about which clocks are believable: a report the daemon
+//     cannot read is a pane the daemon has no report for, and the write is what
+//     repairs an option some other clock poisoned.
 //
 // -p is pane-scoped and, unlike the daemon's #{@tmux_web_agent} format read, does
 // NOT walk up to the window, session and global options (measured: with only a
 // session-level value set, this read still says "invalid option"). Nothing this
 // project installs writes at those scopes, and the direction of the difference
-// is safe -- a value the writer cannot see reads as a disagreement, so it writes
-// a pane-level report, which is what the daemon's own lookup then finds first.
-func standingState(ctx context.Context, tm tmuxRunner, pane string) string {
+// is safe -- a value the writer cannot see reads as no report, so it writes a
+// pane-level report, which is what the daemon's own lookup then finds first.
+//
+// `now` for the parse is the report's OWN stamp rather than a second clock
+// read. The two are microseconds apart and nothing observable turns on the
+// difference; what it buys is that the skew window and the comparison below are
+// measured from one instant, so the function cannot decide that a value is both
+// believable and from the future.
+func standingSupersedes(ctx context.Context, tm tmuxRunner, pane, state string, ms int64) bool {
 	out, err := tm.Run(ctx, "show-options", "-p", "-t", pane, "-v", tmux.AgentOption)
 	if err != nil {
-		return ""
+		return false
 	}
-	rep, ok := tmux.ParseReport(out, time.Now())
+	rep, ok := tmux.ParseReport(out, time.UnixMilli(ms))
 	if !ok {
-		return ""
+		return false
 	}
-	// The STATE, not the value: the timestamp is what a re-assertion would
-	// change and the whole point is not to change it, and a resting report's
-	// activity text is not what badges a device.
-	return rep.State
+	return reportSupersedes(rep, state, ms)
+}
+
+// reportSupersedes is the comparison itself: does this standing report leave a
+// re-assertion of `state`, stamped at `ms`, with nothing to say?
+//
+// TWO CLAUSES, AND THE SECOND ONE IS THE REPAIR THIS FUNCTION EXISTS FOR.
+//
+//   - The STATE already matches. The original rule, and unchanged: a
+//     re-assertion that agrees writes nothing, because a resting report's own
+//     timestamp is what finishedAt is derived from, so writing the same state
+//     under a newer timestamp is a second finish on every device that had
+//     already seen the first.
+//
+//   - The standing report is NOT OLDER THAN THIS EVENT. That is the half the
+//     writer used to get wrong, and it is a disagreement with the daemon rather
+//     than with the option: the daemon's "standing" is the last report it
+//     ACCEPTED and it refuses anything not strictly newer, while the writer's
+//     was whatever byte string the option happened to hold. They diverge on
+//     exactly the interleaving the ordering filter exists to absorb. A
+//     re-assertion stamps when its process starts and can be descheduled for
+//     any length of time before it reaches tmux, so an edge from a LATER event
+//     -- a turn start, the user typing -- can land in between and be sitting
+//     there when the read finally happens. The old rule saw a state it
+//     disagreed with and overwrote fresh news with stale news. Nothing moves
+//     that day: the daemon refuses the older value. What it leaves behind is a
+//     resting report standing on a working pane, and the next FIRST SIGHT --
+//     a restart, a tmux-server generation change, a pane that left `keep` and
+//     came back -- has no filter to protect it, accepts what the option holds,
+//     and with no client connected derives finishedAt from it immediately. See
+//     TestALateReassertionLeavesNoStaleFinishOnAWorkingPane.
+//
+// NOT-OLDER rather than strictly-newer, and the equal case is not a rounding
+// detail: a report stamped in the same millisecond is one the daemon has
+// already accepted and would refuse this write against, so writing can only
+// swap the option's contents for a value no reader will take. There is nothing
+// to win at equality and a stale first sight to lose.
+//
+// What it deliberately does NOT do is compare timestamps for an EDGE. An edge
+// reads nothing at all, so no standing report of any date can suppress a turn
+// end: a second turn's Stop still writes over the previous turn's idle, which
+// is the case the edge/re-assertion split was scoped around.
+func reportSupersedes(rep tmux.Report, state string, ms int64) bool {
+	return rep.State == state || rep.Timestamp >= ms
 }
 
 // tmuxTarget resolves the server and the pane from the environment the agent

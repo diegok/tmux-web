@@ -24,10 +24,24 @@
  * opencode collapses them into its own `[Pasted ~3 lines]` chip, which is a
  * thing it can only do because the wrappers told it a paste had happened.
  *
- * ## Why the box is always here
+ * ## Why the box is off until you ask for it
  *
- * It does not appear on `blocked` and it does not take focus on mount. Three
- * reasons, in the order they matter:
+ * Because on a desktop the pane *is* the text box: you type into it. A second
+ * input duplicates the terminal, and it is not free -- it costs rows of a
+ * window whose size tmux shares with the owner's own local client, so a box
+ * nobody asked for makes his terminal shorter. It exists for a phone, where
+ * typing into a terminal is uncomfortable, and even there the owner wants it
+ * optional. So: hidden by default on every device, one rule, no `pointer:
+ * coarse` branch and no viewport-width branch -- a device test would be this
+ * app guessing at an answer the person in front of it can simply give.
+ *
+ * `showReplyBox` is therefore a function of `open`, which comes from the
+ * toggle, and the memory of it lives in `localStorage` (`readReplyOpen`) so a
+ * phone can keep it open while a laptop keeps it shut.
+ *
+ * ## Why it still does not move on agent state
+ *
+ * It does not appear on `blocked`. Three reasons, in the order they matter:
  *
  * 1. A control that vanishes under you while you are typing into it teaches you
  *    not to trust it. The sidebar already has a rule against row elements that
@@ -40,6 +54,11 @@
  *    the moments you are looking at the pane, understand what it wants, and
  *    need to type.
  *
+ * A user-driven toggle is not an exception to that rule and the next reader
+ * will think it is. The rule is about the box moving on its own, under a hand
+ * that is already typing; a toggle moves it because a person pressed something,
+ * which is the one input a control is allowed to move on.
+ *
  * ## Why everything here is a pure function
  *
  * This project's frontend tests render with `react-dom/server` in vitest's node
@@ -50,7 +69,7 @@
  */
 
 import { useRef, useState } from 'react'
-import type { KeyboardEvent } from 'react'
+import type { KeyboardEvent, Ref } from 'react'
 
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -169,7 +188,7 @@ export function dispatchReply(frames: ReplyFrame[], sink: ReplySink | null): voi
 }
 
 /** What a keystroke in the box means. */
-export type ReplyIntent = 'send' | 'newline' | 'blur' | 'pass'
+export type ReplyIntent = 'send' | 'newline' | 'close' | 'pass'
 
 /**
  * Read a keydown.
@@ -188,7 +207,7 @@ export function replyKey(event: {
   metaKey: boolean
 }): ReplyIntent {
   if (event.ctrlKey || event.altKey || event.metaKey) return 'pass'
-  if (event.key === 'Escape') return 'blur'
+  if (event.key === 'Escape') return 'close'
   if (event.key !== 'Enter') return 'pass'
   return event.shiftKey ? 'newline' : 'send'
 }
@@ -234,9 +253,114 @@ export function replyHint(pane: string | null, discarded: boolean, bracketed: bo
  * of the signature: the box moving on agent state is the mistake worth a test,
  * so the argument exists to make that mistake expressible and killable. See the
  * three reasons in this file's header.
+ *
+ * `open` is the user's own answer, remembered per browser. `attached` still
+ * gates it: with no terminal there is no pane for the bytes to reach, and a box
+ * naming nothing would be a box that cannot work.
  */
-export function showReplyBox(view: { attached: boolean; agentState: string }): boolean {
-  return view.attached
+export function showReplyBox(view: {
+  attached: boolean
+  agentState: string
+  open: boolean
+}): boolean {
+  return view.attached && view.open
+}
+
+/** Where this browser remembers whether it wants the box. */
+export const REPLY_OPEN_KEY = 'tmux-web:reply-open'
+
+/**
+ * The little of `localStorage` this file uses.
+ *
+ * Structural so the rules above can be tested under vitest's node environment,
+ * where there is no `localStorage` to seed -- and so a browser that refuses one
+ * is a plain object that throws, rather than something only a real Safari
+ * private window could produce.
+ */
+export interface ReplyOpenStore {
+  getItem(key: string): string | null
+  setItem(key: string, value: string): void
+}
+
+/** What goes in the store. One character, and unambiguous when it comes back. */
+const REPLY_OPEN_VALUE = '1'
+
+/**
+ * What a stored value means.
+ *
+ * Everything that is not exactly the value this module writes is *closed*: a
+ * key from an older build, a half-written value, `"false"`, `""`. The default
+ * has to be the safe half in both directions, and the safe half here is the
+ * box being out of the way -- a user who wanted it can press the toggle, while
+ * a user who did not is looking at a terminal two rows short for a reason
+ * nothing on screen explains.
+ */
+export function replyOpenFromStored(raw: string | null): boolean {
+  return raw === REPLY_OPEN_VALUE
+}
+
+/**
+ * Read the memory. Closed for a browser that has never answered, and closed
+ * for one that refuses to be asked.
+ *
+ * The try/catch is not defensive habit: Safari in a private window throws on
+ * the property access itself, and Firefox with site data blocked throws on
+ * `getItem`. Both are supported ways to use this app, and the cost of either is
+ * a toggle that does not stick -- never a page that fails to render.
+ */
+export function readReplyOpen(store: ReplyOpenStore | null): boolean {
+  try {
+    return replyOpenFromStored(store?.getItem(REPLY_OPEN_KEY) ?? null)
+  } catch {
+    return false
+  }
+}
+
+/** Remember it, or fail to and carry on. See `readReplyOpen` for who throws. */
+export function writeReplyOpen(store: ReplyOpenStore | null, open: boolean): void {
+  try {
+    store?.setItem(REPLY_OPEN_KEY, open ? REPLY_OPEN_VALUE : '0')
+  } catch {
+    /* see above */
+  }
+}
+
+/**
+ * This browser's store, or null where there is none to have.
+ *
+ * `localStorage` and not the `sessionStorage` the pane and the session are
+ * filed under: those describe where a *tab* is pointing and are meant to be
+ * forgotten when it closes. This describes the device -- a phone that wants the
+ * box and a laptop that does not -- so it outlives the tab.
+ */
+export function replyOpenStorage(): ReplyOpenStore | null {
+  try {
+    return globalThis.localStorage ?? null
+  } catch {
+    return null
+  }
+}
+
+/** Why the box is open, which is the whole of what decides the keyboard. */
+export type ReplyOpenCause = 'toggle' | 'restore'
+
+/**
+ * Whether opening the box should take focus.
+ *
+ * Pressing the toggle is a person saying "I want to type now", so the box takes
+ * the keyboard: making them then click it would be the toggle doing half its
+ * job. A box that is open on page load because this browser last left it open
+ * is a different sentence -- nobody has asked for anything yet, the caret
+ * belongs to the terminal as it always has, and on a phone stealing it would
+ * raise the soft keyboard on every single visit.
+ */
+export function focusesOnOpen(cause: ReplyOpenCause): boolean {
+  return cause === 'toggle'
+}
+
+/** What the toggle offers to do next, for the palette row and the button title. */
+export function replyToggleLabel(open: boolean): string {
+  return open ? 'Hide the reply box' : 'Show the reply box'
 }
 
 export interface ReplyBoxProps {
@@ -247,6 +371,23 @@ export interface ReplyBoxProps {
   pane: string | null
   /** Where the frames go. App walks them onto the terminal handle. */
   onSend: (frames: ReplyFrame[]) => void
+  /**
+   * Put the box away again. Escape is the keyboard route to it, and it is the
+   * same call the header toggle makes, so the box closing always also gives the
+   * terminal its rows and its keyboard back -- App owns both halves.
+   */
+  onClose: () => void
+  /**
+   * Take the keyboard on mount. True only when the toggle is what opened the
+   * box; see `focusesOnOpen` for the other case and why it must not.
+   */
+  autoFocus?: boolean
+  /**
+   * The textarea itself, for the one caller that has to hand it the keyboard
+   * later than mount: see `focusReply` in App, and `keepFocus` in Palette for
+   * the modal whose closing is what makes "later" necessary.
+   */
+  inputRef?: Ref<HTMLTextAreaElement>
   className?: string
 }
 
@@ -258,11 +399,17 @@ export interface ReplyBoxProps {
  * typing is not being sent, which is the same bargain the terminal itself
  * makes: a control that goes dead is indistinguishable from an agent that hung.
  */
-export function ReplyBox({ pane, onSend, className }: ReplyBoxProps) {
+export function ReplyBox({
+  pane,
+  onSend,
+  onClose,
+  autoFocus,
+  inputRef,
+  className,
+}: ReplyBoxProps) {
   const [text, setText] = useState('')
   const [origin, setOrigin] = useState<ReplyOrigin>('type')
   const [discarded, setDiscarded] = useState(false)
-  const box = useRef<HTMLTextAreaElement | null>(null)
   // Set by `onPaste`, read by the `onChange` that same event causes, cleared
   // there. A ref and not state because it must be readable inside the very next
   // render's handler rather than after a re-render.
@@ -297,9 +444,12 @@ export function ReplyBox({ pane, onSend, className }: ReplyBoxProps) {
         event.preventDefault()
         fire(true)
         break
-      case 'blur':
+      case 'close':
         event.preventDefault()
-        box.current?.blur()
+        // Not a blur. The box owns rows of a window the owner's own client
+        // shares, so leaving it on screen with the caret elsewhere leaves his
+        // terminal short; App puts the keyboard back in the pane.
+        onClose()
         break
       // `newline` and `pass` are both "let the textarea have it". They are
       // separate cases so that Shift+Enter is a decision this file made rather
@@ -310,10 +460,19 @@ export function ReplyBox({ pane, onSend, className }: ReplyBoxProps) {
   }
 
   return (
+    // `shrink-0` and no positioning at all: this is a flex sibling of the
+    // terminal, so opening it makes the terminal shorter instead of covering
+    // its last two rows -- which on a settled pane are the prompt and the
+    // agent's question, the very lines you are reading while you answer. Task
+    // 21 made it an overlay to keep the terminal's height off the box's; what
+    // protects the owner's size instead is `suppressesResize` in Terminal.tsx,
+    // plus the toggle telling the session that *this* resize is one a person
+    // asked for. See `TerminalSession.noteLayoutChange`.
     <div className={`flex shrink-0 items-start gap-2 border-t px-2 py-1.5 ${className ?? ''}`}>
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <Textarea
-          ref={box}
+          ref={inputRef}
+          autoFocus={autoFocus}
           rows={1}
           value={text}
           onChange={(e) => {

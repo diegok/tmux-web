@@ -10,7 +10,7 @@
  * unit-tested in `web/src/components/__tests__`; the seam above it is only
  * observable in a real browser, which is this file.
  */
-import { test, expect, enroll } from './harness'
+import { test, expect, enroll, openReplyBox, replyBox } from './harness'
 import type { Page } from '@playwright/test'
 import type { TmuxWeb } from './harness'
 
@@ -118,28 +118,53 @@ test('the shell is never taller than the viewport', async ({ page, tmuxWeb }) =>
 })
 
 /**
- * Task 21, end to end: the resize path is suppressed while an app-owned text
- * control has focus.
+ * Task 21 and Task 23, end to end and in one test, because they are one
+ * mechanism: which resizes this tab is allowed to share, and which it must
+ * swallow.
  *
- * This is the half of the feature no vitest test can reach. The unit suite
- * calls `noteResize` by hand; here the shrink arrives the way it does on a
- * phone -- the layout viewport gets smaller, `@wterm/react`'s own
- * `ResizeObserver` fires, and the only thing standing between that and a
- * `resize` frame is the `#suppressed` gate. And the frame matters because the
- * window is *shared*: the owner's local client is attached to it, and tmux
- * hands the window to whichever client resized last. A phone tapping its reply
- * box must not drag his laptop's terminal down to keyboard height.
+ * The window is *shared* -- the owner's local client is attached to it and tmux
+ * hands the window to whichever client resized last -- so a phone tapping its
+ * reply box must not drag his laptop's terminal down to keyboard height. That is
+ * Task 21's `#suppressed` gate, and it is the half no vitest test can reach: the
+ * unit suite calls `noteResize` by hand, while here the shrink arrives the way
+ * it does on a phone, through `@wterm/react`'s own `ResizeObserver`.
+ *
+ * Task 23 then made the box's *own* appearance a resize: it is a flex sibling,
+ * so opening it shortens the terminal on purpose, and the toggle focuses the box
+ * -- arming the very suppression that would swallow it. React focuses an
+ * `autoFocus` element during the commit, before the browser lays out, so the
+ * focus genuinely does arrive first. Both claims are in one test because the
+ * distinction is the feature: the same focused textarea, two resizes, and only
+ * the one the user asked for goes out.
  *
  * The viewport shrink stands in for the keyboard, which Playwright cannot open.
  * That is the same event a keyboard produces under
  * `interactive-widget=resizes-content` (Task 22), and the app cannot tell the
- * two apart.
+ * two apart -- which is exactly why `noteLayoutChange` exists and why it is
+ * armed by the toggle rather than inferred from the focus.
  */
-test('a focused reply box freezes the size this tab is sharing', async ({ page, tmuxWeb }) => {
+test('the toggle s resize goes out and the keyboard s does not', async ({ page, tmuxWeb }) => {
   await enroll(page, tmuxWeb, 'sizing')
   const start = dims(await stable(page, tmuxWeb))
 
-  await page.getByRole('textbox', { name: 'Reply to this pane' }).click()
+  // The box takes its rows from the terminal, and tmux has to be told: a pane
+  // still drawn at rows that are now behind the box is the defect this whole
+  // ordering exists to avoid.
+  await openReplyBox(page)
+  await expect(replyBox(page), 'the toggle did not focus the box, so this test is about nothing')
+    .toBeFocused()
+  const withBox = dims(await settled(page, tmuxWeb, (s) => dims(s).rows < start.rows))
+  expect(
+    withBox.rows,
+    `opening the reply box shortened the terminal and tmux was never told: still ` +
+      `${withBox.rows} rows, was ${start.rows}. The box focused itself in the same commit, ` +
+      'so the resize arrived into a suppressed session and was held -- see ' +
+      'TerminalSession.noteLayoutChange.',
+  ).toBeLessThan(start.rows)
+  expect(withBox.cols, 'the box changed the width, which it has no business doing').toBe(start.cols)
+
+  // And now the keyboard, with focus already in the box and nothing having been
+  // pressed: held, exactly as before.
   await page.setViewportSize({ width: 1280, height: 480 })
 
   // Long enough that a resize would have gone out and come back: the debounce
@@ -149,13 +174,13 @@ test('a focused reply box freezes the size this tab is sharing', async ({ page, 
     windowSize(tmuxWeb),
     'the window followed the shrunk tab while its reply box had focus, which on a ' +
       'phone is the soft keyboard resizing somebody else’s terminal',
-  ).toBe(`${start.cols}x${start.rows}`)
+  ).toBe(`${withBox.cols}x${withBox.rows}`)
 
   // Focus back into the terminal, which is the one focus that never suppresses
   // -- and the size in force by then goes out once.
   await page.getByRole('textbox', { name: 'Terminal' }).click()
-  const after = dims(await settled(page, tmuxWeb, (s) => dims(s).rows < start.rows))
+  const after = dims(await settled(page, tmuxWeb, (s) => dims(s).rows < withBox.rows))
   expect(after.rows, 'the size held back while suppressed was never sent on the lift').toBeLessThan(
-    start.rows,
+    withBox.rows,
   )
 })

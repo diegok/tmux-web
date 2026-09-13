@@ -9,6 +9,7 @@ import {
   BACKOFF_BASE_MS,
   BACKOFF_MAX_MS,
   ConnectionPill,
+  LAYOUT_CHANGE_GRACE_MS,
   RESIZE_DEBOUNCE_MS,
   SESSION_PROBE_TIMEOUT_MS,
   TerminalSession,
@@ -686,6 +687,158 @@ describe('resize suppression', () => {
       { type: 'where' },
       { type: 'resize', cols: 120, rows: 28 },
     ])
+  })
+
+  /**
+   * Task 23's ordering problem, and the only genuinely hard thing in it.
+   *
+   * Suppression exists so a phone's soft keyboard cannot resize a window the
+   * owner's laptop is attached to. But the reply box's toggle *also* changes the
+   * terminal's size -- on purpose, because the box is a flex sibling now and the
+   * terminal gives up the rows -- and the toggle focuses the box, which arms the
+   * very suppression that would swallow that resize. React focuses an
+   * `autoFocus` element during the commit, before the browser lays out and
+   * before `ResizeObserver` fires, so in a real browser the focus arrives
+   * *first* and the honest resize arrives into a suppressed session.
+   *
+   * `noteLayoutChange` is App saying "the next size is one a person asked for".
+   * It is one-shot and it expires, which together are what keep it from becoming
+   * a hole: the keyboard that rises a moment after the toggle is the *second*
+   * resize, and it is held like any other.
+   */
+  describe('a layout change the user asked for', () => {
+    it('sends the toggle s resize even though the box took focus first', () => {
+      const { term } = makeSession()
+      term.start()
+      const ws = MockWebSocket.last
+      ws.open()
+
+      term.noteResize(100, 40)
+      vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+
+      // The order a browser produces: App arms, React's autoFocus fires in the
+      // commit, and wterm's ResizeObserver reports the shorter terminal after.
+      term.noteLayoutChange()
+      term.noteFocus(REPLY_BOX)
+      term.noteResize(100, 38)
+      vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+
+      expect(
+        controls(ws).map((f) => f.json),
+        'the toggle shrank the terminal and tmux was never told, so the pane is drawn ' +
+          'at rows that are no longer there until something else lifts suppression',
+      ).toEqual([
+        { type: 'where' },
+        { type: 'resize', cols: 100, rows: 40 },
+        { type: 'resize', cols: 100, rows: 38 },
+      ])
+    })
+
+    it('holds the keyboard s resize that follows the toggle s', () => {
+      // The distinction, in one test: the same session, the same focused box,
+      // two resizes -- and only the first one is the user's. A phone opens the
+      // box by tapping the toggle and the keyboard rises a moment later; that
+      // second shrink is the one that would drag the owner's terminal down.
+      const { term } = makeSession()
+      term.start()
+      const ws = MockWebSocket.last
+      ws.open()
+
+      term.noteResize(100, 40)
+      vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+
+      term.noteLayoutChange()
+      term.noteFocus(REPLY_BOX)
+      term.noteResize(100, 38)
+      vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+
+      term.noteResize(100, 20)
+      vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS * 10)
+
+      expect(
+        controls(ws).map((f) => f.json),
+        'a keyboard-shrunk size reached tmux: one arming of noteLayoutChange exempted ' +
+          'more than the one resize the user asked for',
+      ).toEqual([
+        { type: 'where' },
+        { type: 'resize', cols: 100, rows: 40 },
+        { type: 'resize', cols: 100, rows: 38 },
+      ])
+    })
+
+    it('holds the toggle s own size, so a reconnect attaches at it', () => {
+      // The held pair has to move with the exemption. Without that, the socket
+      // would come back at the pre-toggle height -- the size the terminal has
+      // not been for a while -- and the box would be drawn over rows tmux still
+      // thinks are there.
+      const { term } = makeSession()
+      term.start()
+      const first = MockWebSocket.last
+      first.open()
+
+      term.noteResize(120, 50)
+      vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+
+      term.noteLayoutChange()
+      term.noteFocus(REPLY_BOX)
+      term.noteResize(120, 48)
+      vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+      term.noteResize(120, 28)
+      vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+
+      first.emitClose(1006)
+      vi.advanceTimersByTime(BACKOFF_BASE_MS)
+      const second = MockWebSocket.last
+      second.open()
+
+      expect(controls(second).map((f) => f.json)).toEqual([
+        { type: 'resize', cols: 120, rows: 48 },
+        { type: 'where' },
+      ])
+    })
+
+    it('expires rather than waiting for a resize that never comes', () => {
+      // A toggle that changed no rows at all leaves the arming unspent, and an
+      // arming with no deadline would sit there until the next resize -- which
+      // could be a keyboard, minutes later. The grace is generous next to the
+      // frame a layout change takes and short next to anything a person does.
+      const { term } = makeSession()
+      term.start()
+      const ws = MockWebSocket.last
+      ws.open()
+
+      term.noteResize(100, 40)
+      vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+
+      term.noteLayoutChange()
+      term.noteFocus(REPLY_BOX)
+      vi.advanceTimersByTime(LAYOUT_CHANGE_GRACE_MS + 1)
+      term.noteResize(100, 20)
+      vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS * 10)
+
+      expect(controls(ws).map((f) => f.json)).toEqual([
+        { type: 'where' },
+        { type: 'resize', cols: 100, rows: 40 },
+      ])
+    })
+
+    it('changes nothing when no text control has focus', () => {
+      // Closing the box is a layout change too, and by then the keyboard is
+      // gone: this must be the ordinary path, not a second one.
+      const { term } = makeSession()
+      term.start()
+      const ws = MockWebSocket.last
+      ws.open()
+
+      term.noteLayoutChange()
+      term.noteResize(90, 30)
+      vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+
+      expect(controls(ws).map((f) => f.json)).toEqual([
+        { type: 'where' },
+        { type: 'resize', cols: 90, rows: 30 },
+      ])
+    })
   })
 
   it('attaches at the current size when suppression began before any size was known', () => {

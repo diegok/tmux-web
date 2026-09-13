@@ -24,18 +24,24 @@ import { describe, expect, it } from 'vitest'
 import {
   PASTE_END,
   PASTE_START,
+  REPLY_OPEN_KEY,
   REPLY_PLACEHOLDER,
   ReplyBox,
   dispatchReply,
   draftAfterPaneChange,
   draftOrigin,
+  focusesOnOpen,
+  readReplyOpen,
   replyFrames,
   replyHint,
   replyKey,
+  replyOpenFromStored,
+  replyToggleLabel,
   showReplyBox,
   willBracket,
+  writeReplyOpen,
 } from './ReplyBox'
-import type { ReplySink } from './ReplyBox'
+import type { ReplyOpenStore, ReplySink } from './ReplyBox'
 
 /** The bytes of a string, as numbers, which is the only way to see a stray CR. */
 function codes(s: string): number[] {
@@ -304,8 +310,12 @@ describe('replyKey', () => {
     expect(replyKey(key('Enter', { shiftKey: true }))).toBe('newline')
   })
 
-  it('blurs back to the terminal on Escape', () => {
-    expect(replyKey(key('Escape'))).toBe('blur')
+  it('closes back to the terminal on Escape', () => {
+    // Task 23 turned this from a blur into a close: the box now owns rows of a
+    // window the owner's own client shares, so leaving it open with the caret
+    // elsewhere is leaving his terminal short. What Escape means to the *user*
+    // is unchanged -- "give the keyboard back to the pane".
+    expect(replyKey(key('Escape'))).toBe('close')
   })
 
   it('lets the palette chord through', () => {
@@ -394,46 +404,89 @@ describe('replyHint', () => {
 })
 
 /**
- * Presence: the box is a function of there being a terminal, and of nothing
- * else.
+ * Presence: the box is a function of the user having asked for it, and of the
+ * pane's agent state never.
  *
  * Four fixtures rather than one loop over a single render, as with the
  * sidebar's branch chip, because the mistake this exists to catch is a box
  * gated on `agentState === 'blocked'` -- and that mistake gets the blocked
  * fixture accidentally right. Three of the four below go red on it.
  *
- * `showReplyBox` takes the agent state and ignores it, which is the whole
- * point of its signature: the argument is there so the mutant is expressible
- * and this test can kill it. Three reasons the box does not move on that
- * state, in the order they matter: a control that vanishes under you while you
- * are typing costs the sentence; `blocked` is 1.5-6 s late, so a box gated on
- * it arrives after you wanted it; and the box is also how you answer the four
- * Claude notifications the README lists that produce no badge on either
- * authority.
+ * `showReplyBox` takes the agent state and ignores it, which is the whole point
+ * of its signature: the argument is there so the mutant is expressible and this
+ * test can kill it. Three reasons the box does not move on that state, in the
+ * order they matter: a control that vanishes under you while you are typing
+ * costs the sentence; `blocked` is 1.5-6 s late, so a box gated on it arrives
+ * after you wanted it; and the box is also how you answer the four Claude
+ * notifications the README lists that produce no badge on either authority.
+ *
+ * The `open` flag is not a hole in that rule and the pair of `it.each` blocks
+ * below is what says so: the box is the same at all four states with the toggle
+ * on, and absent at all four with it off. What moves it is a person pressing
+ * something, which is the one input a control is allowed to move on.
  */
 const everyState = ['', 'working', 'blocked', 'idle']
 
 /** Exactly the composition App makes: the rule decides, the box renders. */
-function footer(agentState: string): string {
-  return showReplyBox({ attached: true, agentState })
-    ? renderToStaticMarkup(<ReplyBox pane="%3" onSend={() => {}} />)
+function footer(agentState: string, open = true): string {
+  return showReplyBox({ attached: true, agentState, open })
+    ? renderToStaticMarkup(<ReplyBox pane="%3" onSend={() => {}} onClose={() => {}} />)
     : ''
 }
 
 describe('the box itself', () => {
-  it.each(everyState)('is on screen on a %s pane', (agentState) => {
+  it.each(everyState)('is on screen on a %s pane once it is open', (agentState) => {
     expect(footer(agentState)).toContain('<textarea')
   })
 
+  it.each(everyState)('is off screen on a %s pane while it is closed', (agentState) => {
+    // The owner's complaint, as a rule: "no debería mostrarse a menos que yo
+    // decida verlo". Closed is closed whatever the agent is doing -- an agent
+    // going `blocked` must not bring the box back any more than it may take it
+    // away.
+    expect(footer(agentState, false)).toBe('')
+  })
+
+  it('renders identically at every agent state', () => {
+    // The property Task 17 pinned, still pinned: same markup, not merely
+    // "present in all four". A box that changed its hint, its size or its
+    // buttons on the state would be a box that moves on the state.
+    const rendered = everyState.map((state) => footer(state))
+    expect(new Set(rendered).size).toBe(1)
+  })
+
   it('is not on screen when this tab is attached to nothing', () => {
-    expect(showReplyBox({ attached: false, agentState: 'blocked' })).toBe(false)
+    // Even with the toggle remembered on: there is no pane to reply to.
+    expect(showReplyBox({ attached: false, agentState: 'blocked', open: true })).toBe(false)
+  })
+
+  it('is closed by default, before anyone has decided anything', () => {
+    // The whole of Task 23 in one line. On a desktop the pane *is* the text
+    // box, and this one costs rows of a window the owner's own tmux client is
+    // attached to.
+    expect(replyOpenFromStored(null)).toBe(false)
+    expect(showReplyBox({ attached: true, agentState: 'blocked', open: replyOpenFromStored(null) })).toBe(
+      false,
+    )
   })
 
   it('does not take focus on mount', () => {
     // The attribute must be *absent*, which is a different assertion from it
     // being false: React omits `autoFocus={false}` and renders `autofocus=""`
-    // for a truthy one, so only absence rules out an autofocusing box.
+    // for a truthy one, so only absence rules out an autofocusing box. This is
+    // the remembered-open box on page load: it is on screen because this
+    // browser last left it on, which is not the same as being asked for now.
     expect(textarea(footer(''))).not.toMatch(/autofocus/i)
+  })
+
+  it('takes the keyboard when the toggle is what opened it', () => {
+    // The other half, and the reason `autoFocus` is a prop rather than a
+    // constant: pressing "Reply box" is a person asking to type, and making
+    // them then click the box would be the toggle doing half its job.
+    const asked = renderToStaticMarkup(
+      <ReplyBox pane="%3" onSend={() => {}} onClose={() => {}} autoFocus />,
+    )
+    expect(textarea(asked)).toMatch(/autofocus/i)
   })
 
   it('does not offer Ctrl+C, which the browser has already taken', () => {
@@ -453,9 +506,122 @@ describe('the box itself', () => {
     expect(classesOf(send)).not.toEqual(classesOf(keys))
   })
 
+  it('takes its own space rather than lying over the terminal', () => {
+    // Task 21 made the box an overlay and Task 23 undoes it: it covered the
+    // bottom two rows, which on a settled pane are the prompt and the agent's
+    // question -- exactly what you are reading while you answer. `shrink-0` is
+    // the other half of being a flex sibling: the box keeps its height and the
+    // terminal above it gives up the rows.
+    //
+    // Tokens, never a substring: `absolute` is inside `md:absolute` and inside
+    // the connection pill's own classes further down the tree.
+    const wrapper = footer('').match(/<div[^>]*>/)![0]
+    expect(classesOf(wrapper)).not.toContain('absolute')
+    expect(classesOf(wrapper)).toContain('shrink-0')
+    // What the e2e suite proves and this cannot: with the box open, the
+    // terminal's last row is still on screen. See `e2e/reply.spec.ts`.
+  })
+
   it('says where the bytes go', () => {
     const hint = replyHint('%3', false, false)
     expect(hint).not.toBe('')
     expect(footer('')).toContain(hint)
+  })
+})
+
+/**
+ * The memory: one browser's answer to "do I want this box", and nothing else's.
+ *
+ * `localStorage` and not `sessionStorage`, which is what the pane and the
+ * session are filed under: those are properties of a tab's current position and
+ * are meant to be forgotten, while this is a property of the *device*. A phone
+ * keeps the box open across every visit and a laptop keeps it shut, which is
+ * the whole of what the owner asked for.
+ *
+ * Every read and write goes through a try/catch, because a Safari private
+ * window throws on the property access itself rather than returning null. The
+ * cost of a refusal is the default -- closed -- and never a page that does not
+ * render.
+ */
+describe('remembering the toggle', () => {
+  /** A store that answers, and records what it was told. */
+  function memory(seed: Record<string, string> = {}) {
+    const map = new Map(Object.entries(seed))
+    const store: ReplyOpenStore = {
+      getItem: (k) => map.get(k) ?? null,
+      setItem: (k, v) => void map.set(k, v),
+    }
+    return { map, store }
+  }
+
+  /** A store that throws on both halves, as a browser blocking site data does. */
+  const hostile: ReplyOpenStore = {
+    getItem() {
+      throw new Error('SecurityError: the operation is insecure')
+    },
+    setItem() {
+      throw new Error('SecurityError: the operation is insecure')
+    },
+  }
+
+  it('is closed for a browser that has never said otherwise', () => {
+    expect(readReplyOpen(memory().store)).toBe(false)
+    expect(readReplyOpen(null)).toBe(false)
+  })
+
+  it('reads back what it wrote, both ways round', () => {
+    // A round trip and not two assertions about a literal: what is stored is
+    // this module's business, and a test that spelled the value would pass a
+    // reader that had stopped agreeing with the writer.
+    const { store } = memory()
+    writeReplyOpen(store, true)
+    expect(readReplyOpen(store)).toBe(true)
+    writeReplyOpen(store, false)
+    expect(readReplyOpen(store)).toBe(false)
+  })
+
+  it('files it under a key of its own, alongside the tab s other memories', () => {
+    const { map, store } = memory()
+    writeReplyOpen(store, true)
+    expect([...map.keys()]).toEqual([REPLY_OPEN_KEY])
+    expect(REPLY_OPEN_KEY).toContain('tmux-web:')
+  })
+
+  it('treats anything it does not recognise as closed', () => {
+    // A value from an older build, a half-written key, a user poking at
+    // devtools. None of those may leave the box open, and none may throw.
+    expect(replyOpenFromStored('')).toBe(false)
+    expect(replyOpenFromStored('yes')).toBe(false)
+    expect(replyOpenFromStored('true')).toBe(false)
+    expect(replyOpenFromStored('null')).toBe(false)
+    expect(readReplyOpen(memory({ [REPLY_OPEN_KEY]: 'banana' }).store)).toBe(false)
+  })
+
+  it('renders closed rather than throwing when storage refuses', () => {
+    // A private window is a supported way to use this app, not a crash.
+    expect(() => readReplyOpen(hostile)).not.toThrow()
+    expect(readReplyOpen(hostile)).toBe(false)
+    expect(() => writeReplyOpen(hostile, true)).not.toThrow()
+  })
+})
+
+describe('focusesOnOpen', () => {
+  it('focuses a box the user just asked for, and not one merely restored', () => {
+    // The pair is the assertion. A remembered-open box on load must leave the
+    // keyboard where it was -- on a phone, focusing it would raise the soft
+    // keyboard on every visit -- while the toggle is a person saying "I want to
+    // type now".
+    expect(focusesOnOpen('toggle')).toBe(true)
+    expect(focusesOnOpen('restore')).toBe(false)
+  })
+})
+
+describe('replyToggleLabel', () => {
+  it('says what pressing it will do, not what the box is', () => {
+    // The palette row reads as a command. A label naming the current state is
+    // the recorded way to write a toggle nobody can predict.
+    expect(replyToggleLabel(false).toLowerCase()).toContain('show')
+    expect(replyToggleLabel(true).toLowerCase()).toContain('hide')
+    expect(replyToggleLabel(true)).not.toBe(replyToggleLabel(false))
   })
 })

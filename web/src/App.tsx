@@ -39,7 +39,16 @@ import {
   promptAction,
   promptDialogReducer,
 } from '@/components/PromptDialog'
-import { ReplyBox, dispatchReply, showReplyBox } from '@/components/ReplyBox'
+import {
+  ReplyBox,
+  dispatchReply,
+  focusesOnOpen,
+  readReplyOpen,
+  replyOpenStorage,
+  replyToggleLabel,
+  showReplyBox,
+  writeReplyOpen,
+} from '@/components/ReplyBox'
 import type { ReplyFrame } from '@/components/ReplyBox'
 import { Terminal } from '@/components/Terminal'
 import type { TerminalHandle, TerminalStatus } from '@/components/Terminal'
@@ -228,6 +237,32 @@ export default function App() {
    * than anything in the panel itself.
    */
   const [captureOpen, setCaptureOpen] = useState(false)
+
+  /**
+   * The reply box, and this browser's memory of whether it wants one.
+   *
+   * Off unless this device has said otherwise, on every device: on a desktop
+   * the pane already *is* the text box, and a second one costs rows of a window
+   * the owner's own tmux client shares. The store is read once, on the first
+   * render, for the same reason the remembered session is -- a value that
+   * arrived later would arrive after the layout it decides.
+   */
+  const [replyStore] = useState(replyOpenStorage)
+  const [replyOpen, setReplyOpen] = useState(() => readReplyOpen(replyStore))
+  /**
+   * Whether the box takes the keyboard when it mounts. A box that is open
+   * because this browser last left it open has not been asked for by anybody
+   * yet; see `focusesOnOpen`.
+   */
+  const [replyFocus, setReplyFocus] = useState(() => focusesOnOpen('restore'))
+  /**
+   * The box's textarea, for the one caller that cannot use `autoFocus`: the
+   * palette's row opens the box while the palette's own focus scope is still
+   * up, so the keyboard has to be handed over as that dialog lets go. See
+   * `keepFocus` in Palette.tsx.
+   */
+  const replyInput = useRef<HTMLTextAreaElement>(null)
+  const focusReply = useCallback(() => replyInput.current?.focus(), [])
 
   const { groups, loaded } = snapshot
 
@@ -512,10 +547,45 @@ export default function App() {
    * Out of copy mode again. The header has offered a way *in* since v1 and, as
    * of Task 14, this is the way back out -- worth a button of its own quite
    * apart from the reply box, which sends it as a frame before every reply.
+   *
+   * Returns false when there is no pane to name or the socket refuses, which is
+   * what the palette reports rather than closing on a command that did nothing.
+   * The header button is disabled in both states, so it never gets there.
    */
   const endMode = useCallback(() => {
-    if (activePane) term.current?.endMode(activePane)
+    if (!activePane) return false
+    return term.current?.endMode(activePane) ?? false
   }, [activePane])
+
+  /**
+   * Show or hide the reply box, and remember which for next time.
+   *
+   * Two things have to happen around the state change, in this order.
+   *
+   * `noteLayoutChange` goes *first*, before React is told anything. The box is a
+   * flex sibling, so opening it shrinks the terminal and that resize has to
+   * reach tmux -- but the box also takes the keyboard, and a focused text
+   * control is exactly what `suppressesResize` holds resizes for. React focuses
+   * an `autoFocus` element during the commit, ahead of the browser's layout and
+   * of wterm's ResizeObserver, so the arming has to be in place before either.
+   * See `TerminalSession.noteLayoutChange` for why one arming is not a hole in
+   * the phone-keyboard protection.
+   *
+   * And closing hands the keyboard back to the pane. The caret is in a box that
+   * is about to stop existing, and leaving it on `<body>` is the state where
+   * nothing the user types goes anywhere -- the defect `focusTerminal` in the
+   * e2e harness exists to work around.
+   */
+  const showReply = useCallback(
+    (open: boolean) => {
+      term.current?.noteLayoutChange()
+      setReplyOpen(open)
+      setReplyFocus(open && focusesOnOpen('toggle'))
+      writeReplyOpen(replyStore, open)
+      if (!open) term.current?.focus()
+    },
+    [replyStore],
+  )
 
   /**
    * The reply box's frames, onto the wire in the array's order.
@@ -605,6 +675,23 @@ export default function App() {
               >
                 End mode
               </button>
+              {/*
+                Off by default and driven by nothing but this button and its
+                palette row: no `pointer: coarse` branch and no viewport-width
+                one. Which device wants a second text box is a question the
+                person holding it can answer, and `aria-pressed` is what says
+                the button is a switch rather than an action.
+              */}
+              <button
+                type="button"
+                onClick={() => showReply(!replyOpen)}
+                aria-pressed={replyOpen}
+                disabled={!target}
+                className="hover:bg-accent hover:text-accent-foreground rounded-md border px-2 py-1 text-xs font-medium disabled:opacity-50 aria-pressed:bg-accent"
+                title={replyToggleLabel(replyOpen)}
+              >
+                Reply box
+              </button>
               <button
                 type="button"
                 onClick={() => setCaptureOpen(true)}
@@ -618,27 +705,24 @@ export default function App() {
             </div>
           </header>
           {/*
-            The terminal fills this box and the reply box lies *over* it, at the
-            foot, rather than above it in a column. That is not a cosmetic
-            choice. As a sibling the box takes its height *from* the terminal,
-            and every height change here goes to tmux as a resize of a window
-            the owner's own local client is attached to -- so the box appearing,
-            or its hint line below the textarea wrapping onto a second line on a
-            narrow screen, would move his terminal. Out of the flow it cannot.
+            A column, and the reply box is a sibling of the terminal rather than
+            a strip lying over it. Task 21 had it overlaid so that opening it
+            could not change the terminal's height -- the height goes to tmux as
+            a resize of a window the owner's own local client is attached to --
+            and the owner rejected the trade: the two rows it covered are, on a
+            settled pane, the prompt and the agent's question, which is exactly
+            what you are reading while you type the answer. So the box takes its
+            own space and the terminal gives up the rows.
 
-            The cost is the two rows it covers, which on a settled pane are the
-            prompt: that is the trade this makes, and it is the smaller half of
-            it -- the pane is still *drawn* at those rows, so nothing is lost,
-            only hidden behind a translucent strip.
-
-            The half that actually protects the owner is in `Terminal.tsx`:
-            focusing this box suppresses the resize path entirely, because on a
-            phone the keyboard opening shrinks the layout viewport and an
-            element sized from it shrinks whether or not anything is stacked
-            above it. See `suppressesResize`.
+            The size the owner shares is protected by the two rules in
+            `Terminal.tsx` instead, which between them tell a resize a person
+            asked for from one a soft keyboard caused: `suppressesResize` holds
+            every resize while a text control outside the terminal has focus,
+            and `noteLayoutChange` -- armed by `showReply`, above -- lets exactly
+            the toggle's own resize through.
           */}
-          <div className="relative min-h-0 flex-1">
-            <div className="h-full">
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1">
               {target ? (
                 <Terminal
                   session={target}
@@ -656,19 +740,23 @@ export default function App() {
               )}
             </div>
             {/*
-              Always there: the rule takes the pane's agent state and ignores
-              it, deliberately. See `showReplyBox`. It is passed the same
-              `activePane` the breadcrumb and the sidebar highlight are drawn
-              from, so the pane it names is the pane on screen.
+              There when the user has asked for it, and never because of what
+              the agent is doing: the rule takes the pane's agent state and
+              ignores it, deliberately. See `showReplyBox`. It is passed the
+              same `activePane` the breadcrumb and the sidebar highlight are
+              drawn from, so the pane it names is the pane on screen.
             */}
             {showReplyBox({
               attached: target !== null,
               agentState: located?.pane.agentState ?? '',
+              open: replyOpen,
             }) && (
               <ReplyBox
                 pane={activePane}
                 onSend={sendReply}
-                className="bg-background/95 absolute inset-x-0 bottom-0 backdrop-blur"
+                onClose={() => showReply(false)}
+                autoFocus={replyFocus}
+                inputRef={replyInput}
               />
             )}
           </div>
@@ -682,6 +770,10 @@ export default function App() {
           activeSession={session}
           onSelectPane={handleSelectPane}
           onCopyMode={copyMode}
+          onEndMode={endMode}
+          replyOpen={replyOpen}
+          onToggleReply={() => showReply(!replyOpen)}
+          onFocusReply={focusReply}
           onIntent={handleIntent}
         />
 

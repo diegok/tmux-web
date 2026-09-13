@@ -21,6 +21,7 @@ import {
   installPaletteChord,
   paneEntries,
 } from './Palette'
+import { replyToggleLabel } from './ReplyBox'
 import { ZOOM_HINT } from '@/lib/manage'
 import { groupRows } from '@/lib/useSnapshot'
 import type { SnapshotRow } from '@/lib/useSnapshot'
@@ -315,6 +316,10 @@ describe('<Palette>', () => {
         activeSession="work"
         onSelectPane={() => {}}
         onCopyMode={() => true}
+        onEndMode={() => true}
+        replyOpen={false}
+        onToggleReply={() => {}}
+        onFocusReply={() => {}}
         onIntent={() => {}}
       />,
     )
@@ -343,24 +348,47 @@ describe('<PaletteBody>', () => {
     row({ windowIndex: 1, windowName: 'api', paneId: '%4', command: 'claude' }),
   ])
 
-  function render(over: { activePane?: string | null } = {}): string {
+  function render(over: { activePane?: string | null; replyOpen?: boolean } = {}): string {
     const activePane = over.activePane === undefined ? '%4' : over.activePane
     return renderToStaticMarkup(
       <PaletteBody
         entries={paneEntries(groups, activePane, 'work')}
         actions={actionEntries(groups, activePane, 'work')}
         failure={null}
+        replyOpen={over.replyOpen ?? false}
         onRun={() => {}}
         onIntent={() => {}}
       />,
     )
   }
 
-  it('carries panes, management and the terminal action', () => {
+  it('carries panes, management and the terminal actions', () => {
     const markup = render()
     expect(markup).toContain('Panes')
     expect(markup).toContain('Manage')
     expect(markup).toContain('Enter copy mode')
+  })
+
+  it('offers every header button a palette row, end-mode included', () => {
+    // The row this palette went without from Task 17 to Task 23. The header has
+    // had an "End mode" button since Task 14 and the palette is the only way in
+    // on a phone, where the header row is cramped -- and it is the surface the
+    // reply box's own toggle had to be added to anyway, so the missing one went
+    // in beside it.
+    const markup = render()
+    expect(markup).toContain('Enter copy mode')
+    expect(markup).toContain('Leave copy mode')
+    expect(markup).toContain(replyToggleLabel(false))
+  })
+
+  it('says what the reply toggle will do, in both states', () => {
+    // Not "Reply box", which names the thing and leaves the user to guess which
+    // way it goes. The pair is the assertion: a row that read the same either
+    // way would pass a label that ignored the state.
+    expect(render({ replyOpen: false })).toContain(replyToggleLabel(false))
+    expect(render({ replyOpen: false })).not.toContain(replyToggleLabel(true))
+    expect(render({ replyOpen: true })).toContain(replyToggleLabel(true))
+    expect(render({ replyOpen: true })).not.toContain(replyToggleLabel(false))
   })
 
   it('offers the same actions the row menus do, on the current pane', () => {

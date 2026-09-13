@@ -51,17 +51,15 @@
  * environment, so the pane here is already the controlled one and a
  * `respawn-pane` would only be an extra chance to disturb a pane a browser is
  * attached to.
+ *
+ * Every test below opens the box first, through the header toggle, because that
+ * is now the only way it exists. See `openReplyBox`.
  */
 
-import type { Locator, Page } from '@playwright/test'
+import type { Page } from '@playwright/test'
 
-import { enroll, expect, focusTerminal, test } from './harness'
+import { enroll, expect, focusTerminal, openReplyBox, pill, replyBox, test } from './harness'
 import type { TmuxWeb } from './harness'
-
-/** The box itself. */
-function replyBox(page: Page): Locator {
-  return page.getByRole('textbox', { name: 'Reply to this pane' })
-}
 
 /**
  * The pane the box says it will send to, once the tab has learned it.
@@ -155,6 +153,7 @@ test('a reply typed into the box runs in the pane, not merely on the screen', as
   // browser shows `echo REP""LY` in the terminal and tmux has never heard of
   // it, so every assertion below is on the tmux side.
   await enroll(page, tmuxWeb, 'laptop')
+  await openReplyBox(page)
 
   const pane = await replyTarget(page)
   await waitForShell(page, tmuxWeb, pane)
@@ -197,6 +196,7 @@ test('a reply into a pane in copy mode arrives whole', async ({ page, tmuxWeb })
   // a PTY. What it cannot show, and this can, is that the browser sends the
   // frame at all and sends it first.
   await enroll(page, tmuxWeb, 'laptop')
+  await openReplyBox(page)
 
   const pane = await replyTarget(page)
   await waitForShell(page, tmuxWeb, pane)
@@ -247,6 +247,7 @@ test('the no-Return button leaves the line unsubmitted', async ({ page, tmuxWeb 
   // that prints the marker; a pane that already ran `echo NOCR_JOI` printed the
   // wrong string and then failed to find a command called `NED`.
   await enroll(page, tmuxWeb, 'laptop')
+  await openReplyBox(page)
 
   const pane = await replyTarget(page)
   await waitForShell(page, tmuxWeb, pane)
@@ -269,4 +270,217 @@ test('the no-Return button leaves the line unsubmitted', async ({ page, tmuxWeb 
     done.status,
     `the shell reported ${done.status} for the joined line, want 0:\n${done.capture}`,
   ).toBe('0')
+})
+
+/**
+ * Task 23: the box is off until a person asks for it, it takes its own space
+ * when it is on, and the browser remembers which.
+ *
+ * The owner's words, after using the shape Tasks 17 and 21 shipped: "en desktop
+ * no tiene NINGUN sentido ese componente. No debería mostrarse a menos que yo
+ * decida verlo y cuando decido verlo, la consola debe adaptarse para que se siga
+ * viendo entera."
+ *
+ * Both halves of that sentence are here, and the second one is the reason these
+ * tests are in a browser rather than in vitest: "se siga viendo entera" is a
+ * claim about pixels, and reading it off the class attribute -- "there is no
+ * `absolute` in there" -- would be asserting the fix rather than the property.
+ */
+test('the box is not there until the toggle asks for it', async ({ page, tmuxWeb }) => {
+  await enroll(page, tmuxWeb, 'laptop')
+
+  // Nothing has been decided by this browser, so: closed. Not "hidden on a
+  // desktop" -- there is no device branch anywhere, and a phone loads exactly
+  // this.
+  await expect(
+    replyBox(page),
+    'the reply box was on screen before anybody asked for it',
+  ).toHaveCount(0)
+
+  await openReplyBox(page)
+  await expect(replyBox(page)).toBeVisible()
+
+  // Opening it by the toggle is a person saying "I want to type now", so the
+  // box takes the keyboard and the user does not have to then click it.
+  await expect(
+    replyBox(page),
+    'the toggle showed the box but left the caret elsewhere, so the press did half its job',
+  ).toBeFocused()
+})
+
+test('the terminal s last row is still visible with the box open', async ({ page, tmuxWeb }) => {
+  await enroll(page, tmuxWeb, 'laptop')
+  await openReplyBox(page)
+
+  // A hit test, not a class and not a pair of numbers of this file's own
+  // choosing: `elementFromPoint` answers "what would a click at the middle of
+  // the terminal's last row land on", which is exactly what "nothing is
+  // covered" means. Under Task 21's overlay the answer was the reply box's own
+  // translucent strip, and the row underneath it was the prompt.
+  const seen = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('.term-row')]
+    const last = rows.at(-1)
+    const box = document.querySelector('textarea[aria-label="Reply to this pane"]')
+    if (!last || !box) return null
+    const r = last.getBoundingClientRect()
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+    // The box's whole strip, hint line included -- `border-t` is what the
+    // component puts on it and nothing else in the shell has one.
+    const strip = box.closest('div.border-t')!.getBoundingClientRect()
+    return {
+      rows: rows.length,
+      bottom: r.bottom,
+      viewport: window.innerHeight,
+      boxTop: strip.top,
+      boxBottom: strip.bottom,
+      onTheRow: hit === last || (hit !== null && last.contains(hit)),
+      hitBy: hit === null ? 'nothing' : `${hit.tagName}.${hit.className}`,
+    }
+  })
+
+  expect(seen, 'the page rendered no terminal rows, or no reply box').not.toBeNull()
+  expect(
+    seen!.onTheRow,
+    `the terminal's last row is covered: a click at its centre would land on ${seen!.hitBy}. ` +
+      'That row is the prompt and the agent\'s question -- the line you are reading while ' +
+      'you type the answer.',
+  ).toBe(true)
+  expect(
+    seen!.bottom,
+    `the last row ends at ${seen!.bottom}px, past the ${seen!.viewport}px viewport`,
+  ).toBeLessThanOrEqual(seen!.viewport + 1)
+  expect(
+    seen!.bottom,
+    `the last row ends at ${seen!.bottom}px and the box starts at ${seen!.boxTop}px, so the ` +
+      'box is lying over the terminal rather than taking space of its own',
+  ).toBeLessThanOrEqual(seen!.boxTop + 1)
+  // And the trade is honest in the other direction too: the strip the terminal
+  // gave its rows to is itself entirely on screen, hint line and all. The shell
+  // is `overflow-hidden`, so a box pushed past the fold would simply be cut off
+  // with nothing scrolling to reach it.
+  expect(
+    seen!.boxBottom,
+    `the reply box ends at ${seen!.boxBottom}px, past the ${seen!.viewport}px viewport`,
+  ).toBeLessThanOrEqual(seen!.viewport + 1)
+})
+
+test('a browser that left the box open gets it back, and not the keyboard', async ({
+  page,
+  tmuxWeb,
+}) => {
+  await enroll(page, tmuxWeb, 'laptop')
+  const pane = await (async () => {
+    await openReplyBox(page)
+    const hint = page.getByText(/Enter sends to/)
+    await expect(hint).toContainText(/%\d+/)
+    return /%\d+/.exec(await hint.innerText())![0]
+  })()
+  await waitForShell(page, tmuxWeb, pane)
+
+  // Every focus this load, in order, recorded from before the app runs.
+  //
+  // Asking `toBeFocused()` afterwards is not enough and the measurement proved
+  // it: `<Terminal>` grabs the keyboard once, when the socket goes live, which
+  // is *after* the box has mounted -- so a box that stole focus on mount has
+  // already had it taken back by the time any assertion can look, and an
+  // `autoFocus` wired to a constant survives. What it cannot survive is the
+  // record: a phone would have raised its soft keyboard in that window.
+  await page.addInitScript(() => {
+    const log: string[] = []
+    ;(window as unknown as { __focusLog: string[] }).__focusLog = log
+    document.addEventListener('focusin', (event) => {
+      const el = event.target as Element | null
+      log.push(`${el?.tagName ?? '?'}:${el?.getAttribute?.('aria-label') ?? ''}`)
+    })
+  })
+
+  await page.reload()
+  await page.locator('.term-row').first().waitFor()
+  await pill(page).waitFor({ state: 'detached' })
+
+  // The memory is this device's, in localStorage: a phone keeps the box and a
+  // laptop keeps it shut.
+  await expect(
+    replyBox(page),
+    'the box was not remembered across a reload, so every visit costs the toggle again',
+  ).toBeVisible()
+
+  // And it must not have taken the keyboard on the way in -- not for a moment.
+  // Nobody asked for anything this load; on a phone a box that focused itself
+  // here would raise the soft keyboard on every single visit.
+  await expect(replyBox(page)).not.toBeFocused()
+  const focused = await page.evaluate(
+    () => (window as unknown as { __focusLog: string[] }).__focusLog,
+  )
+  expect(
+    focused.filter((f) => f.includes('Reply to this pane')),
+    `the remembered-open box took focus on load. Focus went, in order, to ${focused.join(' → ')}. ` +
+      'It is only not focused now because the terminal took the keyboard back when the socket ' +
+      'went live, which on a phone is a keyboard that rose and fell on its own.',
+  ).toEqual([])
+
+  // Proved on tmux's side rather than by reading `document.activeElement`: type
+  // without clicking anything, and the bytes have to reach the pane. If the box
+  // had stolen focus they would be sitting in a textarea instead.
+  await page.keyboard.type('echo REST""ORED')
+  await page.keyboard.press('Enter')
+  await expect
+    .poll(() => capture(tmuxWeb, pane), {
+      message:
+        `pane ${pane} never ran what was typed after the reload: the remembered-open box ` +
+        'took the keyboard from the terminal',
+    })
+    .toContain('RESTORED')
+})
+
+test('Escape puts the box away and gives the keyboard back to the pane', async ({
+  page,
+  tmuxWeb,
+}) => {
+  await enroll(page, tmuxWeb, 'laptop')
+  await openReplyBox(page)
+  const pane = await replyTarget(page)
+  await waitForShell(page, tmuxWeb, pane)
+
+  await replyBox(page).click()
+  await replyBox(page).press('Escape')
+
+  // Gone, not merely blurred: the box owns rows of a window the owner's own
+  // client shares, so leaving it on screen with the caret elsewhere leaves his
+  // terminal short for nothing.
+  await expect(
+    replyBox(page),
+    'Escape only blurred the box, which still costs the terminal its rows',
+  ).toHaveCount(0)
+
+  await page.keyboard.type('echo ESC""APED')
+  await page.keyboard.press('Enter')
+  await expect
+    .poll(() => capture(tmuxWeb, pane), {
+      message:
+        `pane ${pane} never ran what was typed after Escape: the caret was left on <body>, ` +
+        'where nothing the user types goes anywhere',
+    })
+    .toContain('ESCAPED')
+})
+
+test('the palette shows the box too, and hands it the keyboard', async ({ page, tmuxWeb }) => {
+  // Every other control in that header row has a palette row, and on a phone
+  // the palette is the roomier surface of the two. This one also has to survive
+  // the dialog closing over it: Radix restores focus on close, after the box has
+  // mounted and taken it, and in this app that restore lands on `<body>` -- so a
+  // row that opened a text box and left the caret nowhere would be worse than no
+  // row at all. See `keepFocus` in Palette.tsx.
+  await enroll(page, tmuxWeb, 'laptop')
+
+  await page.keyboard.press('Control+Alt+k')
+  await page.getByPlaceholder('Jump to session/window/pane…').fill('reply box')
+  await page.keyboard.press('Enter')
+
+  await expect(replyBox(page), 'the palette row did not show the reply box').toBeVisible()
+  await expect(
+    replyBox(page),
+    'the palette opened the box and then let the dialog take the keyboard back, which ' +
+      'leaves the caret on <body> where nothing typed goes anywhere',
+  ).toBeFocused()
 })

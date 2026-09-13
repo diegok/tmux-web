@@ -39,12 +39,18 @@ function CommandDialog({
   children,
   className,
   showCloseButton = false,
+  // Forwarded to the content rather than swallowed by the root, which takes no
+  // such prop: a caller whose command puts the caret somewhere on purpose has
+  // to be able to stop Radix's own focus restore from taking it back. See the
+  // reply toggle in Palette.tsx.
+  onCloseAutoFocus,
   ...props
 }: React.ComponentProps<typeof Dialog> & {
   title?: string
   description?: string
   className?: string
   showCloseButton?: boolean
+  onCloseAutoFocus?: (event: Event) => void
 }) {
   return (
     <Dialog {...props}>
@@ -58,6 +64,7 @@ function CommandDialog({
           className
         )}
         showCloseButton={showCloseButton}
+        onCloseAutoFocus={onCloseAutoFocus}
       >
         {children}
       </DialogContent>

@@ -1,6 +1,6 @@
 /**
- * Jump anywhere: a fuzzy list of every pane the daemon can see, plus the one
- * terminal action that has nowhere else to live.
+ * Jump anywhere: a fuzzy list of every pane the daemon can see, plus the
+ * terminal actions that have nowhere else to live.
  *
  * ## The chord, and why it is not the way in
  *
@@ -20,15 +20,16 @@
  *
  * ## What is in it
  *
- * Panes, and "enter copy mode". Not devices, not the theme: those live one
- * click away in the footer menu, they are used about once a month, and a
- * palette that matches them competes with the panes for the first row -- typing
- * "de" to reach a pane running `deploy` should not surface "Devices…". The
- * palette's job is moving between agents, and everything in it moves the tab or
- * changes what the pane is doing.
+ * Panes, and the three things the header row offers: into copy mode, out of it,
+ * and the reply box's toggle. Not devices, not the theme: those live one click
+ * away in the footer menu, they are used about once a month, and a palette that
+ * matches them competes with the panes for the first row -- typing "de" to
+ * reach a pane running `deploy` should not surface "Devices…". The palette's
+ * job is moving between agents, and everything in it moves the tab, changes
+ * what the pane is doing, or changes how you talk to it.
  */
 
-import { Columns2, Copy, SquareTerminal, Wrench } from 'lucide-react'
+import { Columns2, Copy, CopySlash, MessageSquare, SquareTerminal, Wrench } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { Badge } from '@/components/ui/badge'
@@ -43,6 +44,7 @@ import {
   CommandSeparator,
   CommandShortcut,
 } from '@/components/ui/command'
+import { replyToggleLabel } from '@/components/ReplyBox'
 import { newSessionPrompt, rowMenu } from '@/lib/manage'
 import type { MenuEntry, MenuIntent, RowTarget } from '@/lib/manage'
 import { findPane } from '@/lib/useSnapshot'
@@ -90,6 +92,8 @@ export function installPaletteChord(target: EventTarget, toggle: () => void): ()
 export type PaletteAction =
   | { kind: 'pane'; paneId: string; groupKey: string }
   | { kind: 'copy-mode' }
+  | { kind: 'end-mode' }
+  | { kind: 'toggle-reply' }
 
 /** One row. */
 export interface PaletteEntry {
@@ -244,6 +248,17 @@ export interface PaletteProps {
    * command that did nothing is indistinguishable from one that worked.
    */
   onCopyMode: () => boolean
+  /** Leave it again. False for the same reasons, and reported the same way. */
+  onEndMode: () => boolean
+  /** Whether the reply box is on screen, which is what its row's label says. */
+  replyOpen: boolean
+  /** Show the reply box, or put it away. */
+  onToggleReply: () => void
+  /**
+   * Put the caret in the reply box. Called once, as this dialog closes over a
+   * box it has just opened; see `keepFocus`.
+   */
+  onFocusReply: () => void
   /**
    * A management entry was chosen. The palette closes and App takes it from
    * there -- a prompt or the kill dialog, or straight to the daemon.
@@ -259,9 +274,16 @@ export function Palette({
   activeSession,
   onSelectPane,
   onCopyMode,
+  onEndMode,
+  replyOpen,
+  onToggleReply,
+  onFocusReply,
   onIntent,
 }: PaletteProps) {
   const [failure, setFailure] = useState<string | null>(null)
+
+  /** The row that just ran placed the caret itself; let Radix's restore pass. */
+  const keepFocus = useRef(false)
 
   // The chord toggles, so the same keystroke closes what it opened. Held in a
   // ref so the listener is installed once rather than re-installed on every
@@ -289,16 +311,41 @@ export function Palette({
   const actions = actionEntries(groups, activePane, activeSession)
 
   function run(action: PaletteAction) {
-    if (action.kind === 'copy-mode') {
-      if (!onCopyMode()) {
-        // Stay open and say so. The terminal refuses copy mode when the socket
-        // is not ready, and that is exactly the moment a user would otherwise
-        // assume the key went through.
-        setFailure('The terminal is not connected, so copy mode did nothing.')
-        return
-      }
-    } else {
-      onSelectPane(action.paneId, action.groupKey)
+    switch (action.kind) {
+      case 'pane':
+        onSelectPane(action.paneId, action.groupKey)
+        break
+      case 'copy-mode':
+        if (!onCopyMode()) {
+          // Stay open and say so. The terminal refuses copy mode when the
+          // socket is not ready, and that is exactly the moment a user would
+          // otherwise assume the key went through.
+          setFailure('The terminal is not connected, so copy mode did nothing.')
+          return
+        }
+        break
+      case 'end-mode':
+        if (!onEndMode()) {
+          setFailure('The terminal is not connected, so leaving copy mode did nothing.')
+          return
+        }
+        break
+      case 'toggle-reply':
+        // Nothing to refuse: the box is this app's own, and showing it needs no
+        // socket. It is the one row here that changes the layout rather than
+        // the pane.
+        //
+        // The flag is about what happens a moment later, and it was measured
+        // rather than guessed. This dialog keeps a focus scope up through its
+        // exit animation and then restores focus to whatever had it before --
+        // which in this app is `<body>`, because wterm replaces the terminal's
+        // own element as it redraws and the saved node is gone by then. So the
+        // one row whose entire purpose is handing the user something to type
+        // in would open a box and leave the caret nowhere. Only this row opts
+        // out; every other row's focus behaviour is left exactly as it was.
+        keepFocus.current = true
+        onToggleReply()
+        break
     }
     change(false)
   }
@@ -309,11 +356,24 @@ export function Palette({
       onOpenChange={change}
       title="Command palette"
       description="Jump to a pane, or run a terminal command"
+      onCloseAutoFocus={(event) => {
+        if (!keepFocus.current) return
+        keepFocus.current = false
+        // Both halves are needed and neither is enough. Preventing the restore
+        // stops Radix putting the caret back on `<body>`; focusing here rather
+        // than letting the box's own `autoFocus` do it is because that fires
+        // while this dialog's focus scope is still up -- the trap pulls the
+        // caret straight back out, and the box ends up on screen with nothing
+        // typing into it. This event is the moment the scope lets go.
+        event.preventDefault()
+        onFocusReply()
+      }}
     >
       <PaletteBody
         entries={entries}
         actions={actions}
         failure={failure}
+        replyOpen={replyOpen}
         onRun={run}
         onIntent={(intent) => {
           onIntent(intent)
@@ -331,6 +391,8 @@ export interface PaletteBodyProps {
   entries: PaletteEntry[]
   actions: PaletteActionEntry[]
   failure: string | null
+  /** What the reply row offers to do: show the box, or put it away. */
+  replyOpen: boolean
   onRun: (action: PaletteAction) => void
   onIntent: (intent: MenuIntent) => void
 }
@@ -343,7 +405,14 @@ export interface PaletteBodyProps {
  * vitest's node environment, so the rows -- which ones there are, and what they
  * say -- would otherwise be reachable only from Playwright.
  */
-export function PaletteBody({ entries, actions, failure, onRun, onIntent }: PaletteBodyProps) {
+export function PaletteBody({
+  entries,
+  actions,
+  failure,
+  replyOpen,
+  onRun,
+  onIntent,
+}: PaletteBodyProps) {
   return (
     <Command>
       <CommandInput placeholder="Jump to session/window/pane…" />
@@ -404,6 +473,13 @@ export function PaletteBody({ entries, actions, failure, onRun, onIntent }: Pale
           ))}
         </CommandGroup>
         <CommandSeparator />
+        {/*
+          One row per header button, which is the rule this group did not keep
+          until Task 23: `end-mode` was left out as out of Task 17's scope, and
+          the header is where a phone has the least room. The reply toggle is
+          here for the same reason -- it is the affordance the box now depends
+          on, and a chord-driven palette is the fastest way to it.
+        */}
         <CommandGroup heading="Terminal">
           <CommandItem
             value="copy mode scrollback search"
@@ -412,6 +488,22 @@ export function PaletteBody({ entries, actions, failure, onRun, onIntent }: Pale
             <Copy aria-hidden />
             Enter copy mode
             <CommandShortcut>scrollback</CommandShortcut>
+          </CommandItem>
+          <CommandItem
+            value="end mode leave copy mode exit scrollback"
+            onSelect={() => onRun({ kind: 'end-mode' })}
+          >
+            <CopySlash aria-hidden />
+            Leave copy mode
+            <CommandShortcut>typing reaches the pane</CommandShortcut>
+          </CommandItem>
+          <CommandItem
+            value="reply box write type answer agent keyboard"
+            onSelect={() => onRun({ kind: 'toggle-reply' })}
+          >
+            <MessageSquare aria-hidden />
+            {replyToggleLabel(replyOpen)}
+            <CommandShortcut>{replyOpen ? 'gives the rows back' : 'costs two rows'}</CommandShortcut>
           </CommandItem>
         </CommandGroup>
       </CommandList>

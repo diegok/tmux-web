@@ -443,6 +443,25 @@ export async function focusTerminal(page: Page): Promise<void> {
 }
 
 /**
+ * The reply box, which is off until somebody asks for it.
+ *
+ * Task 23 made that the rule on every device: on a desktop the pane already is
+ * the text box, and this one costs rows of a window the owner's own tmux client
+ * shares. So every test that wants the box presses the toggle first, and the
+ * press is part of what those tests prove -- a suite that could reach the box
+ * without one would be a suite passing against the shape the owner rejected.
+ */
+export function replyBox(page: Page): Locator {
+  return page.getByRole('textbox', { name: 'Reply to this pane' })
+}
+
+/** Press the header toggle and wait for the box it shows. */
+export async function openReplyBox(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Reply box' }).click()
+  await replyBox(page).waitFor()
+}
+
+/**
  * Enroll a browser: open the link the CLI printed, wait for the redeem to land
  * on the SPA, and wait for the terminal to go live.
  *

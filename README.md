@@ -132,14 +132,23 @@ connections rather than only failing the next request.
 - Scroll with the mouse wheel to enter tmux's copy mode.
 - `Shift+click` or `Ctrl+click` a URL to open it. Real hyperlinks (`gh`, `delta`,
   `eza`) and bare URLs both work; a plain click still goes to tmux.
-- **Answer an agent from the box under the terminal.** Enter sends what you
-  typed and a Return; `Shift+Enter` gives you another line; the small `No ⏎`
-  button sends the text on its own, which is what a `y/n` prompt or a
-  single-key menu wants. The box cancels the pane's copy mode before the bytes
-  land, because prose contains `q` and copy mode would eat the reply at the
-  first one. Changing pane clears the draft and says so — the bytes follow the
-  selection, and half a sentence meant for one agent must not arrive at
-  another's prompt.
+- **Answer an agent from a box under the terminal, when you ask for one.** The
+  **Reply box** button in the header shows it, and so does the palette; Escape
+  puts it away again. It is off until you ask, on every device: in a terminal
+  you already type into the pane, and a second text box costs rows of a window
+  your own tmux client shares. Each browser remembers its own answer, so a phone
+  can keep the box open while the laptop keeps it shut. When it is open the
+  terminal shrinks to fit it — the box takes its own space rather than lying
+  over the bottom two lines, which are the prompt and the question you are
+  answering.
+
+  Enter sends what you typed and a Return; `Shift+Enter` gives you another line;
+  the small `No ⏎` button sends the text on its own, which is what a `y/n`
+  prompt or a single-key menu wants. The box cancels the pane's copy mode before
+  the bytes land, because prose contains `q` and copy mode would eat the reply
+  at the first one. Changing pane clears the draft and says so — the bytes
+  follow the selection, and half a sentence meant for one agent must not arrive
+  at another's prompt.
 - **Paste several lines and they arrive as several lines, not several turns.**
   A multi-line paste goes out wrapped in bracketed paste, which every one of
   the three agents asks for and honours — opencode even shows it as a
@@ -285,6 +294,10 @@ session and are therefore shared with anyone else attached:
   both typing and resizing count. The other client is then *clipped*: it draws
   the top-left corner of the window and the rest simply is not there, which is
   what makes vim look broken in a browser narrower than the terminal beside it.
+  Two things deliberately do *not* travel: a phone's soft keyboard opening,
+  which would otherwise drag everyone's window down to keyboard height, and any
+  other resize that arrives while a box outside the terminal has the caret. What
+  does travel is a resize you asked for, the reply box's own toggle included.
 - **Copy mode** — scrolling back in the browser scrolls the local view too.
 - **Active pane** — clicking a pane in the sidebar moves it for every client.
 

@@ -89,6 +89,16 @@ import '@wterm/react/css'
  */
 export const RESIZE_DEBOUNCE_MS = 150
 
+/**
+ * How long an arming of `noteLayoutChange` stays good for.
+ *
+ * The layout change it announces lands in the same frame or the next one, so
+ * this is generous by two orders of magnitude -- and short next to anything a
+ * person does, which is the half that matters: an arming left standing is a
+ * window in which a soft keyboard's resize would be taken for the user's own.
+ */
+export const LAYOUT_CHANGE_GRACE_MS = 1_000
+
 /** First reconnect delay, doubling per consecutive failure. */
 export const BACKOFF_BASE_MS = 500
 
@@ -538,6 +548,13 @@ export class TerminalSession {
    */
   #heldCols = 0
   #heldRows = 0
+  /**
+   * The deadline on one arming of `noteLayoutChange`, or 0 for none.
+   *
+   * A timestamp rather than a boolean so an arming that never gets its resize
+   * cannot sit here waiting for the next one, whatever that turns out to be.
+   */
+  #layoutChangeUntil = 0
 
   #resizeTimer: ReturnType<typeof setTimeout> | null = null
   #retryTimer: ReturnType<typeof setTimeout> | null = null
@@ -688,6 +705,16 @@ export class TerminalSession {
     if (this.#stopped || cols <= 0 || rows <= 0) return
     this.#cols = cols
     this.#rows = rows
+    // The user asked for this one, so it goes out whatever has focus -- and it
+    // becomes the size being held, which is what makes the *next* resize (the
+    // soft keyboard that rises a moment after the toggle) hold at the size the
+    // toggle produced rather than the one before it. See `noteLayoutChange`.
+    if (this.#takeLayoutChange()) {
+      this.#heldCols = cols
+      this.#heldRows = rows
+      this.#scheduleResize()
+      return
+    }
     // Recorded first and *then* skipped: the class keeps its own record of what
     // wterm reported so that lifting suppression can send the current size,
     // rather than a stale field being restored. A return above these two lines
@@ -725,6 +752,41 @@ export class TerminalSession {
     // behind it -- and the first of those two is the frame that moves the
     // owner's terminal.
     this.#scheduleResize()
+  }
+
+  /**
+   * The app is about to change the terminal's box because the user asked it to,
+   * so take the next size it reports even if a text control has focus.
+   *
+   * The reply box is the caller. It is a flex sibling of the terminal, so
+   * opening it makes the terminal shorter -- deliberately, that being the whole
+   * of Task 23 -- and the toggle also focuses it. React focuses an `autoFocus`
+   * element during the commit, which is *before* the browser lays out and
+   * before wterm's `ResizeObserver` fires, so without this the honest resize
+   * arrives into a session that has already armed suppression and is swallowed:
+   * tmux goes on drawing the pane at rows that are no longer on screen until
+   * something unrelated lifts the hold.
+   *
+   * What keeps this from being a hole in the protection is that it is one-shot
+   * and it expires. Suppression's real subject -- a phone's soft keyboard --
+   * arrives as the *second* resize after the toggle, and the second resize is
+   * held like any other. So a resize the user caused reaches tmux and a resize
+   * the keyboard caused does not, which is a distinction focus alone cannot
+   * make: by the time either arrives, the same textarea has focus in both.
+   *
+   * Called before the state change rather than after, so the arming is in place
+   * whichever order the browser then produces.
+   */
+  noteLayoutChange(): void {
+    this.#layoutChangeUntil = this.#now() + LAYOUT_CHANGE_GRACE_MS
+  }
+
+  /** Spend an arming if there is a live one. One resize, once. */
+  #takeLayoutChange(): boolean {
+    if (this.#layoutChangeUntil === 0) return false
+    const live = this.#now() < this.#layoutChangeUntil
+    this.#layoutChangeUntil = 0
+    return live
   }
 
   /**
@@ -1156,6 +1218,12 @@ export interface TerminalHandle {
   send(bytes: string | Uint8Array): boolean
   /** Pop the pane's copy-mode layer. See internal/front/ws.go's "end-mode". */
   endMode(pane: string): boolean
+  /**
+   * The app is about to resize the terminal on purpose. See
+   * `TerminalSession.noteLayoutChange`: without it the reply box's own toggle
+   * is swallowed by the suppression the same toggle arms.
+   */
+  noteLayoutChange(): void
   focus(): void
   /** Reconnect immediately, ignoring the backoff. */
   retry(): void
@@ -1265,6 +1333,7 @@ export function Terminal({ session, label, url, className, onStatusChange, ref }
       // The transport, deliberately: `sessionRef.current.write`, never `paint`.
       send: (bytes: string | Uint8Array) => sessionRef.current?.write(bytes) ?? false,
       endMode: (pane: string) => sessionRef.current?.endMode(pane) ?? false,
+      noteLayoutChange: () => sessionRef.current?.noteLayoutChange(),
       focus,
       retry: () => sessionRef.current?.retryNow(),
     }),

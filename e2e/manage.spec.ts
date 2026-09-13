@@ -33,10 +33,23 @@ import {
 import type { TmuxWeb } from './harness'
 import type { Page } from '@playwright/test'
 
-/** `tmux list-sessions`, tolerating there being no server at all. */
+/**
+ * The sessions a person would say exist, tolerating there being no server.
+ *
+ * The tab's own throwaway session is filtered out, and by the `@tmux_web_owned`
+ * option rather than by the `_web-` prefix, because that is the rule the daemon
+ * itself uses -- the prefix stays the user's to take (see `internal/tmux/target.go`).
+ * Without this filter an assertion on the exact session list races the attach:
+ * the throwaway appears a moment after a session is created, and once it has
+ * appeared it never goes away, so a poll that has not already matched never will.
+ */
 function sessions(tmuxWeb: TmuxWeb): string[] {
   try {
-    return tmuxWeb.tmux('list-sessions', '-F', '#{session_name}').split('\n')
+    return tmuxWeb
+      .tmux('list-sessions', '-F', '#{session_name}\t#{@tmux_web_owned}')
+      .split('\n')
+      .filter((line) => line.split('\t')[1] !== '1')
+      .map((line) => line.split('\t')[0])
   } catch {
     return []
   }

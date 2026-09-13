@@ -43,6 +43,18 @@ func newEndModeFixture(t *testing.T) *endModeFixture {
 	if len(panes) != 2 {
 		t.Fatalf("want a split window, got panes %q", panes)
 	}
+	// Both panes run a known shell rather than whatever tmux would have started.
+	// That is $SHELL -- the developer's login shell, rc files and all -- and the
+	// no-mode case below reads a command's OUTPUT back out of a pane to prove the
+	// pane's program received the reply. A login shell that prints a banner,
+	// takes seconds to reach a prompt, or (as one has been observed to do under
+	// a sandbox) spins at full tilt and never reaches one at all, would decide
+	// what that case measures on a machine nobody can look at from here.
+	// /bin/sh reads no rc file when it is interactive.
+	for _, pane := range panes {
+		f.srv.Run(t, "respawn-pane", "-k", "-t", pane, "/bin/sh")
+	}
+
 	// The active pane belongs to the window, and a grouped session shares its
 	// windows, so this is the pane the tab lands on too -- which is exactly the
 	// pane a default-target expression would reach for.
@@ -91,6 +103,31 @@ func (e *endModeFixture) endMode(t *testing.T, pane string) {
 		msg = `{"type":"end-mode","pane":"` + pane + `"}`
 	}
 	wsWrite(t, e.c, ptybridge.EncodeControl([]byte(msg)))
+}
+
+// echo types `echo <split>` into the tab's own pane -- %b, which is where the
+// keystrokes of a reply land -- and waits for joined to come back out of the
+// socket.
+//
+// split and joined are the same marker written two ways, and the difference is
+// what makes this an assertion about the pane's program rather than about the
+// terminal. A pty echoes what is typed at it whether or not anything is alive
+// to read it: waiting for the characters as they were sent is satisfied by a
+// pane running `sleep`, or by no program at all. Splitting the marker with a
+// pair of empty quotes means the input line reads `echo REA""DY` while READY
+// can only be a line the shell itself printed, so the wait cannot be satisfied
+// until the shell has read the line and run it.
+//
+// The guard is there because "simplifying" the marker back into one piece is
+// the natural edit, and it would quietly restore the weaker assertion.
+func (e *endModeFixture) echo(t *testing.T, split, joined string) {
+	t.Helper()
+	if strings.Contains(split, joined) {
+		t.Fatalf("marker %q still contains %q, so the tty echo of the input line "+
+			"satisfies this wait on its own and the shell need not have run", split, joined)
+	}
+	wsWrite(t, e.c, ptybridge.EncodeData([]byte("echo "+split+"\r")))
+	wsReadUntil(t, e.c, joined, 15*time.Second)
 }
 
 // barrier makes every assertion in this file a plain read rather than a poll.
@@ -168,13 +205,20 @@ func TestEndModeOnAPaneInNoModeIsNotAnError(t *testing.T) {
 	e := newEndModeFixture(t)
 	e.wantMode(t, "before", e.a, "", "0")
 
+	// The shell in the tab's own pane is made to run something before the
+	// refusal, which is the only signal that says "reading and executing"
+	// rather than "the process exists". Without it a reply that arrived before
+	// the shell did would be indistinguishable from one that never arrived.
+	e.echo(t, `REA""DY`, "READY")
+
 	e.endMode(t, e.a)
 
-	// The reply itself, typed straight after. It reaches the tab's own pane,
-	// which is %b -- proving both that the refusal did not close the socket and
-	// that the handler went on to the write it exists to protect.
-	wsWrite(t, e.c, ptybridge.EncodeData([]byte("echo reply-still-arrives\r")))
-	wsReadUntil(t, e.c, "reply-still-arrives", 10*time.Second)
+	// The reply itself, typed straight after. Its output comes back through the
+	// same socket the refusal was sent on, which proves three things at once:
+	// the refusal did not close the socket, the handler went on to the write it
+	// exists to protect, and the shell on the far end read that write and ran
+	// it. The last of those is why the marker is split -- see echo.
+	e.echo(t, `reply-still-arri""ves`, "reply-still-arrives")
 
 	e.wantMode(t, "after", e.a, "", "0")
 	// A `send-keys` missing its -X would have typed the word instead, and on a

@@ -110,6 +110,12 @@ type Manager interface {
 	KillSessionID(ctx context.Context, sessionID string) error
 	KillWindow(ctx context.Context, windowID string) error
 	KillPane(ctx context.Context, paneID string) error
+	// CaptureRange is the one read on this interface: the capture panel's
+	// bounded scrollback, GET /api/panes/{id}/capture. It is here rather than
+	// on a second interface for the reason SnapshotSource.PollNow is on that
+	// one -- it is the same object either way, and a fake that forgets it is a
+	// compile error, which is the outcome worth having.
+	CaptureRange(ctx context.Context, paneID string, lines int) (text string, truncated bool, err error)
 }
 
 // -- create -----------------------------------------------------------------

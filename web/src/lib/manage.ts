@@ -232,8 +232,11 @@ export async function performManage(
  * "can't find pane: %7" tells the owner what happened where "management
  * failed" does not. `Protect` answers 401 in plain text, though, so a body that
  * is not JSON leaves the status as all there is to say.
+ *
+ * Exported for `capture.ts`, which reads the same `{"error": ...}` from the
+ * same middleware: a second copy of this is a copy that drifts.
  */
-async function refusal(res: Response): Promise<string> {
+export async function refusal(res: Response): Promise<string> {
   try {
     const body = (await res.json()) as { error?: unknown }
     if (typeof body?.error === 'string' && body.error !== '') return body.error

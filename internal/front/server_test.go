@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -299,6 +300,13 @@ func TestEveryRouteEnforcesTheAuthItsRowSpecifies(t *testing.T) {
 		{name: "devices list", method: "GET", target: "/api/devices", needsCookie: true, authorized: 200},
 		{name: "mint", method: "POST", target: "/api/devices", body: `{"name":"phone"}`, needsCookie: true, needsOrigin: true, authorized: 200},
 		{name: "revoke", method: "DELETE", target: "/api/devices/nope", needsCookie: true, needsOrigin: true, authorized: 404},
+		// A read, so the cookie alone -- but a present Origin must still match,
+		// which the sibling-subdomain leg below asserts for every row. The 400
+		// is this fixture's empty throwaway server having no pane %0 to
+		// capture: what the row is about is which credential the route
+		// demands, and a 400 is a handler that ran. The capture endpoint's own
+		// behaviour is tested further down.
+		{name: "capture", method: "GET", target: "/api/panes/%250/capture", needsCookie: true, authorized: 400},
 		{name: "terminal", method: "GET", target: "/ws", needsCookie: true, needsOrigin: true, authorized: -1},
 	}
 
@@ -1172,4 +1180,415 @@ func enrolledStore(t *testing.T) (*auth.Store, string, string) {
 		t.Fatalf("AddDevice: %v", err)
 	}
 	return s, token, path
+}
+
+// ----------------------------------------------------------------- capture
+
+// GET /api/panes/{id}/capture, the panel's one read.
+//
+// THE INSTRUMENT, and it is the choice the task asked to be made explicitly:
+// this file's manager is a REAL tmux client against a throwaway server (see
+// newFixture), and there is no recording fake to interrogate -- so the depth
+// the handler sends is read off a PATH shim that logs every tmux argv, the
+// instrument internal/tmux already uses for this question in
+// TestOnePollForksTmuxOnce. It is here rather than in the JSON because the
+// depth is invisible in the output: tmux clamps a start line to the history it
+// actually has, so `-S -1` and `-S -5000` return the same bytes from a
+// 24-line pane. A test that asserted on the text instead would pass against a
+// handler that ignored `lines` entirely, and one that asserted only on the
+// response's own `lines` field would pass against a handler that reported one
+// depth and asked tmux for another.
+
+// tmuxArgv installs a tmux shim on PATH and returns a reader for what it
+// recorded. Everything forked BEFORE the call is invisible to it, so a fixture
+// is seeded first and only the request under test is counted.
+func tmuxArgv(t *testing.T) func() []string {
+	t.Helper()
+	real, err := exec.LookPath("tmux")
+	if err != nil {
+		t.Fatalf("tmux not found: %v", err)
+	}
+	dir := t.TempDir()
+	log := filepath.Join(dir, "argv")
+	shim := "#!/bin/sh\necho \"$@\" >> " + log + "\nexec " + real + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "tmux"), []byte(shim), 0o755); err != nil {
+		t.Fatalf("write shim: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return func() []string {
+		b, err := os.ReadFile(log)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // nothing forked tmux at all
+		}
+		if err != nil {
+			t.Fatalf("reading the argv log: %v", err)
+		}
+		return strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	}
+}
+
+// captures are the recorded invocations that are actually a capture-pane. The
+// rest of the log is the fixture's own housekeeping.
+func captures(argv []string) []string {
+	var out []string
+	for _, line := range argv {
+		if strings.Contains(line, "capture-pane") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// theCapture is the one capture-pane the request under test made, failing when
+// there is not exactly one: a handler that forked twice is a handler whose
+// first fork nothing would have noticed.
+func theCapture(t *testing.T, argv []string) string {
+	t.Helper()
+	got := captures(argv)
+	if len(got) != 1 {
+		t.Fatalf("the request made %d capture-pane invocations, want 1: %q", len(got), argv)
+	}
+	return got[0]
+}
+
+// capturePane seeds a pane whose scrollback holds a known marker, and waits for
+// it to arrive. The wait is on the FIXTURE and never around the call under
+// test: a capture that returned nothing would otherwise fail as a timeout
+// rather than as an assertion.
+func capturePane(t *testing.T, f *manageFixture, marker string) string {
+	t.Helper()
+	out := f.srv.Run(t, "new-session", "-d", "-s", "capture", "-x", "80", "-y", "24",
+		"-P", "-F", "#{pane_id}", "sh", "-c", "echo "+marker+"; exec cat")
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if strings.Contains(f.srv.Run(t, "capture-pane", "-p", "-t", out), marker) {
+			return out
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the fixture pane %s never printed %q", out, marker)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func captureBody(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	var body map[string]any
+	decode(t, rec, &body)
+	return body
+}
+
+// The ordinary capture: what comes back, and how deep it went.
+func TestCaptureReturnsAPanesScrollbackAndSaysWhenItWasTaken(t *testing.T) {
+	f := newManageFixture(t)
+	pane := capturePane(t, f, "capture-fixture-marker")
+	argv := tmuxArgv(t)
+
+	before := time.Now().UnixMilli()
+	rec := f.ok("GET", "/api/panes/"+pathID(pane)+"/capture", "")
+	after := time.Now().UnixMilli()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET capture = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	body := captureBody(t, rec)
+
+	// Every field the panel reads, asserted on the decoded map rather than on a
+	// struct: a typed decode would fill in the zero value for a field the
+	// daemon stopped sending and the test would never notice.
+	for _, key := range []string{"paneId", "text", "lines", "truncated", "capturedAt"} {
+		if _, ok := body[key]; !ok {
+			t.Errorf("the response has no %q field: %v", key, body)
+		}
+	}
+	if body["paneId"] != pane {
+		t.Errorf("paneId = %v, want %q -- the id was not decoded back from the path", body["paneId"], pane)
+	}
+	text, _ := body["text"].(string)
+	if !strings.Contains(text, "capture-fixture-marker") {
+		t.Errorf("the capture does not contain the pane's own output: %q", text)
+	}
+	if body["truncated"] != false {
+		t.Errorf("truncated = %v for a 24-line pane, want false", body["truncated"])
+	}
+	if body["lines"] != float64(1000) {
+		t.Errorf("lines = %v, want 1000: the default depth is what was used", body["lines"])
+	}
+
+	// Unix MILLISECONDS, from the daemon's clock. The magnitude is asserted as
+	// well as the window, because seconds would still sit inside a window
+	// computed from a browser that agreed with it -- 1e12 ms is 2001, and any
+	// seconds value is orders below it.
+	at, ok := body["capturedAt"].(float64)
+	if !ok {
+		t.Fatalf("capturedAt = %v, want a number", body["capturedAt"])
+	}
+	if at <= 1e12 {
+		t.Errorf("capturedAt = %.0f, which is not unix milliseconds", at)
+	}
+	if at < float64(before) || at > float64(after) {
+		t.Errorf("capturedAt = %.0f, outside the request's own window [%d, %d]", at, before, after)
+	}
+
+	// The depth, where it is visible: on the argument list.
+	if got := theCapture(t, argv()); !strings.Contains(got, "-S -1000") {
+		t.Errorf("the default capture ran %q, want -S -1000", got)
+	}
+}
+
+// The caller's depth reaches tmux as the caller asked for it.
+func TestCaptureSendsTheDepthTheCallerAskedFor(t *testing.T) {
+	f := newManageFixture(t)
+	pane := capturePane(t, f, "depth-marker")
+	argv := tmuxArgv(t)
+
+	rec := f.ok("GET", "/api/panes/"+pathID(pane)+"/capture?lines=2000", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET capture?lines=2000 = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	if got := theCapture(t, argv()); !strings.Contains(got, "-S -2000") {
+		t.Errorf("?lines=2000 ran %q, want -S -2000", got)
+	}
+	if body := captureBody(t, rec); body["lines"] != float64(2000) {
+		t.Errorf("lines = %v, want 2000", body["lines"])
+	}
+}
+
+// An absent parameter and an empty one are the same request: neither names a
+// depth, so both get the default. Pinned because it is a choice and not an
+// accident -- the alternative, 400 for `?lines=`, is defensible too.
+func TestCaptureTreatsAnEmptyLinesAsUnspecified(t *testing.T) {
+	f := newManageFixture(t)
+	pane := capturePane(t, f, "empty-marker")
+	argv := tmuxArgv(t)
+
+	rec := f.ok("GET", "/api/panes/"+pathID(pane)+"/capture?lines=", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET capture?lines= = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	if got := theCapture(t, argv()); !strings.Contains(got, "-S -1000") {
+		t.Errorf("?lines= ran %q, want the default -S -1000", got)
+	}
+}
+
+// A depth past the maximum is clamped rather than refused -- friendlier, and
+// the same judgement CaptureRange makes for a caller inside the daemon.
+//
+// 5000 is written out. Derived from the daemon's own constant it would move
+// with any mutant that retargets it and could never fail.
+func TestCaptureClampsADepthPastTheMaximum(t *testing.T) {
+	f := newManageFixture(t)
+	pane := capturePane(t, f, "clamp-marker")
+	argv := tmuxArgv(t)
+
+	rec := f.ok("GET", "/api/panes/"+pathID(pane)+"/capture?lines=999999", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET capture?lines=999999 = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	if got := theCapture(t, argv()); !strings.Contains(got, "-S -5000") {
+		t.Errorf("?lines=999999 ran %q, want it clamped to -S -5000", got)
+	}
+	// And the answer says what was actually used, so the panel cannot claim a
+	// depth the daemon never asked for.
+	if body := captureBody(t, rec); body["lines"] != float64(5000) {
+		t.Errorf("lines = %v, want 5000", body["lines"])
+	}
+}
+
+// `lines` becomes an element of an argv, so nothing unvalidated may reach it.
+//
+// Both halves are asserted: the 400, and that tmux was never forked at all.
+// Without the second, a handler that defaulted a bad value and captured
+// anyway would fail only on the status code -- and a handler that passed
+// "1e3" through to tmux, which rejects it, would answer 400 as well and look
+// identical from the outside.
+//
+// THE LAST CASE IS THE ONLY ONE THAT CATCHES AN IGNORED PARSE ERROR, and it is
+// not the one the plan named. `strconv.Atoi("abc")` returns 0 with an error, so
+// a handler that ignored the error would still be refused by the "at least 1"
+// check and the obvious mutant -- a bare Atoi -- SURVIVES the whole of the rest
+// of this table. Measured. A value past int64 is the case that separates them:
+// Atoi returns MaxInt64 with ErrRange, which passes "at least 1" and comes back
+// 200 with a capture clamped to the maximum.
+func TestCaptureRefusesALinesThatIsNotAPositiveInteger(t *testing.T) {
+	for _, raw := range []string{"abc", "-1", "0", "1e3", "1.5", "%201000", "1000%00", "０", "9999999999999999999999"} {
+		t.Run(raw, func(t *testing.T) {
+			f := newManageFixture(t)
+			pane := capturePane(t, f, "reject-marker")
+			argv := tmuxArgv(t)
+
+			rec := f.ok("GET", "/api/panes/"+pathID(pane)+"/capture?lines="+raw, "")
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("?lines=%s = %d (%s), want 400", raw, rec.Code, rec.Body.String())
+			}
+			var body map[string]string
+			decode(t, rec, &body)
+			if body["error"] == "" {
+				t.Errorf("the refusal says nothing: %s", rec.Body.String())
+			}
+			if got := captures(argv()); len(got) != 0 {
+				t.Errorf("?lines=%s reached tmux as %q; a value that did not validate must never become an argument", raw, got)
+			}
+		})
+	}
+}
+
+// The id in the path is percent-encoded, as every management route's is.
+func TestCaptureAddressesAPaneByItsEncodedId(t *testing.T) {
+	f := newManageFixture(t)
+	pane := capturePane(t, f, "encoded-marker")
+	if pane != "%0" {
+		t.Fatalf("expected the first pane of a fresh server to be %%0, got %q", pane)
+	}
+	argv := tmuxArgv(t)
+
+	rec := f.ok("GET", "/api/panes/%250/capture", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/panes/%%250/capture = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	// Decoded on the way to tmux: "%250" would name no pane at all.
+	if got := theCapture(t, argv()); !strings.Contains(got, "-t %0") {
+		t.Errorf("the capture ran %q, want it targeted at %%0", got)
+	}
+}
+
+// The un-encoded form never reaches the mux: "%0" is an invalid percent-escape
+// and net/http answers 400 while parsing the request line. Asserted over a real
+// HTTP conversation, as the management routes' own version of this is.
+func TestAnUnencodedPaneIdIsRejectedBeforeTheCaptureRoute(t *testing.T) {
+	f := newManageFixture(t)
+	pane := capturePane(t, f, "unencoded-marker")
+
+	resp := f.wire(t, "GET /api/panes/"+pane+"/capture HTTP/1.1")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("GET /api/panes/%s/capture = %d, want 400 from net/http", pane, resp.StatusCode)
+	}
+}
+
+// A pane that is gone, and an id that was never a pane. The first is the
+// ordinary failure -- a row up to a poll old -- and the panel shows tmux's own
+// words; the second must not reach tmux at all, which is what ValidatePaneID
+// inside CaptureRange is for.
+func TestCaptureOfAPaneThatIsNotThere(t *testing.T) {
+	t.Run("a stale id answers with tmux's own words", func(t *testing.T) {
+		f := newManageFixture(t)
+		capturePane(t, f, "stale-marker")
+
+		rec := f.ok("GET", "/api/panes/%2599/capture", "")
+		if rec.Code == http.StatusOK {
+			t.Fatalf("capturing %%99 succeeded: %s", rec.Body.String())
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("capturing a dead pane = %d, want 400", rec.Code)
+		}
+		var body map[string]string
+		decode(t, rec, &body)
+		if !strings.Contains(body["error"], "%99") {
+			t.Errorf("the error does not name the pane that was asked for: %q", body["error"])
+		}
+	})
+
+	t.Run("an id of the wrong shape never becomes a target", func(t *testing.T) {
+		f := newManageFixture(t)
+		capturePane(t, f, "shape-marker")
+		argv := tmuxArgv(t)
+
+		rec := f.ok("GET", "/api/panes/notapane/capture", "")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("capturing \"notapane\" = %d (%s), want 400", rec.Code, rec.Body.String())
+		}
+		// tmux resolves an unrecognised target to "whatever is current" for
+		// some spellings and exits 0, which would show the browser another
+		// pane's scrollback under this name.
+		if got := captures(argv()); len(got) != 0 {
+			t.Errorf("an id of the wrong shape reached tmux as %q", got)
+		}
+	})
+}
+
+// The route is behind the device cookie, like every other /api/ route. An
+// unprotected capture hands a stranger the contents of the owner's terminals,
+// which is the worst thing this endpoint could ship.
+func TestCaptureIsBehindTheDeviceCookie(t *testing.T) {
+	f := newManageFixture(t)
+	pane := capturePane(t, f, "auth-marker")
+	argv := tmuxArgv(t)
+	target := "/api/panes/" + pathID(pane) + "/capture"
+
+	if code := f.refused("GET", target, ""); code != http.StatusUnauthorized {
+		t.Errorf("uncredentialed GET %s = %d, want 401", target, code)
+	}
+	// A page on a sibling subdomain: same site, so it carries the cookie.
+	if code := f.refused("GET", target, "", authed(f.token), origin(siblingOrigin)); code != http.StatusForbidden {
+		t.Errorf("GET %s from %s = %d, want 403", target, siblingOrigin, code)
+	}
+	if got := captures(argv()); len(got) != 0 {
+		t.Errorf("a refused request still captured the pane: %q", got)
+	}
+
+	// And the credentialed one does reach the handler, so the two refusals
+	// above are not passing against a route that does not exist.
+	if rec := f.ok("GET", target, ""); rec.Code != http.StatusOK {
+		t.Fatalf("authorized GET %s = %d (%s), want 200", target, rec.Code, rec.Body.String())
+	}
+}
+
+// A capture runs under the same deadline every management verb does, and for
+// the same reason: it runs a tmux command on the request goroutine, and a
+// wedged server would otherwise hold the request until the browser gave up.
+func TestACaptureRunsUnderADeadline(t *testing.T) {
+	m := &deadlineManager{}
+	f := newFixture(t, withManager(m))
+
+	if rec := f.ok("GET", "/api/panes/%250/capture", ""); rec.Code != http.StatusOK {
+		t.Fatalf("GET capture = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	calls := m.seenCalls()
+	if len(calls) != 1 {
+		t.Fatalf("the capture reached the manager %d times, want 1: %+v", len(calls), calls)
+	}
+	if !calls[0].bounded {
+		t.Fatal("the capture ran on the bare request context: a wedged tmux would hold this " +
+			"request until the browser gave up on it")
+	}
+	if calls[0].left < 4*time.Second || calls[0].left > 5*time.Second {
+		t.Errorf("the capture had %v left on its deadline, want ~5s", calls[0].left)
+	}
+}
+
+// And when it runs out, the answer is the 504 every other timed-out tmux
+// command gets -- not a 400, which would tell the owner their request was
+// wrong when it was not.
+func TestAWedgedCaptureSaysSoInsteadOfHanging(t *testing.T) {
+	defer front.SetManageTimeout(60 * time.Millisecond)()
+
+	f := newFixture(t, withManager(&deadlineManager{block: true}))
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- f.ok("GET", "/api/panes/%250/capture", "") }()
+
+	var rec *httptest.ResponseRecorder
+	select {
+	case rec = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a capture against a tmux that never answered never came back")
+	}
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("a timed-out capture = %d (%s), want 504", rec.Code, rec.Body.String())
+	}
+}
+
+// A capture forces no poll.
+//
+// Every management verb forces one, because it changed the tree and the
+// browser is about to re-fetch it. This changed nothing, and the poll is not
+// free: it is a tmux fork plus a capture per agent pane, and the panel's
+// Recapture button is a thing the owner can lean on.
+func TestACaptureForcesNoPoll(t *testing.T) {
+	f := newFixture(t, withManager(&deadlineManager{}))
+
+	if rec := f.ok("GET", "/api/panes/%250/capture", ""); rec.Code != http.StatusOK {
+		t.Fatalf("GET capture = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+	if n := f.snaps.pollCount(); n != 0 {
+		t.Errorf("a capture forced %d polls; it changed nothing for one to catch up with", n)
+	}
 }

@@ -164,26 +164,27 @@ func localIdentity() (osUser, hostname string) {
 // The auth column of the plan's route table is expressed here and nowhere else,
 // so it can be read in one screen:
 //
-//	GET    /                    device cookie          SPA shell
-//	GET    /assets/             device cookie          hashed SPA bundles
-//	GET    /enroll              none                   reads location.hash
-//	POST   /api/enroll          none, rate limited     redeem -> set cookie
-//	GET    /api/snapshot        device cookie          cached poller output
-//	GET    /api/user            device cookie          footer identity
-//	GET    /api/devices         device cookie          list
-//	POST   /api/devices         device cookie + Origin mint a link
-//	DELETE /api/devices/{id}    device cookie + Origin revoke
-//	GET    /ws                  device cookie + Origin terminal
-//	POST   /api/sessions        device cookie + Origin create
-//	POST   /api/windows         device cookie + Origin create
-//	POST   /api/panes           device cookie + Origin split
-//	PATCH  /api/sessions/{id}   device cookie + Origin rename
-//	PATCH  /api/windows/{id}    device cookie + Origin rename
-//	PATCH  /api/panes/{id}      device cookie + Origin label
-//	POST   /api/panes/{id}/zoom device cookie + Origin toggle zoom
-//	DELETE /api/sessions/{id}   device cookie + Origin kill, confirmed
-//	DELETE /api/windows/{id}    device cookie + Origin kill, confirmed
-//	DELETE /api/panes/{id}      device cookie + Origin kill, confirmed
+//	GET    /                       device cookie          SPA shell
+//	GET    /assets/                device cookie          hashed SPA bundles
+//	GET    /enroll                 none                   reads location.hash
+//	POST   /api/enroll             none, rate limited     redeem -> set cookie
+//	GET    /api/snapshot           device cookie          cached poller output
+//	GET    /api/user               device cookie          footer identity
+//	GET    /api/devices            device cookie          list
+//	POST   /api/devices            device cookie + Origin mint a link
+//	DELETE /api/devices/{id}       device cookie + Origin revoke
+//	GET    /ws                     device cookie + Origin terminal
+//	POST   /api/sessions           device cookie + Origin create
+//	POST   /api/windows            device cookie + Origin create
+//	POST   /api/panes              device cookie + Origin split
+//	PATCH  /api/sessions/{id}      device cookie + Origin rename
+//	PATCH  /api/windows/{id}       device cookie + Origin rename
+//	PATCH  /api/panes/{id}         device cookie + Origin label
+//	POST   /api/panes/{id}/zoom    device cookie + Origin toggle zoom
+//	GET    /api/panes/{id}/capture device cookie          scrollback, once
+//	DELETE /api/sessions/{id}      device cookie + Origin kill, confirmed
+//	DELETE /api/windows/{id}       device cookie + Origin kill, confirmed
+//	DELETE /api/panes/{id}         device cookie + Origin kill, confirmed
 //
 // Protect supplies the Origin requirement for the mutating routes: a present
 // Origin must match on every method, and an absent one is tolerated only on
@@ -271,6 +272,12 @@ func NewHandler(cfg HandlerConfig) (http.Handler, error) {
 	mux.Handle("DELETE /api/sessions/{id}", cfg.Auth.Protect(http.HandlerFunc(s.killSession)))
 	mux.Handle("DELETE /api/windows/{id}", cfg.Auth.Protect(http.HandlerFunc(s.killWindow)))
 	mux.Handle("DELETE /api/panes/{id}", cfg.Auth.Protect(http.HandlerFunc(s.killPane)))
+
+	// The capture panel's read. Not part of the block above -- it mutates
+	// nothing, so it takes the cookie without demanding an Origin header, the
+	// same terms as GET /api/snapshot. See capture.go for why that is safe and
+	// for what ?lines has to survive before it reaches tmux.
+	mux.Handle("GET /api/panes/{id}/capture", cfg.Auth.Protect(http.HandlerFunc(s.capturePane)))
 
 	if s.terminal != nil {
 		mux.Handle("GET /ws", cfg.Auth.ProtectSocket(s.trackDevice(s.terminal)))

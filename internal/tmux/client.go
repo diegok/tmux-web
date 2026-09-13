@@ -509,8 +509,14 @@ func (c *Client) Capture(ctx context.Context, paneID string) (string, error) {
 // history is 327 227 bytes and 7.6-8.0 ms. Depth is not what costs; the fork is.
 const MaxCaptureBytes = 256 << 10
 
-// maxCaptureLines is the deepest scrollback a caller may ask for.
-const maxCaptureLines = 5000
+// MaxCaptureLines is the deepest scrollback a caller may ask for.
+//
+// Exported because the HTTP handler validates ?lines against it before the
+// value becomes an argv element (internal/front, captureDepth). Two clamps at
+// two layers is the design -- the handler's rejects a bad request, this
+// package's keeps the method safe to call from anywhere -- but two different
+// NUMBERS would not be: the handler would report a depth tmux never used.
+const MaxCaptureLines = 5000
 
 // CaptureRange returns a pane's scrollback plus its visible screen, bounded.
 //
@@ -583,8 +589,8 @@ func captureRangeArgs(paneID string, lines int) []string {
 	if lines < 1 {
 		lines = 1
 	}
-	if lines > maxCaptureLines {
-		lines = maxCaptureLines
+	if lines > MaxCaptureLines {
+		lines = MaxCaptureLines
 	}
 	return []string{"capture-pane", "-p", "-J", "-S", "-" + strconv.Itoa(lines), "-t", paneID}
 }

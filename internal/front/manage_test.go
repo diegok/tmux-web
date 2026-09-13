@@ -724,6 +724,14 @@ func (m *deadlineManager) KillPane(ctx context.Context, _ string) error {
 	return m.seen(ctx, "kill pane")
 }
 
+// The one read on the interface. It is deliberately NOT in manageRoutes below:
+// a capture changes nothing, so it forces no poll, and the tests that walk
+// that table are about verbs that do. Its deadline and its 504 are covered in
+// server_test.go beside the rest of the capture route.
+func (m *deadlineManager) CaptureRange(ctx context.Context, _ string, _ int) (string, bool, error) {
+	return "", false, m.seen(ctx, "capture pane")
+}
+
 // manageRoutes is every management route, in the shape a request takes.
 var manageRoutes = []struct {
 	verb   string

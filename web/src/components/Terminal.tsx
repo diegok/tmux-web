@@ -301,6 +301,59 @@ export function parsePaneMessage(message: unknown): string | null {
 }
 
 /**
+ * The little of a focused element the suppression predicate reads. Structural
+ * so that its table test can pass plain objects: this suite runs under vitest's
+ * node environment, where there is no DOM to build an element from.
+ */
+export interface FocusTarget {
+  tagName?: string
+  hasAttribute?(name: string): boolean
+}
+
+/** The little of the terminal's host element the predicate reads. */
+export interface FocusHost {
+  contains(node: unknown): boolean
+}
+
+/**
+ * Whether a focused element means this tab must stop telling tmux its size.
+ *
+ * The terminal's size is a **window** property shared with every client on that
+ * window, and a resize counts as acting: a bare SIGWINCH makes a client the most
+ * recent one and drags the window to its dimensions, in both directions. So on a
+ * phone, the soft keyboard opening shrinks this tab's layout, the resize goes
+ * out, and the owner's own terminal on his laptop is yanked to the size of a
+ * phone with a keyboard open -- by nothing more than tapping a text box.
+ *
+ * The predicate is therefore "an app-owned text control has focus", which needs
+ * no keyboard detection at all and is exactly the interval the keyboard is up:
+ * a focused `input`, `textarea` or `[contenteditable]` that is **not inside the
+ * terminal host**. Nothing else counts -- not a focused button, not a dialog
+ * container, not `<body>`.
+ *
+ * The exclusion is the load-bearing half. wterm's own input surface is a
+ * focusable element inside the host, and focusing the *terminal* is the one case
+ * where a resize is legitimate and expected; a predicate that caught it would
+ * suppress on every ordinary click into the terminal and never lift.
+ *
+ * A null host suppresses, deliberately: it means this session has not been told
+ * where the terminal is, and holding the last size is the conservative half of
+ * that -- the failure it protects against is somebody else's terminal moving.
+ *
+ * The tags are matched against uppercase literals because that is what the DOM
+ * reports for HTML elements, which is all this app renders.
+ */
+export function suppressesResize(target: FocusTarget | null, host: FocusHost | null): boolean {
+  if (!target) return false
+  const textual =
+    target.tagName === 'INPUT' ||
+    target.tagName === 'TEXTAREA' ||
+    (target.hasAttribute?.('contenteditable') ?? false)
+  if (!textual) return false
+  return !host?.contains(target)
+}
+
+/**
  * The terminal socket's url for a base session.
  *
  * Same-origin by construction -- the daemon serves both the SPA and `/ws`, and
@@ -395,6 +448,13 @@ export interface TerminalSessionOptions {
    * Defaults to a `/api/snapshot` probe; injectable for tests.
    */
   probe?: () => Promise<SessionPresence>
+  /**
+   * The terminal's host element, read at each focus change so that a mount
+   * ordering cannot leave this session holding a stale one. See
+   * `suppressesResize`: everything focusable inside this element is the
+   * terminal itself, and focusing the terminal never suppresses.
+   */
+  host?: () => FocusHost | null
 }
 
 function defaultStorage(): PaneStorage | null {
@@ -453,6 +513,31 @@ export class TerminalSession {
   /** The size actually sent on this socket, so a reopen re-sends. */
   #sentCols = 0
   #sentRows = 0
+  /**
+   * An app-owned text control has focus, so on a phone the keyboard is up and
+   * the size wterm is now reporting is a size nobody chose. See
+   * `suppressesResize`.
+   */
+  #suppressed = false
+  /**
+   * The size that was in force when suppression began, and what `#sendResize`
+   * sends while it lasts.
+   *
+   * Two numbers rather than one, because the size wterm reports keeps updating
+   * under suppression -- that is what lets the *current* size go out once when
+   * suppression lifts, instead of a stale field being restored. The held pair is
+   * only reached by `#opened()`, which resets `#sentCols` and calls
+   * `#sendResize()` directly: a socket that reconnects mid-suppression must
+   * neither send the keyboard-shrunk size (the whole failure this exists to
+   * prevent, through the one path `noteResize` does not cover) nor send nothing
+   * and leave the attach at the server's 80x24.
+   *
+   * 0 when suppression began before any size was known, which is a tab restored
+   * straight into a focused box: there is nothing to hold, so the current size
+   * is the only honest answer.
+   */
+  #heldCols = 0
+  #heldRows = 0
 
   #resizeTimer: ReturnType<typeof setTimeout> | null = null
   #retryTimer: ReturnType<typeof setTimeout> | null = null
@@ -515,6 +600,20 @@ export class TerminalSession {
   }
   readonly #onPageShow = () => this.wake()
 
+  /**
+   * Focus moved. Tracked on the document rather than per element -- `focusin`
+   * bubbles where `focus` does not -- so the reply box, the capture panel's
+   * controls and anything a later task adds are covered without registering
+   * anything of their own.
+   *
+   * `focusout` carries the element being *left* as its target and the one
+   * gaining focus as `relatedTarget`, which is the one that decides: reading the
+   * target here would re-arm suppression on the very event that should lift it.
+   */
+  readonly #onFocusIn = (event: Event) => this.noteFocus(event.target as FocusTarget | null)
+  readonly #onFocusOut = (event: Event) =>
+    this.noteFocus((event as FocusEvent).relatedTarget as FocusTarget | null)
+
   /** Open the first socket and report the initial status. */
   start(): void {
     if (this.#stopped || this.#transport) return
@@ -536,6 +635,8 @@ export class TerminalSession {
     // node environment, where neither global exists.
     globalThis.document?.addEventListener('visibilitychange', this.#onVisible)
     globalThis.addEventListener?.('pageshow', this.#onPageShow)
+    globalThis.document?.addEventListener('focusin', this.#onFocusIn)
+    globalThis.document?.addEventListener('focusout', this.#onFocusOut)
     this.#connect()
   }
 
@@ -549,6 +650,8 @@ export class TerminalSession {
     this.#stopped = true
     globalThis.document?.removeEventListener('visibilitychange', this.#onVisible)
     globalThis.removeEventListener?.('pageshow', this.#onPageShow)
+    globalThis.document?.removeEventListener('focusin', this.#onFocusIn)
+    globalThis.document?.removeEventListener('focusout', this.#onFocusOut)
     this.#clearTimers()
     this.#transport?.close(1000, 'tab closed')
     this.#transport = null
@@ -585,11 +688,43 @@ export class TerminalSession {
     if (this.#stopped || cols <= 0 || rows <= 0) return
     this.#cols = cols
     this.#rows = rows
-    if (this.#resizeTimer) clearTimeout(this.#resizeTimer)
-    this.#resizeTimer = setTimeout(() => {
-      this.#resizeTimer = null
-      this.#sendResize()
-    }, RESIZE_DEBOUNCE_MS)
+    // Recorded first and *then* skipped: the class keeps its own record of what
+    // wterm reported so that lifting suppression can send the current size,
+    // rather than a stale field being restored. A return above these two lines
+    // is the whole feature backwards.
+    //
+    // The skip is belt and braces -- `#sendResize` sends the held size while
+    // suppressed, so a timer armed here would put nothing on the wire either --
+    // and it stays because the alternative is arming a timer per resize event
+    // for as long as a keyboard is open. It is not the guard: do not delete the
+    // hold in `#sendResize` on the strength of this line.
+    if (this.#suppressed) return
+    this.#scheduleResize()
+  }
+
+  /**
+   * Note where focus went, which is this tab's whole answer to "is the phone's
+   * keyboard up". See `suppressesResize` for what counts and why.
+   *
+   * Public because the browser wiring (`focusin`/`focusout` on the document) is
+   * the thin half: what suppression *does* is tested by calling this.
+   */
+  noteFocus(target: FocusTarget | null): void {
+    const next = suppressesResize(target, this.#opts.host?.() ?? null)
+    if (next === this.#suppressed) return
+    this.#suppressed = next
+    if (next) {
+      this.#heldCols = this.#cols
+      this.#heldRows = this.#rows
+      return
+    }
+    // Through the same debounce as any other resize, and not sent straight
+    // out: the keyboard closing is a layout change too, so the size that
+    // matters usually arrives a few milliseconds after the focus left. Sending
+    // here would put the shrunk size on the wire and the restored one right
+    // behind it -- and the first of those two is the frame that moves the
+    // owner's terminal.
+    this.#scheduleResize()
   }
 
   /**
@@ -934,12 +1069,28 @@ export class TerminalSession {
     this.#emit()
   }
 
+  /** Arm the debounce; nothing reaches tmux until the burst settles. */
+  #scheduleResize(): void {
+    if (this.#resizeTimer) clearTimeout(this.#resizeTimer)
+    this.#resizeTimer = setTimeout(() => {
+      this.#resizeTimer = null
+      this.#sendResize()
+    }, RESIZE_DEBOUNCE_MS)
+  }
+
   #sendResize(): void {
-    if (this.#cols <= 0 || this.#rows <= 0) return
-    if (this.#cols === this.#sentCols && this.#rows === this.#sentRows) return
-    if (!this.#transport?.resize(this.#cols, this.#rows)) return
-    this.#sentCols = this.#cols
-    this.#sentRows = this.#rows
+    // While suppressed, the size in force before the keyboard opened -- which
+    // is what makes `#opened()`'s direct call safe. Falling back to the current
+    // size when nothing was held keeps a tab that started out suppressed off
+    // the server's 80x24. See `#heldCols`.
+    const held = this.#suppressed && this.#heldCols > 0 && this.#heldRows > 0
+    const cols = held ? this.#heldCols : this.#cols
+    const rows = held ? this.#heldRows : this.#rows
+    if (cols <= 0 || rows <= 0) return
+    if (cols === this.#sentCols && rows === this.#sentRows) return
+    if (!this.#transport?.resize(cols, rows)) return
+    this.#sentCols = cols
+    this.#sentRows = rows
   }
 
   #noteDrop(): void {
@@ -1090,6 +1241,12 @@ export function Terminal({ session, label, url, className, onStatusChange, ref }
         setStatus(next)
         statusCallback.current?.(next)
       },
+      // A getter, not the element: React assigns refs before it runs effects,
+      // so this would usually read the same node either way -- but a null
+      // captured here once, on a mount where it had not been assigned yet,
+      // would make every click into the terminal look like a click into the
+      // reply box, for the life of the session.
+      host: () => hostRef.current,
     })
     sessionRef.current = term
     if (size.current) term.noteResize(size.current.cols, size.current.rows)

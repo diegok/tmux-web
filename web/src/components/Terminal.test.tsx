@@ -18,6 +18,7 @@ import {
   probeSession,
   shouldReconnect,
   snapshotHasSession,
+  suppressesResize,
   terminalUrl,
 } from './Terminal'
 import type { PaneStorage, SessionPresence, TerminalStatus } from './Terminal'
@@ -198,6 +199,7 @@ function makeSession(
     onStatus?: (s: TerminalStatus) => void
     probe?: () => Promise<SessionPresence>
     now?: () => number
+    host?: () => { contains(node: unknown): boolean } | null
   } = {},
 ) {
   const statuses: TerminalStatus[] = []
@@ -220,6 +222,7 @@ function makeSession(
     // test here wants; the wake tests hand in a clock they can step by hand.
     now: opts.now,
     probe: opts.probe ?? probe.probe,
+    host: opts.host,
   })
   return { term, statuses, received, storage, probe }
 }
@@ -507,6 +510,197 @@ describe('resize', () => {
     ws.open()
     expect(controls(ws).map((f) => f.json)).toEqual([
       { type: 'resize', cols: 90, rows: 30 },
+      { type: 'where' },
+    ])
+  })
+})
+
+/**
+ * A stand-in for a focused element: the two members the predicate reads, and
+ * nothing else. Plain objects on purpose -- this suite runs under vitest's node
+ * environment, where there is no DOM to build one from.
+ */
+function el(tagName: string, attrs: string[] = []) {
+  return { tagName, hasAttribute: (name: string) => attrs.includes(name) }
+}
+
+/** The reply box, as the predicate sees it. */
+const REPLY_BOX = el('TEXTAREA')
+
+describe('resize suppression', () => {
+  it('suppresses on a focused input outside the terminal, and not on one inside it', () => {
+    // wterm's own input surface is a focusable element inside the terminal
+    // host. The two INPUT rows differ *only* in containment, so this table
+    // cannot pass by matching on the tag name alone.
+    const inside = el('INPUT')
+    const host = { contains: (node: unknown) => node === inside }
+
+    expect(suppressesResize(el('INPUT'), host)).toBe(true)
+    expect(suppressesResize(el('TEXTAREA'), host)).toBe(true)
+    expect(suppressesResize(el('DIV', ['contenteditable']), host)).toBe(true)
+
+    // The load-bearing row: catching this one would suppress the resize on
+    // every ordinary click into the terminal, and never lift.
+    expect(suppressesResize(inside, host)).toBe(false)
+    expect(suppressesResize(el('BUTTON'), host)).toBe(false)
+    expect(suppressesResize(el('BODY'), host)).toBe(false)
+    expect(suppressesResize(null, host)).toBe(false)
+  })
+
+  it('sends no resize while suppressed', () => {
+    const { term } = makeSession()
+    term.start()
+    const ws = MockWebSocket.last
+    ws.open()
+
+    // Not true by accident: one resize goes out first, so what follows is a
+    // change from a state this test has already seen on the wire.
+    term.noteResize(100, 40)
+    vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+    expect(controls(ws).map((f) => f.json)).toEqual([
+      { type: 'where' },
+      { type: 'resize', cols: 100, rows: 40 },
+    ])
+
+    term.noteFocus(REPLY_BOX)
+    term.noteResize(100, 20)
+    vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS * 10)
+    expect(controls(ws).map((f) => f.json)).toEqual([
+      { type: 'where' },
+      { type: 'resize', cols: 100, rows: 40 },
+    ])
+  })
+
+  it('does not suppress on a control inside the terminal host', () => {
+    const inside = el('INPUT')
+    const { term } = makeSession({ host: () => ({ contains: (node: unknown) => node === inside }) })
+    term.start()
+    const ws = MockWebSocket.last
+    ws.open()
+
+    term.noteFocus(inside)
+    term.noteResize(100, 40)
+    vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+    expect(controls(ws).map((f) => f.json)).toEqual([
+      { type: 'where' },
+      { type: 'resize', cols: 100, rows: 40 },
+    ])
+  })
+
+  it('sends the CURRENT size once when suppression lifts, not the one it had when suppression began', () => {
+    const { term } = makeSession()
+    term.start()
+    const ws = MockWebSocket.last
+    ws.open()
+
+    term.noteResize(100, 40)
+    vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+
+    term.noteFocus(REPLY_BOX)
+    term.noteResize(100, 20)
+    term.noteResize(100, 18)
+    vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+
+    term.noteFocus(null)
+    vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+
+    // Exactly one frame, carrying the second suppressed size. A version that
+    // queued would send two, one that dropped would send none, and one that
+    // restored the pre-suppression size would send 100x40 again.
+    expect(controls(ws).map((f) => f.json)).toEqual([
+      { type: 'where' },
+      { type: 'resize', cols: 100, rows: 40 },
+      { type: 'resize', cols: 100, rows: 18 },
+    ])
+  })
+
+  it('sends nothing on lift when the size did not change while suppressed', () => {
+    const { term } = makeSession()
+    term.start()
+    const ws = MockWebSocket.last
+    ws.open()
+
+    term.noteResize(100, 40)
+    vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+    term.noteFocus(REPLY_BOX)
+    term.noteFocus(null)
+    vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+
+    expect(controls(ws).map((f) => f.json)).toEqual([
+      { type: 'where' },
+      { type: 'resize', cols: 100, rows: 40 },
+    ])
+  })
+
+  it('resizes normally again after the lift', () => {
+    const { term } = makeSession()
+    term.start()
+    const ws = MockWebSocket.last
+    ws.open()
+
+    term.noteFocus(REPLY_BOX)
+    term.noteFocus(null)
+    term.noteResize(90, 30)
+    vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+
+    expect(controls(ws).map((f) => f.json)).toEqual([
+      { type: 'where' },
+      { type: 'resize', cols: 90, rows: 30 },
+    ])
+  })
+
+  it('a reconnect during suppression attaches at the pre-suppression size', () => {
+    const { term } = makeSession()
+    term.start()
+    const first = MockWebSocket.last
+    first.open()
+
+    term.noteResize(120, 50)
+    vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+
+    term.noteFocus(REPLY_BOX)
+    term.noteResize(120, 30)
+    term.noteResize(120, 28)
+    vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+
+    first.emitClose(1006)
+    vi.advanceTimersByTime(BACKOFF_BASE_MS)
+    const second = MockWebSocket.last
+    expect(second).not.toBe(first)
+    second.open()
+
+    // `#opened` resets the sent size and re-sends, and it does not go through
+    // `noteResize`: the size it picks is the one in force before the keyboard
+    // opened. Not the shrunk one, which would drag the owner's own terminal to
+    // a phone's keyboard-open height, and not nothing, which would leave the
+    // attach at the server's 80x24.
+    expect(controls(second).map((f) => f.json)).toEqual([
+      { type: 'resize', cols: 120, rows: 50 },
+      { type: 'where' },
+    ])
+
+    term.noteFocus(null)
+    vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+    expect(controls(second).map((f) => f.json)).toEqual([
+      { type: 'resize', cols: 120, rows: 50 },
+      { type: 'where' },
+      { type: 'resize', cols: 120, rows: 28 },
+    ])
+  })
+
+  it('attaches at the current size when suppression began before any size was known', () => {
+    // Nothing was ever in force, so there is nothing to hold: a tab restored
+    // straight into a focused reply box would otherwise attach at 80x24 and
+    // stay there until the box was dismissed.
+    const { term } = makeSession()
+    term.noteFocus(REPLY_BOX)
+    term.noteResize(70, 20)
+    term.start()
+    const ws = MockWebSocket.last
+    ws.open()
+
+    expect(controls(ws).map((f) => f.json)).toEqual([
+      { type: 'resize', cols: 70, rows: 20 },
       { type: 'where' },
     ])
   })

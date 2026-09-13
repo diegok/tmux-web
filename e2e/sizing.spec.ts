@@ -116,3 +116,46 @@ test('the shell is never taller than the viewport', async ({ page, tmuxWeb }) =>
     `the page scrolls: ${after.shell}px of content in a ${after.viewport}px viewport`,
   ).toBeLessThanOrEqual(after.viewport)
 })
+
+/**
+ * Task 21, end to end: the resize path is suppressed while an app-owned text
+ * control has focus.
+ *
+ * This is the half of the feature no vitest test can reach. The unit suite
+ * calls `noteResize` by hand; here the shrink arrives the way it does on a
+ * phone -- the layout viewport gets smaller, `@wterm/react`'s own
+ * `ResizeObserver` fires, and the only thing standing between that and a
+ * `resize` frame is the `#suppressed` gate. And the frame matters because the
+ * window is *shared*: the owner's local client is attached to it, and tmux
+ * hands the window to whichever client resized last. A phone tapping its reply
+ * box must not drag his laptop's terminal down to keyboard height.
+ *
+ * The viewport shrink stands in for the keyboard, which Playwright cannot open.
+ * That is the same event a keyboard produces under
+ * `interactive-widget=resizes-content` (Task 22), and the app cannot tell the
+ * two apart.
+ */
+test('a focused reply box freezes the size this tab is sharing', async ({ page, tmuxWeb }) => {
+  await enroll(page, tmuxWeb, 'sizing')
+  const start = dims(await stable(page, tmuxWeb))
+
+  await page.getByRole('textbox', { name: 'Reply to this pane' }).click()
+  await page.setViewportSize({ width: 1280, height: 480 })
+
+  // Long enough that a resize would have gone out and come back: the debounce
+  // is 150ms and the snapshot poll behind everything else here is 1.5s.
+  await page.waitForTimeout(2000)
+  expect(
+    windowSize(tmuxWeb),
+    'the window followed the shrunk tab while its reply box had focus, which on a ' +
+      'phone is the soft keyboard resizing somebody else’s terminal',
+  ).toBe(`${start.cols}x${start.rows}`)
+
+  // Focus back into the terminal, which is the one focus that never suppresses
+  // -- and the size in force by then goes out once.
+  await page.getByRole('textbox', { name: 'Terminal' }).click()
+  const after = dims(await settled(page, tmuxWeb, (s) => dims(s).rows < start.rows))
+  expect(after.rows, 'the size held back while suppressed was never sent on the lift').toBeLessThan(
+    start.rows,
+  )
+})

@@ -617,8 +617,28 @@ export default function App() {
               <ConnectionDot status={status} />
             </div>
           </header>
-          <div className="flex min-h-0 flex-1 flex-col">
-            <div className="min-h-0 flex-1">
+          {/*
+            The terminal fills this box and the reply box lies *over* it, at the
+            foot, rather than above it in a column. That is not a cosmetic
+            choice. As a sibling the box takes its height *from* the terminal,
+            and every height change here goes to tmux as a resize of a window
+            the owner's own local client is attached to -- so the box appearing,
+            or its hint line below the textarea wrapping onto a second line on a
+            narrow screen, would move his terminal. Out of the flow it cannot.
+
+            The cost is the two rows it covers, which on a settled pane are the
+            prompt: that is the trade this makes, and it is the smaller half of
+            it -- the pane is still *drawn* at those rows, so nothing is lost,
+            only hidden behind a translucent strip.
+
+            The half that actually protects the owner is in `Terminal.tsx`:
+            focusing this box suppresses the resize path entirely, because on a
+            phone the keyboard opening shrinks the layout viewport and an
+            element sized from it shrinks whether or not anything is stacked
+            above it. See `suppressesResize`.
+          */}
+          <div className="relative min-h-0 flex-1">
+            <div className="h-full">
               {target ? (
                 <Terminal
                   session={target}
@@ -636,16 +656,21 @@ export default function App() {
               )}
             </div>
             {/*
-              The reply box, at the foot of the terminal and always there: the
-              rule takes the pane's agent state and ignores it, deliberately.
-              See `showReplyBox`. It is passed the same `activePane` the
-              breadcrumb and the sidebar highlight are drawn from, so the pane
-              it names is the pane on screen.
+              Always there: the rule takes the pane's agent state and ignores
+              it, deliberately. See `showReplyBox`. It is passed the same
+              `activePane` the breadcrumb and the sidebar highlight are drawn
+              from, so the pane it names is the pane on screen.
             */}
             {showReplyBox({
               attached: target !== null,
               agentState: located?.pane.agentState ?? '',
-            }) && <ReplyBox pane={activePane} onSend={sendReply} />}
+            }) && (
+              <ReplyBox
+                pane={activePane}
+                onSend={sendReply}
+                className="bg-background/95 absolute inset-x-0 bottom-0 backdrop-blur"
+              />
+            )}
           </div>
         </SidebarInset>
 

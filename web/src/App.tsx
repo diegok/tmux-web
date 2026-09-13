@@ -30,6 +30,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { toast } from 'sonner'
 
 import { AppSidebar } from '@/components/AppSidebar'
+import { CapturePanel } from '@/components/CapturePanel'
 import { KILL_CLOSED, KillDialog, canKill, killDialogReducer } from '@/components/KillDialog'
 import { PALETTE_CHORD_LABEL, Palette } from '@/components/Palette'
 import {
@@ -188,6 +189,13 @@ export default function App() {
 
   /** The command palette, opened by the header button or by Ctrl+Alt+K. */
   const [paletteOpen, setPaletteOpen] = useState(false)
+
+  /**
+   * The scrollback panel. Read-only, and the reason not to put a pane into
+   * copy mode to read back through it -- which is worth more to the reply box
+   * than anything in the panel itself.
+   */
+  const [captureOpen, setCaptureOpen] = useState(false)
 
   const { groups, loaded } = snapshot
 
@@ -534,6 +542,15 @@ export default function App() {
               >
                 Copy mode
               </button>
+              <button
+                type="button"
+                onClick={() => setCaptureOpen(true)}
+                disabled={!activePane}
+                className="hover:bg-accent hover:text-accent-foreground rounded-md border px-2 py-1 text-xs font-medium disabled:opacity-50"
+                title="Read this pane's scrollback, without putting it in copy mode"
+              >
+                Scrollback
+              </button>
               <ConnectionDot status={status} />
             </div>
           </header>
@@ -566,6 +583,13 @@ export default function App() {
           onCopyMode={copyMode}
           onIntent={handleIntent}
         />
+
+        {/*
+          One capture, on demand. It is mounted always and gated on `open` so
+          the fetch is the dialog's own effect rather than something App has to
+          sequence; nothing is captured until it is opened.
+        */}
+        <CapturePanel open={captureOpen} onOpenChange={setCaptureOpen} paneId={activePane} />
 
         <PromptDialog
           state={prompt}

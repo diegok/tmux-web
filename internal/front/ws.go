@@ -474,6 +474,25 @@ func (h *TerminalHandler) control(ctx context.Context, sess *ptybridge.Session, 
 		if err := h.copyMode(ctx, sess, m.Pane); err != nil {
 			slog.Warn("terminal: copy-mode failed", "pane", m.Pane, "err", err)
 		}
+	case "end-mode":
+		// Pop the copy-mode layer of a pane before writing a reply into it.
+		//
+		// Not `copy-mode -q`: that cancels clock-mode and choose-tree too, and
+		// a pane's mode is shared with the owner's local client, so a phone
+		// typing into a text box would close the owner's session tree. And not
+		// a `#{pane_mode}` guard around it: if-shell takes its own -t, modes
+		// STACK, and pane_in_mode is a count, so the guard reads the wrong
+		// pane and then pops the wrong number of layers.
+		//
+		// `-X` dispatches into the copy-mode command table, so a pane in any
+		// other mode has nowhere to deliver it and refuses with "not in a
+		// mode", exit 1, unchanged. That non-zero exit is the COMMON CASE --
+		// most replies go to a pane in no mode -- so it is logged at debug and
+		// never surfaced, and the caller writes its bytes regardless. A version
+		// that treated it as an error would fail every ordinary reply.
+		if err := h.endMode(ctx, m.Pane); err != nil {
+			slog.Debug("terminal: end-mode did not apply", "pane", m.Pane, "err", err)
+		}
 	case "where":
 		// "Which pane did I land on?", asked once per outstanding question
 		// rather than once per socket: on open, immediately after the tab has
@@ -551,6 +570,22 @@ func (h *TerminalHandler) copyMode(ctx context.Context, sess *ptybridge.Session,
 		target = pane
 	}
 	_, err := h.tm.Run(ctx, "copy-mode", "-t", target)
+	return err
+}
+
+// endMode pops a pane's copy-mode layer, so that a reply typed into that pane
+// arrives whole. See the "end-mode" case for why the instrument is send-keys -X
+// and why its exit status is not an error signal.
+//
+// Unlike copyMode, there is no session default: an end-mode with no pane is
+// refused rather than aimed at "whatever is current". Entering a mode on the
+// tab's own pane is a thing the user asked for; leaving one on an unnamed pane
+// is a thing the reply box would do by accident.
+func (h *TerminalHandler) endMode(ctx context.Context, pane string) error {
+	if err := tmux.ValidatePaneID(pane); err != nil {
+		return err
+	}
+	_, err := h.tm.Run(ctx, "send-keys", "-X", "-t", pane, "cancel")
 	return err
 }
 

@@ -193,7 +193,7 @@ describe('wire contract with the Go implementation', () => {
   it('emits only message types the Go control switch handles', () => {
     const src = goSource('internal/front/ws.go')
     const handled = new Set([...src.matchAll(/\n\tcase "([^"]+)":/g)].map((m) => m[1]))
-    expect(handled).toEqual(new Set(['resize', 'select', 'copy-mode', 'where']))
+    expect(handled).toEqual(new Set(['resize', 'select', 'copy-mode', 'end-mode', 'where']))
 
     const { transport, ws } = makeTransport()
     ws.open()

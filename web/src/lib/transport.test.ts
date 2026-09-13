@@ -163,6 +163,7 @@ describe('wire contract with the Go implementation', () => {
     transport.select('%3')
     transport.copyMode('%7')
     transport.copyMode()
+    transport.endMode('%3')
     transport.where()
     for (const sentFrame of ws.sent) {
       for (const key of Object.keys(JSON.parse(text(sentFrame.subarray(1))))) {
@@ -200,6 +201,7 @@ describe('wire contract with the Go implementation', () => {
     transport.resize(80, 24)
     transport.select('%3')
     transport.copyMode()
+    transport.endMode('%3')
     transport.where()
     for (const sentFrame of ws.sent) {
       expect(handled).toContain(JSON.parse(text(sentFrame.subarray(1))).type)
@@ -261,6 +263,15 @@ describe('outgoing frames', () => {
     // would turn into something the Go decoder reads differently.
     transport.copyMode()
     expect(JSON.parse(text(ws.sent[3].subarray(1)))).toEqual({ type: 'copy-mode' })
+
+    // end-mode is the mirror image: the pane is never optional, because the
+    // daemon refuses an unnamed one rather than popping a mode off whatever
+    // pane happens to be current. Asserted exactly, so a message that lost its
+    // pane on the way to the wire is a failure here and not a reply that
+    // silently lands in copy mode and gets truncated.
+    transport.endMode('%3')
+    expect(ws.sent[4][0]).toBe(0x01)
+    expect(JSON.parse(text(ws.sent[4].subarray(1)))).toEqual({ type: 'end-mode', pane: '%3' })
   })
 
   it('never sends a text frame', () => {
@@ -589,6 +600,7 @@ describe('control message types', () => {
       { type: 'select', pane: '%3' },
       { type: 'copy-mode', pane: '%3' },
       { type: 'copy-mode' },
+      { type: 'end-mode', pane: '%3' },
       { type: 'where' },
     ]
     const { transport, ws } = makeTransport()

@@ -69,6 +69,7 @@ export type ControlMessage =
   | { type: 'resize'; cols: number; rows: number }
   | { type: 'select'; pane: string }
   | { type: 'copy-mode'; pane?: string }
+  | { type: 'end-mode'; pane: string }
   | { type: 'where' }
 
 /** Why the socket ended, as far as the caller needs to decide what to do next. */
@@ -296,6 +297,16 @@ export class Transport {
   /** Put a pane into tmux copy-mode; omit the pane for this tab's current one. */
   copyMode(pane?: string): boolean {
     return this.sendControl(pane === undefined ? { type: 'copy-mode' } : { type: 'copy-mode', pane })
+  }
+
+  /**
+   * Pop a pane's copy-mode layer before writing into it.
+   *
+   * Always takes a pane, unlike `copyMode`: the server refuses an unnamed one.
+   * See internal/front/ws.go's "end-mode" case.
+   */
+  endMode(pane: string): boolean {
+    return this.sendControl({ type: 'end-mode', pane })
   }
 
   /**

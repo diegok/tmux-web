@@ -80,6 +80,12 @@ type Poller struct {
 	// goroutine on exactly the same terms as classifier.
 	reports *Reports
 
+	// git is the poller's third job, and the only one that is not the poll
+	// goroutine's private memory: it has a lock of its own precisely because
+	// its work does not happen here. nil on a poller not built for it. See
+	// gitReader.
+	git *gitReader
+
 	// The forced-poll machinery. PollNow does not poll; it asks the loop to,
 	// and waits. See PollNow for why it must not simply call refresh.
 	//
@@ -139,6 +145,15 @@ type Options struct {
 	// what the sidebar is for.
 	Capture   func(ctx context.Context, paneID string) (string, error)
 	Connected func() bool
+	// Branches turns the git reader on: every poll hands it the distinct
+	// working directories of its rows, and every row is filled from what it has
+	// already read. Nothing about it is paired -- there is no second half to
+	// forget to wire -- so it is a bool rather than a function, and off is the
+	// answer for every NewPollerFunc caller, whose rows are a test's and whose
+	// paths are not directories.
+	//
+	// It costs a goroutine and a map, and no fork: see gitReader.
+	Branches bool
 }
 
 // NewPollerWith builds a poller from Options.
@@ -184,6 +199,11 @@ func NewPollerWith(o Options) *Poller {
 		startFn:   o.ServerStart,
 		nowFn:     time.Now,
 		newTicker: realTicker,
+	}
+	if o.Branches {
+		// Through p rather than p.nowFn, so that a test moving the poller's
+		// clock moves the reader's with it: they age the same poll.
+		p.git = newGitReader(osFS{}, func() time.Time { return p.nowFn() })
 	}
 	if o.Capture != nil {
 		p.capture, p.connected = o.Capture, o.Connected
@@ -263,6 +283,11 @@ func (p *Poller) Start(ctx context.Context) {
 	p.loopDone = ctx.Done()
 	p.fmu.Unlock()
 
+	if p.git != nil {
+		// Before the first poll, so that the set it hands over is taken rather
+		// than sitting in the mailbox until the second tick.
+		go p.git.run(ctx)
+	}
 	p.refresh(ctx)
 	tick, stop := p.newTicker(p.interval)
 	go func() {
@@ -460,6 +485,11 @@ func (p *Poller) refresh(ctx context.Context) {
 	// verification window rather than deriving immediately. That is the honest
 	// cost of holding the rejection in daemon memory rather than in tmux:
 	// bounded, one-shot, and only on a restart.
+	//
+	// The branch cache is deliberately NOT among them. It is keyed by
+	// directory, and a directory means the same thing on both sides of a
+	// restart -- so there is nothing for a renumbering to invalidate, and
+	// dropping it would only re-walk three paths for no reason.
 	if p.classifier != nil && haveStart && start != p.ServerStart() {
 		p.classifier.Retain(nil)
 		p.reports.Retain(nil)
@@ -469,6 +499,7 @@ func (p *Poller) refresh(ctx context.Context) {
 	// fields being set and its state being decided.
 	if err == nil {
 		p.classify(ctx, res.Rows, res.Reports)
+		p.branches(res.Rows)
 	}
 
 	p.mu.Lock()
@@ -481,6 +512,41 @@ func (p *Poller) refresh(ctx context.Context) {
 		return
 	}
 	p.latest = res.Rows
+}
+
+// branches fills every row's branch from what the git reader has already read,
+// and hands it this poll's distinct directories on the way out.
+//
+// READS FIRST, ASKS SECOND, and never waits in between. That is the bargain the
+// separate goroutine buys: a directory the poll has never seen shows its branch
+// one poll later, and a directory whose HEAD is behind a stat that never
+// returns goes on showing the branch it had. Waiting here for either would put
+// an uninterruptible filesystem call inside the poll's deadline, which is the
+// one thing this feature must not cost.
+//
+// The set is DISTINCT and keyed by directory: measured on the owner's live
+// server, 12 panes sit in 3 directories, and that ratio is the design. A pane
+// with no path asks for nothing -- "" is not a directory, and walking it would
+// climb from the daemon's own working directory.
+func (p *Poller) branches(rows []Row) {
+	if p.git == nil {
+		return
+	}
+	dirs := make([]string, 0, len(rows))
+	seen := make(map[string]struct{}, len(rows))
+	for i := range rows {
+		dir := rows[i].Path
+		if dir == "" {
+			continue
+		}
+		rows[i].Branch = p.git.branch(dir)
+		if _, dup := seen[dir]; dup {
+			continue
+		}
+		seen[dir] = struct{}{}
+		dirs = append(dirs, dir)
+	}
+	p.git.want(dirs)
 }
 
 // classify captures every known agent pane and writes its state into rows.

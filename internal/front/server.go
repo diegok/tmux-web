@@ -1005,6 +1005,10 @@ func newDaemon(cfg Config) (*daemon, error) {
 			Poll:      tm.Poll,
 			Capture:   tm.Capture,
 			Connected: registry.Live,
+			// The pane's git branch, read off the disk by a goroutine of the
+			// poller's own -- no fork, and nothing the poll waits for. See
+			// gitReader for why it is not simply read inline.
+			Branches: true,
 		}),
 		tmux: tm,
 		// The first entry of the allowlist, not a second derivation of it: the

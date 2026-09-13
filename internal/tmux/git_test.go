@@ -161,7 +161,7 @@ func TestGitBranch(t *testing.T) {
 		{"a .git file that is not a pointer", garbagePointer, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := gitBranch(tc.dir); got != tc.want {
+			if got := gitBranch(osFS{}, tc.dir).branch; got != tc.want {
 				t.Errorf("gitBranch(%q) = %q, want %q", tc.dir, got, tc.want)
 			}
 		})
@@ -185,12 +185,12 @@ func TestGitBranchRefusesARelativePath(t *testing.T) {
 
 	// The pre-state assertion. Without it the rows below would pass in a
 	// directory that is not a repository at all, which is the wrong reason.
-	if got := gitBranch(repo); got != "main" {
+	if got := gitBranch(osFS{}, repo).branch; got != "main" {
 		t.Fatalf("gitBranch(%q) = %q, want %q: the working directory for the rows below is not a discoverable repository, so they would say nothing", repo, got, "main")
 	}
 	for _, in := range []string{"", ".", "child", "./child"} {
 		t.Run(in, func(t *testing.T) {
-			if got := gitBranch(in); got != "" {
+			if got := gitBranch(osFS{}, in).branch; got != "" {
 				t.Errorf("gitBranch(%q) = %q, want %q", in, got, "")
 			}
 		})

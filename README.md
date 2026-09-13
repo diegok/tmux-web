@@ -63,7 +63,9 @@ that comparison is the only thing distinguishing your daemon from someone else's
 certificate on the same network.
 
 The name has to resolve: a VPN DNS entry, or a line in `/etc/hosts` on each
-machine. `--tls-port` avoids needing root.
+machine. `--tls-port` avoids needing root, and the port travels with the rest:
+on `--tls-port 8443` the link `enroll` prints is `https://devbox.ss:8443/enroll#...`,
+which is also the only origin the daemon accepts a request from.
 
 Then enrol a browser. There are no passwords and no login form:
 

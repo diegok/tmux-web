@@ -333,48 +333,77 @@ func ClearDeviceCookie(w http.ResponseWriter) {
 	})
 }
 
-// AllowedOrigins derives the exact-origin allowlist from the configured host.
+// AllowedOrigins derives the exact-origin allowlist from the whole serving
+// configuration -- host, mode, and the port that mode listens on.
 //
-// In production that is exactly one entry, https://<host>: v1 serves one
+// It takes the Config rather than a host and a port because there are two ports
+// in it: cfg.Port is the --dev listener and cfg.TLSPort is the HTTPS one. Being
+// handed the wrong one is what made enrolment impossible under --tls-port, so
+// nothing here picks a port; servingPort does, once, for the listener and the
+// allowlist and the enrollment link alike.
+//
+// In production that is exactly one entry, https://<host>[:port]: v1 serves one
 // hostname on a single-name certificate, and one entry is the smallest
-// allowlist that can work.
+// allowlist that can work. The first entry is also the origin enrollment links
+// name, so a link can never point at an origin this daemon would refuse.
 //
-// Under --dev it is instead the loopback origins on devPort, and deliberately
+// Under --dev it is instead the loopback origins on --port, and deliberately
 // *instead*: a development machine serving plain HTTP must not also accept
 // requests claiming to come from the production host, and production must never
 // accept localhost. Dev mode changes which origins are allowed, never whether
 // the check happens -- that is the difference between a dev switch and a hole.
-func AllowedOrigins(host string, dev bool, devPort int) ([]string, error) {
+func AllowedOrigins(cfg Config) ([]string, error) {
 	// Lowercased rather than rejected: DNS is case-insensitive, browsers
 	// serialize the host lowercase, and the comparison is byte-exact, so a
 	// capitalised --host would otherwise reject every real request.
-	host = strings.ToLower(strings.TrimSpace(host))
+	host := strings.ToLower(strings.TrimSpace(cfg.Host))
 	if host == "" {
 		return nil, errors.New("front: no host configured; the origin allowlist cannot be derived")
 	}
 	if strings.ContainsAny(host, ":/\\?#@ \t") {
 		return nil, fmt.Errorf("front: --host %q must be a bare hostname, with no scheme, port or path", host)
 	}
-	if !dev {
-		return []string{"https://" + host}, nil
+
+	port := servingPort(cfg)
+	if port < 1 || port > 65535 {
+		if cfg.Dev {
+			return nil, fmt.Errorf("front: --dev needs a listen port, got %d", port)
+		}
+		return nil, fmt.Errorf("front: --tls-port must be a port, got %d", port)
 	}
 
-	if devPort < 1 || devPort > 65535 {
-		return nil, fmt.Errorf("front: --dev needs a listen port, got %d", devPort)
-	}
-	// Browsers omit the default port when serializing an origin.
-	port := ":" + strconv.Itoa(devPort)
-	if devPort == 80 {
-		port = ""
+	if !cfg.Dev {
+		return []string{originString("https", host, port)}, nil
 	}
 	// Three distinct origins, each matched exactly: "localhost" and "127.0.0.1"
 	// are different origins to a browser, and which one appears depends on what
-	// the developer typed.
+	// the developer typed. localhost comes first because that is the one a dev
+	// enrollment link names.
 	return []string{
-		"http://localhost" + port,
-		"http://127.0.0.1" + port,
-		"http://[::1]" + port,
+		originString("http", "localhost", port),
+		originString("http", "127.0.0.1", port),
+		originString("http", "::1", port),
 	}, nil
+}
+
+// originString serializes an origin the way a browser does.
+//
+// The default port is omitted, because that is what a browser sends: an address
+// bar showing https://host and one showing https://host:443 both produce
+// "https://host" in the Origin header. Since the comparison against these
+// strings is byte-exact -- and that exactness is the whole CSRF boundary -- an
+// allowlist entry spelling the port out would match nothing while looking like
+// it permitted something.
+func originString(scheme, host string, port int) string {
+	// An IPv6 literal is bracketed in an origin; "[::1]" arrives already
+	// bracketed from a caller that wrote it that way.
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		host = "[" + host + "]"
+	}
+	if (scheme == "https" && port == 443) || (scheme == "http" && port == 80) {
+		return scheme + "://" + host
+	}
+	return scheme + "://" + host + ":" + strconv.Itoa(port)
 }
 
 // writeUnauthorized refuses a request, telling a person how to fix it.

@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -167,23 +166,6 @@ func TestTheTerminalSocketSharesTheOriginAllowlist(t *testing.T) {
 	}
 	if code := request(t, prod, "GET", "/ws", token, "http://127.0.0.1:7000"); code != http.StatusForbidden {
 		t.Errorf("the terminal socket accepted a loopback origin in production: %d", code)
-	}
-}
-
-// An enrollment link that names an origin the daemon does not allow is a link
-// that cannot be redeemed: the page loads, the POST is refused, and the token
-// is spent on nothing. The two must be derived together.
-func TestEnrollmentLinksNameAnOriginTheDaemonAccepts(t *testing.T) {
-	for _, dev := range []bool{false, true} {
-		cfg := Config{Host: "tmux.example.com", Dev: dev, Port: 7000}
-		origins, err := AllowedOrigins(cfg.Host, cfg.Dev, cfg.Port)
-		if err != nil {
-			t.Fatal(err)
-		}
-		base := baseURL(cfg)
-		if !slices.Contains(origins, base) {
-			t.Errorf("dev=%v: enrollment links name %s, which is not in %v", dev, base, origins)
-		}
 	}
 }
 

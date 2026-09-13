@@ -928,10 +928,10 @@ func Serve(ctx context.Context, cfg Config) error {
 	}()
 	slog.Info("tmux-web serving", "url", d.baseURL, "state", d.statePath, "socket", socket)
 
-	switch {
-	case cfg.Dev:
+	switch modeOf(cfg) {
+	case modeDev:
 		return serveDev(ctx, cfg, d.handler)
-	case cfg.TLSCert != "" || cfg.SelfSigned:
+	case modeOwnCert:
 		return serveOwnCert(ctx, cfg, d.handler)
 	default:
 		return serveTLS(ctx, cfg, d.handler)
@@ -959,7 +959,7 @@ type daemon struct {
 
 func newDaemon(cfg Config) (*daemon, error) {
 	// First, and it fails closed: every other component takes the allowlist.
-	origins, err := AllowedOrigins(cfg.Host, cfg.Dev, cfg.Port)
+	origins, err := AllowedOrigins(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -1006,8 +1006,13 @@ func newDaemon(cfg Config) (*daemon, error) {
 			Capture:   tm.Capture,
 			Connected: registry.Live,
 		}),
-		tmux:      tm,
-		baseURL:   baseURL(cfg),
+		tmux: tm,
+		// The first entry of the allowlist, not a second derivation of it: the
+		// link a person opens and the origin the daemon will accept from that
+		// page are then the same string by construction. They were two
+		// spellings once, and they disagreed the moment --tls-port moved the
+		// listener.
+		baseURL:   origins[0],
 		statePath: statePath,
 	}
 	// The poll already reads every pane's working directory, so a split or a
@@ -1068,15 +1073,60 @@ func sweepOrphans(ctx context.Context, tm interface {
 	}
 }
 
-// baseURL is the origin this daemon renders into enrollment links.
-func baseURL(cfg Config) string {
-	if !cfg.Dev {
-		return "https://" + strings.ToLower(strings.TrimSpace(cfg.Host))
+// serveMode is which of the three ways this daemon puts itself on the network.
+//
+// It exists so that "which mode" is decided once. Serve switches on it to pick
+// a listener and servingPort switches on it to answer which port that listener
+// is on -- and an enrollment link naming a port nothing is listening on is a
+// link that cannot be redeemed, which is exactly the bug --tls-port had: it
+// moved the listener and nothing else.
+type serveMode int
+
+const (
+	// modeDev is plain HTTP on loopback, on --port.
+	modeDev serveMode = iota
+	// modeOwnCert is --self-signed or --tls-cert, on --tls-port.
+	modeOwnCert
+	// modeACME is certmagic, which owns its own listeners and serves the
+	// default HTTPS port; --tls-port cannot move them.
+	modeACME
+)
+
+func modeOf(cfg Config) serveMode {
+	switch {
+	case cfg.Dev:
+		return modeDev
+	case cfg.TLSCert != "" || cfg.SelfSigned:
+		return modeOwnCert
+	default:
+		return modeACME
 	}
-	// localhost rather than the configured host: in dev the allowlist is the
-	// loopback origins, so a link naming the public host would be refused by
-	// the daemon that printed it.
-	return "http://localhost:" + strconv.Itoa(cfg.Port)
+}
+
+// DefaultTLSPort is the port serveOwnCert listens on when --tls-port is unset,
+// and the one a browser omits when it serializes an https origin.
+const DefaultTLSPort = 443
+
+// servingPort is the port a browser has to name to reach this daemon.
+//
+// Every caller that needs a port -- the listener, the enrollment link, the
+// origin allowlist -- takes it from here. cfg.Port is the --dev port and
+// cfg.TLSPort is the HTTPS one; the two fields looking interchangeable is what
+// let a link be built from the wrong one.
+func servingPort(cfg Config) int {
+	switch modeOf(cfg) {
+	case modeDev:
+		return cfg.Port
+	case modeOwnCert:
+		if cfg.TLSPort == 0 {
+			return DefaultTLSPort
+		}
+		return cfg.TLSPort
+	default:
+		// certmagic owns the listeners. Naming --tls-port here would print a
+		// link to a port nothing answers on; the CLI refuses the combination.
+		return DefaultTLSPort
+	}
 }
 
 // serveDev serves plain HTTP on loopback.
@@ -1195,20 +1245,7 @@ func serveOwnCert(ctx context.Context, cfg Config, handler http.Handler) error {
 		}
 	}
 
-	port := cfg.TLSPort
-	if port == 0 {
-		port = 443
-	}
-	srv := &http.Server{
-		Addr:    net.JoinHostPort("", strconv.Itoa(port)),
-		Handler: handler,
-		// No ReadTimeout or WriteTimeout on purpose: they would apply to the
-		// terminal socket. net/http clears deadlines when a handler hijacks the
-		// connection, but only after they have been set, and a WriteTimeout set
-		// here would still bound the handshake in ways a quiet terminal trips.
-		// The socket's own keepalive ping is what collects a dead peer.
-		ReadHeaderTimeout: 20 * time.Second,
-	}
+	srv := ownCertServer(cfg, handler)
 
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServeTLS(certPath, keyPath) }()
@@ -1222,6 +1259,23 @@ func serveOwnCert(ctx context.Context, cfg Config, handler http.Handler) error {
 			return nil
 		}
 		return err
+	}
+}
+
+// ownCertServer is the listener half of serveOwnCert, split out so a test can
+// read the address it would bind without binding it -- and the address is the
+// point: it has to be the port the enrollment link names, and both take it from
+// servingPort.
+func ownCertServer(cfg Config, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:    net.JoinHostPort("", strconv.Itoa(servingPort(cfg))),
+		Handler: handler,
+		// No ReadTimeout or WriteTimeout on purpose: they would apply to the
+		// terminal socket. net/http clears deadlines when a handler hijacks the
+		// connection, but only after they have been set, and a WriteTimeout set
+		// here would still bound the handshake in ways a quiet terminal trips.
+		// The socket's own keepalive ping is what collects a dead peer.
+		ReadHeaderTimeout: 20 * time.Second,
 	}
 }
 

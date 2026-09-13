@@ -736,7 +736,7 @@ func TestNewAuthRejectsANilStore(t *testing.T) {
 }
 
 func TestAllowedOriginsInProductionIsExactlyTheOneHost(t *testing.T) {
-	got, err := front.AllowedOrigins("tmux.example.com", false, 7000)
+	got, err := front.AllowedOrigins(front.Config{Host: "tmux.example.com", Port: 7000})
 	if err != nil {
 		t.Fatalf("AllowedOrigins: %v", err)
 	}
@@ -746,7 +746,7 @@ func TestAllowedOriginsInProductionIsExactlyTheOneHost(t *testing.T) {
 }
 
 func TestDevOriginsReplaceProductionRatherThanJoiningIt(t *testing.T) {
-	got, err := front.AllowedOrigins("tmux.example.com", true, 7000)
+	got, err := front.AllowedOrigins(front.Config{Host: "tmux.example.com", Dev: true, Port: 7000})
 	if err != nil {
 		t.Fatalf("AllowedOrigins: %v", err)
 	}
@@ -780,7 +780,7 @@ func TestAllowedOriginsRejectsNonsense(t *testing.T) {
 		{"dev with a silly port", "tmux.example.com", true, 70000},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := front.AllowedOrigins(tc.host, tc.dev, tc.port); err == nil {
+			if _, err := front.AllowedOrigins(front.Config{Host: tc.host, Dev: tc.dev, Port: tc.port}); err == nil {
 				t.Fatal("expected an error")
 			}
 		})
@@ -790,7 +790,7 @@ func TestAllowedOriginsRejectsNonsense(t *testing.T) {
 func TestAllowedOriginsLowercasesTheHost(t *testing.T) {
 	// Browsers serialize origins with a lowercase host, and the comparison is
 	// byte-exact, so a capitalised --host would reject every real request.
-	got, err := front.AllowedOrigins("TMUX.Example.COM", false, 0)
+	got, err := front.AllowedOrigins(front.Config{Host: "TMUX.Example.COM"})
 	if err != nil {
 		t.Fatalf("AllowedOrigins: %v", err)
 	}

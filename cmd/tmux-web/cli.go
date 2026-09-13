@@ -50,6 +50,12 @@ import (
 // makes the CLI fail rather than hang forever with no output.
 const adminRequestTimeout = 15 * time.Second
 
+// defaultTLSPort is the flag's default, spelled out so `serve -h` shows it and
+// so the check for "the person asked for a port we cannot honour" has something
+// to compare against. front.DefaultTLSPort is the daemon's own copy of the same
+// number; they are asserted equal in the tests.
+const defaultTLSPort = 443
+
 const usageText = `tmux-web -- drive the local tmux server from a browser.
 
 Usage:
@@ -175,7 +181,7 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 		"generate and reuse a certificate for --host, for a name no public CA can validate")
 	tlsCert := fset.String("tls-cert", "", "PEM certificate to serve, e.g. from mkcert or an internal CA")
 	tlsKey := fset.String("tls-key", "", "PEM private key for --tls-cert")
-	tlsPort := fset.Int("tls-port", 443, "HTTPS port for --self-signed or --tls-cert")
+	tlsPort := fset.Int("tls-port", defaultTLSPort, "HTTPS port for --self-signed or --tls-cert")
 	socket := socketFlag(fset)
 	operands, code, ok := parseFlags(fset, args)
 	if !ok {
@@ -204,6 +210,20 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 	}
 	if (*tlsCert == "") != (*tlsKey == "") {
 		return usageError(stderr, fset, "--tls-cert and --tls-key must be given together")
+	}
+
+	// --tls-port moves a listener only on the own-certificate path. certmagic
+	// owns the listeners on the ACME path and serves 443, and --dev serves
+	// plain HTTP on --port, so honouring the flag in either place is
+	// impossible -- and a daemon that accepted it would print enrollment links
+	// to a port nothing answers on. Refused here, where the message can say so.
+	ownCert := *selfSigned || *tlsCert != ""
+	if !ownCert && *tlsPort != defaultTLSPort {
+		return usageError(stderr, fset,
+			"--tls-port only applies to --self-signed or --tls-cert; --dev listens on --port, and the ACME path serves %d", defaultTLSPort)
+	}
+	if ownCert && (*tlsPort < 1 || *tlsPort > 65535) {
+		return usageError(stderr, fset, "--tls-port must be a port between 1 and 65535, got %d", *tlsPort)
 	}
 
 	cfg := serveConfig{

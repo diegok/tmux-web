@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/diegok/tmux-web/internal/auth"
+	"github.com/diegok/tmux-web/internal/front"
 )
 
 // The plan said these subcommands could not be tested without a running
@@ -624,6 +625,59 @@ func TestServeParsesTLSFlags(t *testing.T) {
 	runCLI("serve", "--host", "devbox.ss", "--tls-cert", "c.pem", "--tls-key", "k.pem").wantCode(t, 0)
 	if got.TLSCert != "c.pem" || got.TLSKey != "k.pem" || got.SelfSigned {
 		t.Fatalf("serve config = %+v", got)
+	}
+}
+
+// The CLI's idea of the default HTTPS port and the daemon's must be the same
+// number: the CLI refuses a --tls-port it cannot honour by comparing against
+// its own, and the daemon builds the enrollment link by comparing against its
+// own. Two different numbers would mean a link naming a port explicitly that
+// the browser then omits, or the reverse.
+func TestTheDefaultTLSPortIsOneNumber(t *testing.T) {
+	if defaultTLSPort != front.DefaultTLSPort {
+		t.Fatalf("the CLI defaults --tls-port to %d, the daemon serves %d", defaultTLSPort, front.DefaultTLSPort)
+	}
+}
+
+// --tls-port only moves a listener this daemon owns. On the ACME path
+// certmagic owns the listeners and serves 443, and under --dev there is no TLS
+// at all, so accepting the flag there would print an enrollment link to a port
+// nothing answers on -- which is the bug this refusal exists to prevent, in the
+// one place that can still ask the person to fix it.
+func TestServeRefusesATLSPortItCannotHonour(t *testing.T) {
+	restore := stubServe(t, func(serveConfig, io.Writer, io.Writer) error {
+		t.Fatal("the daemon must not start with a --tls-port nothing would listen on")
+		return nil
+	})
+	defer restore()
+
+	for _, args := range [][]string{
+		{"serve", "--host", "h", "--tls-port", "8443"},
+		{"serve", "--host", "h", "--dev", "--tls-port", "8443"},
+	} {
+		r := runCLI(args...)
+		if r.code == 0 {
+			t.Errorf("%v was accepted, want a usage error", args[1:])
+		}
+		if !strings.Contains(r.stderr, "--tls-port") {
+			t.Errorf("%v: the error does not name the flag\n%s", args[1:], r)
+		}
+	}
+}
+
+// A port number no listener can take must fail here, where the message can name
+// the flag, rather than at bind time.
+func TestServeRefusesASillyTLSPort(t *testing.T) {
+	restore := stubServe(t, func(serveConfig, io.Writer, io.Writer) error {
+		t.Fatal("the daemon must not start on a port that cannot be bound")
+		return nil
+	})
+	defer restore()
+
+	for _, port := range []string{"0", "70000", "-1"} {
+		if r := runCLI("serve", "--host", "h", "--self-signed", "--tls-port", port); r.code == 0 {
+			t.Errorf("--tls-port %s was accepted, want a usage error", port)
+		}
 	}
 }
 

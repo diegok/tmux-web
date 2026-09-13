@@ -1025,7 +1025,7 @@ func TestTheEmbeddedDistIsUsable(t *testing.T) {
 // would be able to drive the production daemon -- and a --dev daemon would
 // accept requests claiming to come from the public host.
 func TestDevOriginsReplaceProductionRatherThanBeingAddedToIt(t *testing.T) {
-	dev, err := front.AllowedOrigins("tmux.example.com", true, 7000)
+	dev, err := front.AllowedOrigins(front.Config{Host: "tmux.example.com", Dev: true, Port: 7000})
 	if err != nil {
 		t.Fatal(err)
 	}

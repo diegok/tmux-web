@@ -80,6 +80,12 @@ func (c *Client) NewSession(ctx context.Context, name, path string) (string, err
 // which is what the dialog's empty name field means. fromPane is optional too
 // and is the pane whose working directory the new window inherits -- resolved
 // here from #{pane_current_path}, never sent by the browser.
+//
+// IT DELIBERATELY APPENDS NO SHELL-COMMAND, AND MUST NOT GROW A PARAMETER FOR
+// ONE. "New window" means an empty shell to all four of its callers, and a
+// command argument here would put "run this string for me" on the verb they
+// use. Running something in a new window is ResumeAgent below, which takes a
+// lookup key rather than a command precisely so the two cannot be confused.
 func (c *Client) NewWindow(ctx context.Context, sessionID, name, fromPane string) (string, error) {
 	if err := ValidateSessionID(sessionID); err != nil {
 		return "", fmt.Errorf("new window: %w", err)
@@ -101,6 +107,49 @@ func (c *Client) NewWindow(ctx context.Context, sessionID, name, fromPane string
 		args = append(args, "-n", name)
 	}
 	return c.Run(ctx, args...)
+}
+
+// ResumeAgent opens a window in a pane's directory running that agent's own
+// resume command, and returns the window's id.
+//
+// A verb of its own rather than a flag on NewWindow, and this is the whole
+// security story of the route in front of it: `agent` is a LOOKUP KEY, not a
+// command. Anything that is not a key in resumeCommands is refused here,
+// before tmux is spoken to, so the only argvs this daemon can ever hand
+// new-window are the three fixed ones in resume.go. Nothing is installed and
+// nothing is written: the agent is already on the machine, and its own history
+// is what it reads -- which is why this works for sessions that predate
+// tmux-web existing.
+//
+// -c IS NOT OPTIONAL HERE, unlike on NewWindow. "Resume here" means the pane's
+// project, and an agent resumed in the daemon's own working directory would
+// offer somebody else's sessions or an empty list -- a resume that looks like
+// it worked. So fromPane is required, resolved through panePath so no path
+// crosses the wire, and stat'd by checkDir: a project directory that has been
+// removed fails before new-window rather than opening in $HOME.
+//
+// -n is the agent's name because tmux's own answer is worse: measured, a
+// window given a shell-command with automatic-rename on is named "tmux", and a
+// sidebar row reading "tmux" says nothing about what is in it. The name is the
+// table key, so it is as fixed as the argv.
+func (c *Client) ResumeAgent(ctx context.Context, sessionID, fromPane, agent string) (string, error) {
+	if err := ValidateSessionID(sessionID); err != nil {
+		return "", fmt.Errorf("resume: %w", err)
+	}
+	argv, ok := resumeCommands[agent]
+	if !ok {
+		return "", fmt.Errorf("resume: %q is not an agent this daemon can resume", agent)
+	}
+	if fromPane == "" {
+		return "", fmt.Errorf("resume %s: no pane to resume in", agent)
+	}
+	dir, err := c.panePath(ctx, fromPane)
+	if err != nil {
+		return "", fmt.Errorf("resume %s: %w", agent, err)
+	}
+	args := []string{"new-window", "-t", sessionID, "-P", "-F", "#{window_id}",
+		"-c", dir, "-n", agent}
+	return c.Run(ctx, append(args, argv...)...)
 }
 
 // SplitPane splits a pane and returns the new pane's id. The new pane opens in

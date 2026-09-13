@@ -119,6 +119,16 @@ connections rather than only failing the next request.
   kill it, and to open a new window. The `+` in the sidebar header makes a new
   session, and it is in the header rather than on a row because with no tmux
   server running there are no rows to right-click.
+- **Resume an agent where it was working.** A pane running Claude, pi or
+  opencode gets a **Resume … here** entry in its right-click menu (and in the
+  palette). It opens a new tmux window in that pane's own directory running the
+  agent's own resume — `claude --resume`, `pi --resume`,
+  `opencode --continue`. Nothing is installed, nothing is parsed and no history
+  is read by this app: the sessions you get back are the agent's, so they
+  include everything from long before tmux-web was on the machine. Claude and pi
+  each show their own list of past sessions in that directory; **opencode has no
+  such list** — it carries on the most recent session there, which is what its
+  `--continue` does, so its entry says *Continue* rather than *Resume*.
 - Scroll with the mouse wheel to enter tmux's copy mode.
 - `Shift+click` or `Ctrl+click` a URL to open it. Real hyperlinks (`gh`, `delta`,
   `eza`) and bare URLs both work; a plain click still goes to tmux.

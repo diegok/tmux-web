@@ -102,6 +102,12 @@ func (s *server) settle(ctx context.Context) {
 type Manager interface {
 	NewSession(ctx context.Context, name, path string) (string, error)
 	NewWindow(ctx context.Context, sessionID, name, fromPane string) (string, error)
+	// ResumeAgent is a second window verb rather than a flag on the first, and
+	// the difference is the point: NewWindow opens a shell, this one runs the
+	// named agent's own resume. `agent` is a key into a fixed table in
+	// internal/tmux, so this interface -- the complete list of what a browser
+	// request can make the daemon do -- still contains no "run this string".
+	ResumeAgent(ctx context.Context, sessionID, fromPane, agent string) (string, error)
 	SplitPane(ctx context.Context, paneID, direction string) (string, error)
 	RenameSession(ctx context.Context, sessionID, name string) error
 	RenameWindow(ctx context.Context, windowID, name string) error
@@ -159,6 +165,46 @@ func (s *server) createWindow(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := manageCtx(r)
 	defer cancel()
 	id, err := s.manage.NewWindow(ctx, body.Session, body.Name, body.FromPane)
+	s.settle(ctx)
+	if err != nil {
+		writeManageError(ctx, w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
+}
+
+// resumeAgent opens a window in a pane's directory running that agent's own
+// resume command.
+//
+// Everything that makes this safe is one field: `agent` is a NAME, looked up in
+// a fixed table in internal/tmux, and the argv never comes from here. There is
+// deliberately no field for a command and none for a path -- the working
+// directory is resolved daemon-side from the pane id, exactly as createWindow's
+// fromPane is, so a browser holding a stale `Row.Path` cannot aim a resume at a
+// directory the pane has left.
+//
+// Nothing is installed and nothing executable is written: the agent is already
+// on the machine and reads its own history, which is also why this works for
+// sessions that predate any of this existing. See the rule at the top of the
+// route table in server.go for the line that must not be crossed.
+func (s *server) resumeAgent(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Session string `json:"session"`
+		// A pane *id*: the pane whose directory the agent resumes in. Required
+		// here, unlike on a new window -- "resume here" with no "here" would
+		// resume in the daemon's own directory and offer the wrong history.
+		FromPane string `json:"fromPane"`
+		// The agent's name, as pane_current_command spells it. A key, not a
+		// command: anything that is not in internal/tmux's table is refused
+		// before tmux is spoken to.
+		Agent string `json:"agent"`
+	}
+	if !readJSON(w, r, &body) {
+		return
+	}
+	ctx, cancel := manageCtx(r)
+	defer cancel()
+	id, err := s.manage.ResumeAgent(ctx, body.Session, body.FromPane, body.Agent)
 	s.settle(ctx)
 	if err != nil {
 		writeManageError(ctx, w, err)

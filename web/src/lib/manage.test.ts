@@ -15,6 +15,8 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   PANES_URL,
+  RESUME_COPY,
+  RESUME_URL,
   SESSIONS_URL,
   WINDOWS_URL,
   ZOOM_HINT,
@@ -109,6 +111,7 @@ describe('contract with the daemon', () => {
       `"DELETE ${SESSIONS_URL}/{id}"`,
       `"DELETE ${WINDOWS_URL}/{id}"`,
       `"DELETE ${PANES_URL}/{id}"`,
+      `"POST ${RESUME_URL}"`,
     ]) {
       expect(server).toContain(route)
     }
@@ -117,7 +120,17 @@ describe('contract with the daemon', () => {
   it('sends the field names the handlers decode', () => {
     const manage = goSource('internal/front/manage.go')
     // Every JSON key this file puts on the wire, as the Go handlers spell them.
-    const tags = ['name', 'path', 'session', 'fromPane', 'pane', 'direction', 'label', 'confirm']
+    const tags = [
+      'name',
+      'path',
+      'session',
+      'fromPane',
+      'pane',
+      'direction',
+      'label',
+      'confirm',
+      'agent',
+    ]
     for (const tag of tags) {
       expect(manage).toContain(`json:"${tag}"`)
     }
@@ -130,6 +143,18 @@ describe('contract with the daemon', () => {
     // thing that mapping exists to keep out of the browser.
     expect(tmux).toContain('SplitRight = "right"')
     expect(tmux).toContain('SplitDown  = "down"')
+  })
+
+  it('offers a resume for exactly the agents the daemon can resume', () => {
+    // The argv lives in Go and is never sent from here -- this side sends the
+    // agent's NAME. What has to agree is the key set: a label for an agent the
+    // daemon has no command for is a menu entry that always fails, and an agent
+    // the daemon can resume with no label here is a feature nobody can reach.
+    const go = goSource('internal/tmux/resume.go')
+    const m = go.match(/resumeCommands = map\[string\]\[\]string\{([\s\S]*?)\n\}/)
+    if (!m) throw new Error('resumeCommands not found in internal/tmux/resume.go')
+    const agents = [...m[1].matchAll(/^\s*"([^"]+)":/gm)].map((q) => q[1])
+    expect(agents.sort()).toEqual(Object.keys(RESUME_COPY).sort())
   })
 })
 
@@ -313,6 +338,26 @@ describe('runManage', () => {
   })
 })
 
+describe('resume requests', () => {
+  it('posts two ids and a name to the resume route', () => {
+    expect(
+      manageRequest({ verb: 'resume', session: '$1', fromPane: '%3', agent: 'claude' }),
+    ).toEqual({
+      method: 'POST',
+      url: RESUME_URL,
+      // No path and no command: the daemon resolves #{pane_current_path} from
+      // the pane id and looks the argv up in its own table.
+      body: { session: '$1', fromPane: '%3', agent: 'claude' },
+    })
+  })
+
+  it('names the agent and the pane in the toast', () => {
+    expect(describeAction({ verb: 'resume', session: '$1', fromPane: '%3', agent: 'pi' })).toBe(
+      'resume pi in %3',
+    )
+  })
+})
+
 describe('describeAction', () => {
   it('names the attempt by id, beside the message that names the same id', () => {
     expect(describeAction({ verb: 'kill-pane', pane: '%7' })).toBe('kill %7')
@@ -475,6 +520,96 @@ describe('rowMenu', () => {
     // Not required: erasing the name is the point of having one.
     expect(promptReady(spec, { label: '' })).toBe(true)
     expect(spec.build({ label: '' })).toEqual({ verb: 'label-pane', pane: '%3', label: '' })
+  })
+})
+
+// --- resume here ------------------------------------------------------------
+
+describe('resume here', () => {
+  /** A pane running one of the three, in a window of its own. */
+  const agentTree = (command: string) => tree([row({ paneId: '%3', sessionId: '$1', command })])
+
+  const entryFor = (command: string) => {
+    const { session, window, pane } = agentTree(command)
+    return rowMenu({ kind: 'pane', session, window, pane }, 'work').find((e) => e.id === 'resume')
+  }
+
+  it('offers nothing on a pane that is not a known agent', () => {
+    // The row menu for a shell is the one the whole suite already pins; this
+    // says out loud that resume is not in it. A resume offered on a zsh pane
+    // would run an agent in a window the owner never asked for one in.
+    for (const command of ['zsh', 'bash', 'nvim', 'go', '', 'claude-helper', 'CLAUDE']) {
+      expect(entryFor(command)).toBeUndefined()
+    }
+  })
+
+  it('sends the session, the pane and the agent name -- and no command', () => {
+    const entry = entryFor('claude')
+    // `agent` is a name the daemon looks up in its own table. Nothing here
+    // spells a flag, which is why a wrong label cannot become a wrong command.
+    expect(entry?.intent).toEqual({
+      kind: 'run',
+      action: { verb: 'resume', session: '$1', fromPane: '%3', agent: 'claude' },
+    })
+    expect(JSON.stringify(entry?.intent)).not.toContain('--')
+  })
+
+  it('resumes the pane in hand, and a window row uses its active pane', () => {
+    const { session, window } = tree([
+      row({ paneId: '%3', windowId: '@7', command: 'zsh', paneActive: false }),
+      row({ paneId: '%4', paneIndex: 1, windowId: '@7', command: 'pi', paneActive: true }),
+    ])
+    const entry = rowMenu({ kind: 'window', session, window }, 'work').find((e) => e.id === 'resume')
+    // The same pane a click on the row navigates to, and the same one a split
+    // would act on -- one answer to "which pane does this row mean".
+    expect(entry?.intent).toMatchObject({
+      action: { verb: 'resume', fromPane: '%4', agent: 'pi' },
+    })
+  })
+
+  it('sits next to the new window it is a variant of, above the splits', () => {
+    const { session, window, pane } = agentTree('claude')
+    expect(ids(rowMenu({ kind: 'pane', session, window, pane }, 'work'))).toEqual([
+      'label-pane',
+      'resume',
+      'new-window',
+      'split-right',
+      'split-down',
+      'zoom',
+      'kill',
+    ])
+  })
+
+  it('promises a list of past sessions for the two agents that show one', () => {
+    // Claude and pi both open their own picker, measured by running each
+    // agent's help: `claude --resume` and `pi --resume`.
+    for (const command of ['claude', 'pi']) {
+      const entry = entryFor(command)
+      expect(entry?.hint).toMatch(/choose/i)
+      expect(entry?.label).toContain('Resume')
+    }
+  })
+
+  it('promises opencode no list, because opencode has none', () => {
+    // MEASURED: `opencode --help` has -c/--continue for the last session and
+    // -s <id> for a named one, and `opencode session` only lists and deletes.
+    // There is no picker. A control that says "choose a session" and then hands
+    // the owner whatever ran last is worse than one that says what it does.
+    const entry = entryFor('opencode')
+    if (!entry) throw new Error('opencode has no resume entry')
+    for (const word of ['choose', 'pick', 'select']) {
+      expect(entry.label.toLowerCase()).not.toContain(word)
+      expect((entry.hint ?? '').toLowerCase()).not.toContain(word)
+    }
+    // And it says what it does instead, so the absence above is a promise kept
+    // rather than a sentence somebody trimmed.
+    expect(entry.label).toContain('Continue')
+    expect(entry.hint).toMatch(/most recent/i)
+  })
+
+  it('is findable in the palette by the agent it resumes', () => {
+    expect(entryFor('opencode')?.search).toContain('opencode')
+    expect(entryFor('claude')?.search).toContain('resume')
   })
 })
 

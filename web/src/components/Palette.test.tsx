@@ -265,6 +265,10 @@ describe('actionEntries', () => {
     const entries = actionEntries(groups, '%4', 'work')
     expect(entries.map((e) => e.id)).toEqual([
       'pane:label-pane',
+      // %4 runs claude, so "resume here" is offered -- the palette gets it for
+      // free, because it renders rowMenu's answer exactly as the context menu
+      // does. A shell pane has no such row; see manage.test.ts.
+      'pane:resume',
       'pane:new-window',
       'pane:split-right',
       'pane:split-down',

@@ -265,6 +265,10 @@ func NewHandler(cfg HandlerConfig) (http.Handler, error) {
 	mux.Handle("POST /api/sessions", cfg.Auth.Protect(http.HandlerFunc(s.createSession)))
 	mux.Handle("POST /api/windows", cfg.Auth.Protect(http.HandlerFunc(s.createWindow)))
 	mux.Handle("POST /api/panes", cfg.Auth.Protect(http.HandlerFunc(s.createPane)))
+	// Its own route, not a field on POST /api/windows, for the reason
+	// Manager.ResumeAgent gives: that verb opens a shell and this one runs an
+	// agent, and the separation is what keeps "run this string" off the API.
+	mux.Handle("POST /api/resume", cfg.Auth.Protect(http.HandlerFunc(s.resumeAgent)))
 	mux.Handle("PATCH /api/sessions/{id}", cfg.Auth.Protect(http.HandlerFunc(s.renameSession)))
 	mux.Handle("PATCH /api/windows/{id}", cfg.Auth.Protect(http.HandlerFunc(s.renameWindow)))
 	mux.Handle("PATCH /api/panes/{id}", cfg.Auth.Protect(http.HandlerFunc(s.labelPane)))

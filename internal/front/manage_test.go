@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -84,6 +85,13 @@ func TestEveryManagementRouteIsBehindTheCookieAndTheOrigin(t *testing.T) {
 		{"create session", "POST", "/api/sessions", `{"name":"made-by-a-stranger"}`},
 		{"create window", "POST", "/api/windows", `{"session":"$0"}`},
 		{"split pane", "POST", "/api/panes", `{"pane":"%0","direction":"right"}`},
+		// The agent name is deliberately one the table does not have. Every
+		// request in this test is supposed to be refused by the middleware,
+		// but a test that PROVES the middleware by launching Claude Code in
+		// somebody's account when it regresses is not a test worth having:
+		// with "nobody" the handler refuses too, and the status codes below
+		// are the assertion either way.
+		{"resume", "POST", "/api/resume", `{"session":"$0","fromPane":"%0","agent":"nobody"}`},
 		{"rename session", "PATCH", "/api/sessions/%240", `{"name":"renamed-by-a-stranger"}`},
 		{"rename window", "PATCH", "/api/windows/%400", `{"name":"renamed-by-a-stranger"}`},
 		{"label pane", "PATCH", "/api/panes/%250", `{"label":"set-by-a-stranger"}`},
@@ -629,6 +637,77 @@ func TestNewWindowInheritsTheDirectoryOfThePaneItCameFrom(t *testing.T) {
 	}
 }
 
+// ------------------------------------------------------- resume
+
+// What crosses the wire for a resume: two tmux ids and an agent's NAME. Not a
+// command, not a path, not a directory.
+//
+// The three arguments are asserted individually rather than "the manager was
+// called", because the failure this guards against is a fourth thing arriving
+// -- a path the browser held, or a command string -- and a call count would not
+// see it. The interface has nowhere to put one, which is the structural half;
+// this is the half that fails when somebody adds one.
+func TestResumeSendsTwoIdsAndAnAgentName(t *testing.T) {
+	m := &deadlineManager{}
+	f := newFixture(t, withManager(m))
+
+	// A path and a command in the body, both of which a compromised or simply
+	// wrong caller would send. Neither has a field to land in.
+	rec := f.ok("POST", "/api/resume",
+		`{"session":"$1","fromPane":"%3","agent":"claude","path":"/etc","command":"rm -rf /"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /api/resume = %d (%s), want 201", rec.Code, rec.Body.String())
+	}
+	var made struct{ ID string }
+	decode(t, rec, &made)
+	if made.ID != "@9" {
+		t.Errorf("the resume answered with %q, want the new window's id", made.ID)
+	}
+	if len(m.resumed) != 1 {
+		t.Fatalf("the manager saw %d resumes, want 1: %v", len(m.resumed), m.resumed)
+	}
+	if got := m.resumed[0]; got != [3]string{"$1", "%3", "claude"} {
+		t.Errorf("the daemon was asked to resume %v, want the session, the pane and the agent "+
+			"and nothing the body invented", got)
+	}
+}
+
+// THE HEADLINE RULE, at the route: the agent field is a lookup key, and a
+// string that is not one of the three is refused rather than run.
+//
+// Driven against a real tmux with a real client, so the assertion is about what
+// did or did not fork -- a marker file that does not exist, and no new window
+// -- rather than about an error message. If the argv ever came from the request
+// instead of from tmux.resumeCommands, this is what would notice.
+func TestResumeWillNotRunAStringFromTheRequest(t *testing.T) {
+	f := newManageFixture(t)
+	session, _, pane := f.seed(t, "work")
+	marker := filepath.Join(t.TempDir(), "ran")
+	before := f.srv.Run(t, "list-windows", "-a", "-F", "#{window_id}")
+
+	for _, agent := range []string{
+		"touch " + marker,
+		"sh -c 'touch " + marker + "'",
+		"zsh",
+		"claude-helper",
+		"",
+	} {
+		body := `{"session":` + quote(session) + `,"fromPane":` + quote(pane) +
+			`,"agent":` + quote(agent) + `}`
+		rec := f.ok("POST", "/api/resume", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("resuming %q = %d (%s), want 400", agent, rec.Code, rec.Body.String())
+		}
+	}
+
+	if after := f.srv.Run(t, "list-windows", "-a", "-F", "#{window_id}"); after != before {
+		t.Errorf("a refused resume created a window anyway: %q -> %q", before, after)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatalf("a string from the request body was executed: %s exists", marker)
+	}
+}
+
 // quote renders a string as a JSON string, for building a request body around
 // a path a test does not choose.
 func quote(s string) string {
@@ -653,6 +732,10 @@ type deadlineManager struct {
 	mu    sync.Mutex
 	calls []managerCall
 	block bool
+	// What resume was asked for, argument by argument. Recorded here rather
+	// than in a fake of its own because the thing being pinned is what the
+	// handler passes on: three ids and a name, and no fourth thing.
+	resumed [][3]string
 }
 
 type managerCall struct {
@@ -694,6 +777,13 @@ func (m *deadlineManager) NewWindow(ctx context.Context, _, _, _ string) (string
 
 func (m *deadlineManager) SplitPane(ctx context.Context, _, _ string) (string, error) {
 	return "%9", m.seen(ctx, "split pane")
+}
+
+func (m *deadlineManager) ResumeAgent(ctx context.Context, sessionID, fromPane, agent string) (string, error) {
+	m.mu.Lock()
+	m.resumed = append(m.resumed, [3]string{sessionID, fromPane, agent})
+	m.mu.Unlock()
+	return "@9", m.seen(ctx, "resume")
 }
 
 func (m *deadlineManager) RenameSession(ctx context.Context, _, _ string) error {
@@ -742,6 +832,7 @@ var manageRoutes = []struct {
 	{"create session", "POST", "/api/sessions", `{"name":"work"}`},
 	{"create window", "POST", "/api/windows", `{"session":"$0"}`},
 	{"split pane", "POST", "/api/panes", `{"pane":"%0","direction":"right"}`},
+	{"resume", "POST", "/api/resume", `{"session":"$0","fromPane":"%0","agent":"claude"}`},
 	{"rename session", "PATCH", "/api/sessions/%240", `{"name":"renamed"}`},
 	{"rename window", "PATCH", "/api/windows/%400", `{"name":"renamed"}`},
 	{"label pane", "PATCH", "/api/panes/%250", `{"label":"a label"}`},

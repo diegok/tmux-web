@@ -53,6 +53,16 @@ export const WINDOWS_URL = '/api/windows'
 export const PANES_URL = '/api/panes'
 
 /**
+ * Resume's own route, and not a field on `POST /api/windows`.
+ *
+ * The daemon keeps the two verbs apart -- one opens a shell, one runs an
+ * agent -- so that "run this string for me" is never a parameter on the verb
+ * four callers use to open a shell. This side spells that separation the same
+ * way rather than papering over it.
+ */
+export const RESUME_URL = '/api/resume'
+
+/**
  * Which way a split goes, in the words the daemon takes.
  *
  * "right" and "down" describe where the *new pane* lands. tmux's own flags
@@ -73,6 +83,9 @@ export type ManageAction =
   | { verb: 'new-session'; name: string; path: string }
   | { verb: 'new-window'; session: string; name: string; fromPane: string }
   | { verb: 'split'; pane: string; direction: SplitDirection }
+  // `agent` is a NAME (`pane_current_command`), never a command line: the
+  // daemon looks it up in a fixed table and refuses anything that is not a key.
+  | { verb: 'resume'; session: string; fromPane: string; agent: string }
   | { verb: 'rename-session'; session: string; name: string }
   | { verb: 'rename-window'; window: string; name: string }
   | { verb: 'label-pane'; pane: string; label: string }
@@ -124,6 +137,15 @@ export function manageRequest(action: ManageAction): ManageRequest {
         url: PANES_URL,
         body: { pane: action.pane, direction: action.direction },
       }
+    case 'resume':
+      return {
+        method: 'POST',
+        url: RESUME_URL,
+        // Two ids and a name. No path -- the daemon resolves
+        // #{pane_current_path} from the pane, as it does for a new window --
+        // and no argv, which lives in Go beside the agent list.
+        body: { session: action.session, fromPane: action.fromPane, agent: action.agent },
+      }
     case 'rename-session':
       return {
         method: 'PATCH',
@@ -171,6 +193,8 @@ export function describeAction(action: ManageAction): string {
       return `create a window in ${action.session}`
     case 'split':
       return `split ${action.pane} to the ${action.direction === 'right' ? 'right' : 'bottom'}`
+    case 'resume':
+      return `resume ${action.agent} in ${action.fromPane}`
     case 'rename-session':
       return `rename ${action.session} to "${action.name}"`
     case 'rename-window':
@@ -361,6 +385,47 @@ export interface MenuEntry {
 /** The zoom copy, in one place, because two surfaces show it. */
 export const ZOOM_HINT = 'Zooms the window for every client, including the terminal on the host'
 
+/** What one agent's resume entry says. */
+export interface ResumeCopy {
+  label: string
+  /** Rendered under the label, not a tooltip: a phone has no hover. */
+  hint: string
+}
+
+/**
+ * What the resume entry says, per agent.
+ *
+ * COPY ONLY. The command lives in `resumeCommands` in `internal/tmux/resume.go`
+ * and never crosses the wire; this side sends the agent's name. The key sets
+ * are held together by a test, so a label here for an agent the daemon cannot
+ * resume is a red suite rather than a menu entry that always fails.
+ *
+ * **The wording is a promise, and one of the three cannot keep the usual one.**
+ * `claude --resume` and `pi --resume` both open the agent's own list of past
+ * sessions -- measured by running each agent's help, and pi's by watching it
+ * print "Resume Session (Current Folder)". `opencode` has no such list:
+ * `--continue` takes the most recent session in the directory with no choice
+ * offered, `-s <id>` needs an id this app has no way to show, and
+ * `opencode session` only lists and deletes. So its entry says *continue* and
+ * says which session, and a test forbids the words "choose", "pick" and
+ * "select" anywhere in it. A control that offers a list and then hands the
+ * owner whatever ran last is worse than one that says what it does.
+ */
+export const RESUME_COPY: Record<string, ResumeCopy> = {
+  claude: {
+    label: 'Resume Claude here',
+    hint: "Opens a window in this pane's directory, with Claude's own past sessions to choose from",
+  },
+  opencode: {
+    label: 'Continue opencode here',
+    hint: "Opens a window in this pane's directory and carries on the most recent opencode session in it — opencode offers no list of earlier ones",
+  },
+  pi: {
+    label: 'Resume pi here',
+    hint: "Opens a window in this pane's directory, with pi's own past sessions to choose from",
+  },
+}
+
 /**
  * What the owner can do to the thing they right-clicked.
  *
@@ -450,6 +515,10 @@ export function rowMenu(target: RowTarget, activeSession: string | null): MenuEn
   // working directory of the pane in hand -- the daemon resolves that itself
   // from the pane id, so no path crosses the wire.
   if (!session.appOnly) {
+    // Directly above it, because it is the same window in the same directory
+    // with the agent's own resume running in it.
+    const resuming = resumeEntry(target)
+    if (resuming) entries.push(resuming)
     entries.push({
       id: 'new-window',
       label: 'New window',
@@ -505,12 +574,51 @@ export function rowMenu(target: RowTarget, activeSession: string | null): MenuEn
  * navigates to. A session row has no pane in hand and so offers neither.
  */
 function splitTarget(target: RowTarget): string | null {
-  if (target.kind === 'pane') return target.pane.paneId
+  return paneInHand(target)?.paneId ?? null
+}
+
+/**
+ * The pane a row means, or null when it means none.
+ *
+ * One answer, shared by the split, the zoom, the new window and the resume, so
+ * that "which pane is this row about" cannot be answered two ways in one menu.
+ */
+function paneInHand(target: RowTarget): PaneNode | null {
+  if (target.kind === 'pane') return target.pane
   if (target.kind === 'window') {
-    const pane = target.window.panes.find((p) => p.active) ?? target.window.panes[0]
-    return pane?.paneId ?? null
+    return target.window.panes.find((p) => p.active) ?? target.window.panes[0] ?? null
   }
   return null
+}
+
+/**
+ * "Resume here", or null when the pane is not running an agent.
+ *
+ * Null for a shell, and that is the rule rather than an omission: resume starts
+ * an agent, and offering it on a `zsh` pane would start one where the owner
+ * never had one. `Object.hasOwn` rather than `in` for the reason `paneMark`
+ * gives -- `in` walks the prototype, so a pane whose command happened to be
+ * `toString` would take the branch.
+ */
+function resumeEntry(target: RowTarget): MenuEntry | null {
+  const pane = paneInHand(target)
+  if (!pane || !Object.hasOwn(RESUME_COPY, pane.command)) return null
+  const copy = RESUME_COPY[pane.command]
+  return {
+    id: 'resume',
+    label: copy.label,
+    hint: copy.hint,
+    intent: {
+      kind: 'run',
+      action: {
+        verb: 'resume',
+        session: target.session.sessionId,
+        fromPane: pane.paneId,
+        agent: pane.command,
+      },
+    },
+    search: `resume continue ${pane.command} ${pane.paneId}`,
+  }
 }
 
 /**

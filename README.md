@@ -299,6 +299,15 @@ does not set this for you and should not: `window-size` is a *window* option and
 grouped sessions share their windows, so a value the daemon set for its own
 throwaway session would land on yours as well.
 
+There is one service worker, and the only thing it holds is a page it writes
+itself: the "tmux-web is not reachable" screen you get when a navigation cannot
+reach the daemon at all. It never caches the app, its bundles or anything under
+`/api/`, so a rebuilt binary is picked up on the next load and a revoked device
+still fails at the door rather than being shown a page from a store that
+outlived it. `/enroll` is left to the browser entirely. It subscribes to
+nothing, and it is not a notification mechanism — the tab badge is still what
+tells you an agent is waiting.
+
 ## Requirements
 
 tmux 3.4 or newer (developed against 3.7), and Go 1.26 plus pnpm to build.

@@ -449,6 +449,7 @@ function WindowItem({
                 pane={lone}
                 name={label}
                 commandWidth="max-w-32"
+                pairWidth="max-w-32"
                 // The capsule says which program this is. Where the name above
                 // has just borrowed that same word, saying it twice on one line
                 // is the row repeating itself -- see `windowDisplay`.
@@ -506,6 +507,7 @@ function WindowItem({
                       pane={pane}
                       name={`pane ${pane.paneIndex}`}
                       commandWidth="max-w-24"
+                      pairWidth="max-w-20"
                       afterName={
                         pane.active && (
                           <span
@@ -1099,6 +1101,7 @@ function PaneLines({
   pane,
   name,
   commandWidth,
+  pairWidth,
   afterName,
   nameCommand,
 }: {
@@ -1106,6 +1109,17 @@ function PaneLines({
   name: string
   /** How much of the first line the capsule may take, before the name gives way. */
   commandWidth: string
+  /**
+   * How much of the first line the capsule and the branch may take *between
+   * them*.
+   *
+   * The row's, not the chips': a pane that is its own window sits one nesting
+   * level up and has roughly 49px more line than a pane inside a split, so the
+   * two depths cannot share one number. On the deeper row this is the binding
+   * constraint; on the shallower one it is the capsule's own `max-w-32` again,
+   * which is to say it adds nothing until there is a branch to share with.
+   */
+  pairWidth: string
   /** The tmux-active marker, on a split window's pane rows. */
   afterName?: ReactNode
   /**
@@ -1118,9 +1132,20 @@ function PaneLines({
 }) {
   const { text, label, fromCommand, tooltip } = paneText(pane)
   const showCommand = fromCommand && text !== nameCommand
+  // The branch is a fact about the pane's directory and is drawn whenever there
+  // is one, on nothing else. Not "where the capsule did not": `paneText` takes
+  // its top rung exactly when the agent is blocked, so a chip filling the
+  // capsule's gap would appear the moment an un-integrated agent asked a
+  // question and vanish when the block cleared -- a row element moving on agent
+  // state, and worse, on *which authority* is reporting it. The chip changes
+  // when the pane changes directory and at no other time.
+  const branch = pane.branch.trim()
   return (
     <span className="flex min-w-0 flex-1 flex-col justify-center gap-0.5">
-      <span className="flex min-w-0 items-center gap-2">
+      {/* `gap-1.5` rather than the `gap-2` the line had when the capsule was
+          the only thing on its right: three gaps at 8px cost 6px the name floor
+          needs once there are two chips. See the pair below. */}
+      <span data-row-top className="flex min-w-0 items-center gap-1.5">
         <span className="truncate">{name}</span>
         {label !== undefined && (
           // Identity, beside the identity above it -- the second line is the
@@ -1136,14 +1161,51 @@ function PaneLines({
           </span>
         )}
         {afterName}
-        {showCommand && (
-          // Unchanged, deliberately: a command is a program's name, and a row
-          // running `zsh` should go on looking exactly like a row running
-          // `zsh`. The distinction between "this is a process" and "this is
-          // what an agent is doing" is carried by the shape of the row.
-          <Badge variant="secondary" className={cn('ml-auto truncate font-mono', commandWidth)}>
-            {text}
-          </Badge>
+        {(showCommand || branch !== '') && (
+          // One capped box rather than two chips each holding a `max-w` the row
+          // cannot pay: a split window's first line is about 150px all in, and
+          // two `max-w-24` chips want 192 of it. Capping the *pair* is what
+          // makes them trade against each other; without it each child keeps
+          // its own width, the row overflows, and `SidebarMenuSubButton`'s
+          // `overflow-hidden` silently eats whichever chip is outermost.
+          //
+          // `shrink` on the children is load-bearing for the same reason:
+          // `Badge`'s base class string is `shrink-0`, so a cap on this box
+          // would otherwise constrain nothing at all.
+          <span data-row-chips className={cn('ml-auto flex min-w-0 items-center gap-1', pairWidth)}>
+            {showCommand && (
+              // Unchanged, deliberately: a command is a program's name, and a
+              // row running `zsh` should go on looking exactly like a row
+              // running `zsh`. The distinction between "this is a process" and
+              // "this is what an agent is doing" is carried by the shape of the
+              // row.
+              <Badge
+                variant="secondary"
+                className={cn('min-w-0 shrink truncate font-mono', commandWidth)}
+              >
+                {text}
+              </Badge>
+            )}
+            {branch !== '' && (
+              // `outline` rather than the capsule's `secondary`: the two sit
+              // side by side and answer different questions, and two filled
+              // chips on one line read as one wrapped value. Outermost, because
+              // the row is clipped from its right edge and the branch is the
+              // half a cramped row can best afford to lose.
+              //
+              // `max-w-16` is four-fifths of the pair, so a long branch cannot
+              // squeeze the capsule out of existence; `commandWidth` stops
+              // binding once the pair's cap does.
+              <Badge
+                data-row-branch
+                variant="outline"
+                className="min-w-0 max-w-16 shrink truncate font-mono"
+                title={branch}
+              >
+                {branch}
+              </Badge>
+            )}
+          </span>
         )}
       </span>
       {!fromCommand && (

@@ -585,6 +585,226 @@ describe('what a pane row says', () => {
     ])
   })
 })
+/**
+ * The branch chip: which branch the pane's directory is on, right-aligned on
+ * the row's first line.
+ *
+ * Two rules are pinned here and they are the whole point of the block.
+ *
+ * The first is *presence*. The chip is a function of the pane's directory and
+ * of nothing else -- so the four-state test below is four fixtures rather than
+ * one loop over a single render, because the mistake it exists to catch is a
+ * chip that renders only where the command capsule did not. `paneText` takes
+ * its top rung exactly when `agentState === 'blocked'`, so such a chip would be
+ * missing from an un-integrated agent's row until the moment it asked a
+ * question, then appear, then vanish again when the block cleared -- a row
+ * element moving on agent state, which is the one thing this sidebar's rules
+ * forbid. Three of the four fixtures below go red on it; the blocked one, which
+ * is the state that mistake accidentally gets right, does not.
+ *
+ * The second is the *width budget*. The two chips share one capped flex box, so
+ * they trade against each other instead of each holding a `max-w` it has no
+ * room to spend. `Badge`'s own base class string carries `shrink-0`, and a chip
+ * that keeps it cannot compress -- the row overflows and
+ * `SidebarMenuSubButton`'s `overflow-hidden` clips whichever chip is outermost.
+ * Which is why the shrink assertion below is scoped to the pair: a `toContain`
+ * over the whole row would find `shrink-0` on the state dot and pass whatever
+ * the chips do.
+ *
+ * No test here can see a computed width -- vitest renders to a string. The
+ * 80px group cap is arithmetic against a 150px first line, and it is the number
+ * to move if the name floor it was computed from turns out to be wrong.
+ */
+
+/** Every element carrying `data-row-branch`, as its opening tag. */
+function branchChips(markup: string): string[] {
+  return [...markup.matchAll(/<span[^>]*data-row-branch[^>]*>/g)].map((m) => m[0])
+}
+
+/** What each branch chip says, in document order. */
+function branchText(markup: string): string[] {
+  return [...markup.matchAll(/<span[^>]*data-row-branch[^>]*>([^<]*)<\/span>/g)].map((m) => m[1])
+}
+
+/**
+ * One element's class list, as tokens.
+ *
+ * Tokens rather than a substring search, because every assertion in this block
+ * is about a class that is a prefix or a suffix of another one that is really
+ * there: `shrink-0` inside `group-data-[collapsible=icon]:shrink-0`,
+ * `border-border` inside `focus-visible:border-ring`, `max-w-16` inside
+ * `sm:max-w-16`. A `toContain` on the string would pass on the neighbour.
+ */
+function classesOf(tag: string): string[] {
+  const m = tag.match(/class="([^"]*)"/)
+  return m ? m[1].split(/\s+/).filter(Boolean) : []
+}
+
+/**
+ * The chip pair on each row: its own opening tag, and the markup *inside* it.
+ *
+ * The inner markup is cut by walking `<span>` depth from the pair's opening tag
+ * rather than by a lazy regex, so that the slice stops at the pair's own close
+ * and not at the first `</span>` a chip happens to contain. Everything the row
+ * puts on its first line is a span, which is what makes the walk sufficient.
+ */
+function chipPairs(markup: string): { tag: string; inner: string }[] {
+  const out: { tag: string; inner: string }[] = []
+  for (const m of markup.matchAll(/<span[^>]*data-row-chips[^>]*>/g)) {
+    const open = m.index + m[0].length
+    let depth = 1
+    const re = /<span\b|<\/span>/g
+    re.lastIndex = open
+    let t: RegExpExecArray | null
+    while ((t = re.exec(markup)) !== null) {
+      depth += t[0] === '</span>' ? -1 : 1
+      if (depth === 0) break
+    }
+    if (t === null) throw new Error('unbalanced chip pair')
+    out.push({ tag: m[0], inner: markup.slice(open, t.index) })
+  }
+  return out
+}
+
+/** The badges inside one chip pair, as their opening tags, in document order. */
+function chipsIn(inner: string): string[] {
+  return [...inner.matchAll(/<span[^>]*data-slot="badge"[^>]*>/g)].map((m) => m[0])
+}
+
+/** The markup inside each row's first line -- the span the name sits in. */
+function firstLines(markup: string): string[] {
+  const out: string[] = []
+  for (const m of markup.matchAll(/<span[^>]*data-row-top[^>]*>/g)) {
+    const open = m.index + m[0].length
+    let depth = 1
+    const re = /<span\b|<\/span>/g
+    re.lastIndex = open
+    let t: RegExpExecArray | null
+    while ((t = re.exec(markup)) !== null) {
+      depth += t[0] === '</span>' ? -1 : 1
+      if (depth === 0) break
+    }
+    if (t === null) throw new Error('unbalanced first line')
+    out.push(markup.slice(open, t.index))
+  }
+  return out
+}
+
+/** The four values `agentState` can take, and what each one needs to be real. */
+const everyState: [string, Partial<SnapshotRow>][] = [
+  ['', {}],
+  ['working', { agentState: 'working' }],
+  // A question, because `paneText`'s blocked rung is taken only when the daemon
+  // actually read the dialog -- and it is that rung, not the state, that a
+  // capsule-shaped presence rule would key the chip off.
+  [
+    'blocked',
+    { agentState: 'blocked', question: { text: 'Run `rm -rf build`?', choices: ['Yes', 'No'] } },
+  ],
+  ['idle', { agentState: 'idle' }],
+]
+
+describe('the branch chip', () => {
+  it.each(everyState)('draws the branch on a %s pane', (_state, over) => {
+    const markup = render(fromRows([row({ command: 'claude', branch: 'main', ...over })]))
+    expect(branchText(markup)).toEqual(['main'])
+  })
+
+  it.each(everyState)('draws no chip on a %s pane outside a work tree', (_state, over) => {
+    const markup = render(fromRows([row({ command: 'claude', branch: '', ...over })]))
+    expect(branchChips(markup)).toEqual([])
+  })
+
+  it('draws the chip on a detached head, which is a directory fact like any other', () => {
+    const markup = render(fromRows([row({ branch: '@1a2b3c4' })]))
+    expect(branchText(markup)).toEqual(['@1a2b3c4'])
+  })
+
+  it('draws the branch beside the capsule, outside it', () => {
+    // A plain shell: `paneText` falls to the command, so the capsule is there
+    // too and the two have to share the line.
+    const markup = render(fromRows([row({ command: 'zsh', branch: 'main' })]))
+    const [pair] = chipPairs(markup)
+    const chips = chipsIn(pair.inner)
+    expect(chips).toHaveLength(2)
+    // The capsule first, the branch outermost: the row is clipped from its
+    // right edge, and the branch is the one that may go.
+    expect(chips[0]).not.toContain('data-row-branch')
+    expect(chips[1]).toContain('data-row-branch')
+    expect(pair.inner).toContain('>zsh<')
+    expect(pair.inner).toContain('>main<')
+  })
+
+  it('draws the branch outline where the capsule is filled, so the two do not read alike', () => {
+    const markup = render(fromRows([row({ command: 'zsh', branch: 'main' })]))
+    const [capsule, chip] = chipsIn(chipPairs(markup)[0].inner)
+    // The variants' own distinguishing declarations: `outline` replaces the
+    // base `border-transparent` with a visible border and sets no fill;
+    // `secondary` fills and leaves the border transparent.
+    expect(classesOf(chip)).toContain('border-border')
+    expect(classesOf(chip)).not.toContain('bg-secondary')
+    expect(classesOf(capsule)).toContain('bg-secondary')
+    expect(classesOf(capsule)).not.toContain('border-border')
+    // And the relationship, so that making both of them outline is caught even
+    // if the literals above ever move.
+    expect(classesOf(chip)).not.toEqual(classesOf(capsule))
+  })
+
+  it('caps the pair and lets both chips inside it compress', () => {
+    const markup = render(fromRows(splitWindow.map((r) => ({ ...r, branch: 'main' }))))
+    const [pair] = chipPairs(markup)
+    expect(classesOf(pair.tag)).toContain('max-w-20')
+    expect(classesOf(pair.tag)).toContain('min-w-0')
+    const chips = chipsIn(pair.inner)
+    expect(chips).toHaveLength(2)
+    for (const chip of chips) {
+      expect(classesOf(chip)).toContain('min-w-0')
+      expect(classesOf(chip)).toContain('truncate')
+      // The one that matters: `Badge`'s base string is `shrink-0`, and a chip
+      // that keeps it ignores the cap above entirely. Scoped to the pair -- the
+      // tmux-active dot on this same line is `shrink-0` and always will be.
+      expect(classesOf(chip)).not.toContain('shrink-0')
+    }
+  })
+
+  it('caps the branch below the pair, so a long branch cannot evict the capsule', () => {
+    const markup = render(fromRows([row({ command: 'zsh', branch: 'release/2026-09-13' })]))
+    expect(classesOf(branchChips(markup)[0])).toContain('max-w-16')
+  })
+
+  it('puts the chip on the first line, beside the name rather than under it', () => {
+    const markup = render(fromRows([row({ command: 'zsh', branch: 'main' })]))
+    const [first] = firstLines(markup)
+    expect(first).toContain('data-row-branch')
+    // And the second line, where a prefixed branch would have been cheaper to
+    // fit, does not have it.
+    expect(markup.slice(markup.indexOf('row-line'))).not.toContain('data-row-branch')
+  })
+
+  it('draws the chip at both row depths, since the branch is not a depth', () => {
+    const lone = render(fromRows([row({ branch: 'main' })]))
+    expect(lone).not.toContain('data-sidebar="menu-sub"')
+    expect(branchText(lone)).toEqual(['main'])
+
+    const split = render(
+      fromRows(splitWindow.map((r, i) => ({ ...r, branch: i === 0 ? 'main' : 'topic' }))),
+    )
+    expect(split).toContain('data-sidebar="menu-sub"')
+    expect(branchText(split)).toEqual(['main', 'topic'])
+  })
+
+  it('leaves the deeper row the tighter capsule and the shallower row its own', () => {
+    // The pair cap is the row's, not the chip's: a pane that is its own window
+    // sits one nesting level up and has ~49px more line to spend, so capping it
+    // at the split row's 80px would take room the row actually has.
+    const lone = chipPairs(render(fromRows([row({ command: 'zsh', branch: 'main' })])))[0]
+    const split = chipPairs(
+      render(fromRows(splitWindow.map((r) => ({ ...r, branch: 'main' })))),
+    )[0]
+    expect(classesOf(lone.tag)).toContain('max-w-32')
+    expect(classesOf(split.tag)).toContain('max-w-20')
+  })
+})
 
 /**
  * The agent's own branding, which the row is already saying in the mark beside

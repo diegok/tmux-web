@@ -361,6 +361,15 @@ export interface PaneNode {
    * poll already brought. Stale by up to one interval; never an authority.
    */
   path: string
+  /**
+   * `SnapshotRow.branch`: the branch `path` is on, `"@<7-hex>"` for a detached
+   * HEAD, `""` for a directory that is not in a work tree.
+   *
+   * Stale in exactly the way `path` is, and for the same reason -- it is read
+   * off the filesystem on the daemon's own schedule. The sidebar's chip is the
+   * only thing that renders it.
+   */
+  branch: string
   /** tmux's active pane within this window. */
   active: boolean
   appOwned: boolean
@@ -512,6 +521,7 @@ export function groupRows(rows: readonly SnapshotRow[]): SessionNode[] {
       title: row.title,
       label: row.label,
       path: row.path,
+      branch: row.branch,
       active: row.paneActive,
       appOwned: row.appOwned,
       activity: row.activity,

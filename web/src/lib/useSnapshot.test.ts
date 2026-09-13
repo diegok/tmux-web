@@ -243,6 +243,14 @@ describe('groupRows', () => {
     expect(session.windows[0].panes[0].path).toBe('/srv/api')
   })
 
+  // Beside the path and for the same reason: the chip that draws it is one
+  // component away, and a tree that dropped the field would look identical in
+  // every screenshot the daemon's reader has not filled in yet.
+  it('carries the branch onto the pane, beside the directory it was read from', () => {
+    const [session] = groupRows([row({ path: '/srv/api', branch: 'feature/x' })])
+    expect(session.windows[0].panes[0].branch).toBe('feature/x')
+  })
+
   it('carries the agent fields onto the pane, since the dot is made of them', () => {
     const question = { text: 'Run `rm -rf build`?', choices: ['Yes', 'No'] }
     const [session] = groupRows([

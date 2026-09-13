@@ -301,7 +301,10 @@ test('a pane title gets a line of its own, cut, and scrolled only when it is too
   // second line is spent to print `sh`.
   const shell = windowRow(page, BASE_WINDOW)
   await expect(shell.locator('.row-line')).toHaveCount(0)
-  const capsule = shell.locator('[data-slot="badge"]')
+  // `:not([data-row-branch])` because the row carries a second badge whenever
+  // the pane is inside a work tree, and this harness's panes inherit the
+  // checkout the suite is run from -- so on this repository it always is one.
+  const capsule = shell.locator('[data-slot="badge"]:not([data-row-branch])')
   await expect(capsule).toHaveText('sh')
   expect(await capsule.evaluate((el) => getComputedStyle(el).fontFamily)).toMatch(/mono/i)
 })

@@ -621,6 +621,15 @@ export class TerminalSession {
   }
 
   /**
+   * Pop a pane's copy-mode layer. Always named, unlike `copyMode`: the server
+   * refuses an unnamed pane. See internal/front/ws.go's "end-mode".
+   */
+  endMode(pane: string): boolean {
+    if (this.#phase !== 'ready' || !this.#transport) return false
+    return this.#transport.endMode(pane)
+  }
+
+  /**
    * Reconnect now instead of waiting out the backoff, and from "ended" or
    * "gone" as well: there the user is explicitly asking for a new session,
    * which is what a new socket is. A session name can be reused, so "gone" has
@@ -982,6 +991,20 @@ export interface TerminalHandle {
   select(pane: string): boolean
   /** Enter tmux copy-mode, where this app's scrollback lives. */
   copyMode(pane?: string): boolean
+  /**
+   * Write bytes to the attached pane's PTY. The reply box's only route to the
+   * wire: it is `TerminalSession.write`, which is the transport, and NOT
+   * `useTerminal().write`, which paints the local canvas and sends nothing.
+   *
+   * Getting that backwards is the worst outcome this file has available -- the
+   * reply appears in the terminal, character for character, looking exactly
+   * like it worked, and the pane never receives it. No test in vitest can tell
+   * the two apart, because the markup is identical. The guard is that the hook's
+   * `write` is bound as `paint` below, so there is no local `write` to reach for.
+   */
+  send(bytes: string | Uint8Array): boolean
+  /** Pop the pane's copy-mode layer. See internal/front/ws.go's "end-mode". */
+  endMode(pane: string): boolean
   focus(): void
   /** Reconnect immediately, ignoring the backoff. */
   retry(): void
@@ -1020,7 +1043,12 @@ const INITIAL_STATUS: TerminalStatus = {
 }
 
 export function Terminal({ session, label, url, className, onStatusChange, ref }: TerminalProps) {
-  const { ref: termRef, write, focus } = useTerminal()
+  // `write` is bound as `paint`, and the rename is the guard: this hook's
+  // `write` puts characters on the local canvas and sends nothing, while
+  // `TerminalSession.write` is the socket. Under their real names the two are
+  // one keystroke apart and the wrong one looks like it worked. Nothing in this
+  // component may now be handed a function called `write` by accident.
+  const { ref: termRef, write: paint, focus } = useTerminal()
   const [status, setStatus] = useState<TerminalStatus>(INITIAL_STATUS)
 
   const sessionRef = useRef<TerminalSession | null>(null)
@@ -1057,7 +1085,7 @@ export function Terminal({ session, label, url, className, onStatusChange, ref }
       url: socketUrl,
       session,
       paneKey: paneStorageKey(session),
-      onData: write,
+      onData: paint,
       onStatus: (next) => {
         setStatus(next)
         statusCallback.current?.(next)
@@ -1070,13 +1098,16 @@ export function Terminal({ session, label, url, className, onStatusChange, ref }
       term.stop()
       sessionRef.current = null
     }
-  }, [session, socketUrl, write])
+  }, [session, socketUrl, paint])
 
   useImperativeHandle(
     ref,
     () => ({
       select: (pane: string) => sessionRef.current?.select(pane) ?? false,
       copyMode: (pane?: string) => sessionRef.current?.copyMode(pane) ?? false,
+      // The transport, deliberately: `sessionRef.current.write`, never `paint`.
+      send: (bytes: string | Uint8Array) => sessionRef.current?.write(bytes) ?? false,
+      endMode: (pane: string) => sessionRef.current?.endMode(pane) ?? false,
       focus,
       retry: () => sessionRef.current?.retryNow(),
     }),

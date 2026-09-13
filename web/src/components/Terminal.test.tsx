@@ -645,6 +645,28 @@ describe('position', () => {
       { type: 'copy-mode', pane: '%3' },
     ])
   })
+
+  it('sends end-mode with the pane named, and not before the socket is up', () => {
+    // The reply box's first frame, and the only way out of copy mode from the
+    // browser -- the header offers a way in and, until this, none back. Always
+    // named: the server refuses an unnamed pane, unlike `copy-mode`.
+    //
+    // The `false` below is honestly the Transport's own refusal and not this
+    // class's `#phase` check: every close nulls `#transport`, so there is no
+    // reachable state with a connected socket and a phase short of `ready`,
+    // and no assertion can separate the two guards. Mirrored from `copyMode`
+    // for that reason rather than because a test demanded it.
+    const { term } = makeSession()
+    term.start()
+    expect(term.endMode('%3')).toBe(false)
+    const ws = MockWebSocket.last
+    ws.open()
+    expect(term.endMode('%3')).toBe(true)
+    expect(controls(ws).map((f) => f.json)).toEqual([
+      { type: 'where' },
+      { type: 'end-mode', pane: '%3' },
+    ])
+  })
 })
 
 /**

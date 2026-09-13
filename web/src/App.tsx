@@ -39,6 +39,8 @@ import {
   promptAction,
   promptDialogReducer,
 } from '@/components/PromptDialog'
+import { ReplyBox, dispatchReply, showReplyBox } from '@/components/ReplyBox'
+import type { ReplyFrame } from '@/components/ReplyBox'
 import { Terminal } from '@/components/Terminal'
 import type { TerminalHandle, TerminalStatus } from '@/components/Terminal'
 import { Separator } from '@/components/ui/separator'
@@ -506,6 +508,26 @@ export default function App() {
     return ok
   }, [])
 
+  /**
+   * Out of copy mode again. The header has offered a way *in* since v1 and, as
+   * of Task 14, this is the way back out -- worth a button of its own quite
+   * apart from the reply box, which sends it as a frame before every reply.
+   */
+  const endMode = useCallback(() => {
+    if (activePane) term.current?.endMode(activePane)
+  }, [activePane])
+
+  /**
+   * The reply box's frames, onto the wire in the array's order.
+   *
+   * `term.current` is the sink, and its `send` is `TerminalSession.write` --
+   * the transport. See the note on `TerminalHandle.send`; that one binding is
+   * the whole feature, and no vitest assertion can see it.
+   */
+  const sendReply = useCallback((frames: ReplyFrame[]) => {
+    dispatchReply(frames, term.current)
+  }, [])
+
   return (
     // One theme for the app and the terminal at once -- both are CSS custom
     // properties -- so the provider wraps everything, and the class it writes on
@@ -576,6 +598,15 @@ export default function App() {
               </button>
               <button
                 type="button"
+                onClick={endMode}
+                disabled={status?.phase !== 'ready' || !activePane}
+                className="hover:bg-accent hover:text-accent-foreground rounded-md border px-2 py-1 text-xs font-medium disabled:opacity-50"
+                title="Leave copy mode, so typing reaches the pane again"
+              >
+                End mode
+              </button>
+              <button
+                type="button"
                 onClick={() => setCaptureOpen(true)}
                 disabled={!activePane}
                 className="hover:bg-accent hover:text-accent-foreground rounded-md border px-2 py-1 text-xs font-medium disabled:opacity-50"
@@ -586,22 +617,35 @@ export default function App() {
               <ConnectionDot status={status} />
             </div>
           </header>
-          <div className="min-h-0 flex-1">
-            {target ? (
-              <Terminal
-                session={target}
-                label={sessionName ?? target}
-                onStatusChange={setStatus}
-                ref={term}
-              />
-            ) : (
-              <NoSession
-                loaded={loaded}
-                onNewSession={() =>
-                  dispatchPrompt({ type: 'open', spec: newSessionPrompt() })
-                }
-              />
-            )}
+          <div className="flex min-h-0 flex-1 flex-col">
+            <div className="min-h-0 flex-1">
+              {target ? (
+                <Terminal
+                  session={target}
+                  label={sessionName ?? target}
+                  onStatusChange={setStatus}
+                  ref={term}
+                />
+              ) : (
+                <NoSession
+                  loaded={loaded}
+                  onNewSession={() =>
+                    dispatchPrompt({ type: 'open', spec: newSessionPrompt() })
+                  }
+                />
+              )}
+            </div>
+            {/*
+              The reply box, at the foot of the terminal and always there: the
+              rule takes the pane's agent state and ignores it, deliberately.
+              See `showReplyBox`. It is passed the same `activePane` the
+              breadcrumb and the sidebar highlight are drawn from, so the pane
+              it names is the pane on screen.
+            */}
+            {showReplyBox({
+              attached: target !== null,
+              agentState: located?.pane.agentState ?? '',
+            }) && <ReplyBox pane={activePane} onSend={sendReply} />}
           </div>
         </SidebarInset>
 

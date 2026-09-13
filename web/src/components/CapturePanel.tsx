@@ -80,10 +80,17 @@
  * tabbable child on open. Since Task 8 that child is the **pane selector**,
  * which makes this prevention load-bearing rather than prophylactic: focus
  * moving into a control on open is a keyboard on a phone, and a focused select
- * is one an errant swipe can also change. Focus goes to the dialog container
- * instead, so Escape still closes it and everything inside is still reachable
- * by tab. This is the first dialog in the app that needs it: do not copy the
- * shape of `DevicesDialog` or `KillDialog`, neither of which has this problem.
+ * is one an errant swipe can also change. This is the first dialog in the app
+ * that needs it: do not copy the shape of `DevicesDialog` or `KillDialog`,
+ * neither of which has this problem.
+ *
+ * Where focus goes instead is **nowhere**, and this sentence used to say "to
+ * the dialog container" -- corrected in Task 9 by measuring it. Radix reaches
+ * for the container only when the auto-focus event is not prevented, so focus
+ * stays exactly where the tap left it, on the button that opened the panel.
+ * Escape still closes the panel from there, and everything inside is still
+ * reachable by tab; `e2e/capture.spec.ts` asserts the first of those rather
+ * than assuming it, and is the only place in the suite that can see any of it.
  *
  * **3. Copy-all copies from state already in memory and never fetches first.**
  * Two reasons, and they point the same way. iOS Safari rejects a `writeText`

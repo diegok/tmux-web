@@ -62,6 +62,9 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     // The pane's working directory, as of the poll. On the wire and in the
     // tree; nothing renders it yet.
     path: '/srv/work',
+    // Not in a work tree -- which is what "" means, and where most panes are.
+    // On the wire and in the tree; nothing renders it yet.
+    branch: '',
     // A shell: the daemon computes no state for it.
     agentState: '',
     finishedAt: 0,
@@ -129,7 +132,7 @@ describe('contract with the daemon', () => {
     // A literal, never `Object.keys(row()).length`: the count is here to make a
     // field added on one side only fail, and a count derived from the
     // TypeScript side would agree with itself forever.
-    expect(tags).toHaveLength(19)
+    expect(tags).toHaveLength(20)
     expect(Object.keys(row()).sort()).toEqual(tags.sort())
   })
 })
@@ -1353,6 +1356,13 @@ describe('SnapshotPoller', () => {
     // reconciles nothing, and the pane that has `cd`'d somewhere else goes on
     // reporting the directory it left -- to whatever reads it next.
     ['path', { path: '/srv/other' }],
+    // `branch` moves for a reason none of the other fields share: a `git
+    // switch` in the pane changes this alone, with the path, the title and the
+    // command all standing still. Spelled out here rather than left to the loop
+    // above because nothing renders it yet, which is exactly the condition
+    // under which it is dropped from `rowsEqual` as dead weight -- and then the
+    // chip that Task 13 draws names the branch the pane has left.
+    ['branch', { branch: 'feature/x' }],
   ])('rebuilds the tree when only %s changed', async (_name, moved) => {
     const base = row({ paneId: '%1', command: 'claude', agentState: 'working' })
 

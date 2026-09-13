@@ -92,6 +92,13 @@ type Row struct {
 	// interval stale and can name a directory that has since been removed, so
 	// panePath stats it before it reaches `-c`. Nothing renders it yet.
 	Path string `json:"path"`
+	// Branch is the pane's git branch: "" when the path is not in a work tree,
+	// and "@<7-hex>" when HEAD is detached.
+	//
+	// Read off .git/HEAD from a goroutine of its own, never the poll's, so it
+	// is up to a poll interval stale in exactly the way Path is. One authority
+	// -- the filesystem -- and nothing about the agent enters it.
+	Branch string `json:"branch"`
 	// StateSource is which authority decided AgentState: "event", "screen", or
 	// "" when nothing did.
 	//

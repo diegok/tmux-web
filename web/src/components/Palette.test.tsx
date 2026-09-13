@@ -45,6 +45,8 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     title: 'devbox',
     // The pane's working directory, as of the poll; nothing renders it yet.
     path: '/srv/work',
+    // Not in a work tree, which is what "" means. Nothing renders it yet.
+    branch: '',
     // A shell: the daemon computes no state for it, and "" is not a state.
     agentState: '',
     finishedAt: 0,

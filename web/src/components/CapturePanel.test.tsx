@@ -85,6 +85,7 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     command: 'zsh',
     title: 'devbox',
     path: '/srv/work',
+    branch: '',
     agentState: '',
     finishedAt: 0,
     activity: '',

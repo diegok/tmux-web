@@ -171,6 +171,16 @@ export interface SnapshotRow {
    */
   path: string
   /**
+   * The pane's git branch, `"@<7-hex>"` when its HEAD is detached, and `""`
+   * when `path` is not inside a work tree at all -- which is most panes.
+   *
+   * Read off `.git/HEAD` by the daemon, on its own schedule rather than the
+   * poll's, so it is stale in exactly the way `path` is. Nothing the agent says
+   * reaches it: the filesystem is the only authority on which branch a
+   * directory is on.
+   */
+  branch: string
+  /**
    * What the agent's own integration says it is doing, or "".
    *
    * "" covers every pane no integration reports for -- not an agent, no
@@ -1115,6 +1125,10 @@ function rowsEqual(a: readonly SnapshotRow[], b: readonly SnapshotRow[]): boolea
       // reach the tree -- and the check would be added back the day something
       // finally read it, by someone debugging why it was always wrong.
       x.path === y.path &&
+      // Moves entirely on its own: a `git switch` changes this and nothing else
+      // about the pane, so a comparison that skips it leaves the chip naming
+      // the branch the pane has left.
+      x.branch === y.branch &&
       x.paneActive === y.paneActive &&
       x.appOwned === y.appOwned &&
       x.agentState === y.agentState &&

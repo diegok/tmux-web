@@ -14,7 +14,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { pendingStep } from './App'
+import { focusAfterSelect, pendingStep } from './App'
 import type { TerminalPhase, TerminalStatus } from '@/components/Terminal'
 
 /** A terminal status, defaulting to a live socket that reports no pane. */
@@ -72,5 +72,26 @@ describe('pendingStep', () => {
     for (const phase of dead) {
       expect(pendingStep('%7', status({ phase, pane: '%7' })), phase).toBe('hold')
     }
+  })
+})
+
+describe('focusAfterSelect', () => {
+  it('hands the terminal the keyboard by default', () => {
+    // The sidebar row and the palette. Both take focus themselves -- a sidebar
+    // button keeps it, a closing palette leaves it on <body> -- so without this
+    // you land on a pane and cannot type into it. Pinned from this side as
+    // well as from the panel's, because a default that quietly became "only
+    // when asked" is a worse regression than the bug the option exists for.
+    expect(focusAfterSelect()).toBe(true)
+    expect(focusAfterSelect(undefined)).toBe(true)
+    expect(focusAfterSelect({})).toBe(true)
+    expect(focusAfterSelect({ focus: true })).toBe(true)
+  })
+
+  it('declines only when a caller says so', () => {
+    // The capture panel, and nothing else today: it is a modal, the focus
+    // scope owns focus while it is open, and on a phone taking it would raise
+    // the soft keyboard the panel exists to avoid.
+    expect(focusAfterSelect({ focus: false })).toBe(false)
   })
 })

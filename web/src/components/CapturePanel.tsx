@@ -8,6 +8,63 @@
  * box's text and delivers the remainder to the program as input. Removing the
  * reason to be in copy mode at all is most of what this panel is for.
  *
+ * ## The selector *is* the tab's selection, and what that costs
+ *
+ * Changing pane in here goes through App's `handleSelectPane` -- the same call
+ * a sidebar row click and a palette row make -- and never through a `useState`
+ * of this panel's own. The alternative is deliberately unrepresentable: the
+ * reply box (Phase D) writes to the tab's client's active pane, and on a phone
+ * this panel covers it, so a panel-local selection would let you read pane A,
+ * close the panel, type into the box and send to pane B, **with nothing on
+ * screen having lied to you at any point**. There is one current pane in this
+ * app and this is one more control over it, not a second one.
+ *
+ * **The cost, stated rather than discovered: this moves tmux's active pane, and
+ * the active pane is a window property shared with every attached client.** So
+ * browsing panes in here nudges the owner's local terminal in that window --
+ * one of the three window-level properties v1 records as shared with anyone
+ * else attached. That is accepted: it is not a new class of surprise, since a
+ * sidebar row click already does exactly this, but it is the existing one
+ * reached through a control that *invites browsing*, and this paragraph is
+ * where that is written down rather than folded away.
+ *
+ * **A pane in another group is not one fork.** `handleSelectPane` returns early
+ * for a pane outside the tab's session group, setting `pendingPane` and
+ * re-attaching -- which tears the socket down, brings up a new throwaway tmux
+ * session in the new group, replays the selection on it and redraws. This
+ * selector reuses the palette's `paneEntries`, which spans **every** session in
+ * the snapshot (the current one is a flag on a row, not a filter over them), so
+ * the panel makes that path far easier to reach than the sidebar did. Hence the
+ * rows carry the palette's `unreachable` flag unchanged: a group with no
+ * session of its own left is offered and disabled rather than hidden, because
+ * those panes are running agents and dropping a working socket to discover the
+ * daemon will 404 is worse than a greyed row.
+ *
+ * **The capture follows the selection; it does not race it.** Nothing here
+ * issues a capture *after* a select. The panel has no pane of its own to
+ * capture: `paneId` is the tab's, the fetch effect is keyed on it, and
+ * `TerminalSession.select()` writes the pane and emits a status synchronously
+ * inside the click -- so `activePane`, and therefore this prop, has already
+ * moved by the time the effect runs. The version with a race in it is the one
+ * that commands its own capture alongside the select and passes it whichever
+ * pane id it happened to be holding.
+ *
+ * **What one selector does not buy.** The two controls can never *name*
+ * different panes; what neither controls is that pane moving underneath them.
+ * The active pane is shared, `App` records that `#pane` is written only by
+ * `select` and that nothing corrects it, and it deliberately declines to read
+ * `paneActive` back from the snapshot. Re-converging on a wake is Phase A's
+ * job. This panel's contribution is only that it does not add a *second* way to
+ * diverge.
+ *
+ * **A native `<select>`, not a Radix one.** Two reasons, pointing the same way.
+ * iOS and Android both answer a native select with a picker rather than a
+ * keyboard, which is decision 1 below applied to a second control; and a Radix
+ * `Select` portals its listbox into a `document`, so which rows exist and which
+ * are disabled would be assertable only from Playwright -- and `disabled`
+ * looked for in a shadcn class list is this project's recorded test that always
+ * passes, because the Tailwind list contains `disabled:pointer-events-none`.
+ *
  * ## Four things here are decisions, not styling
  *
  * **1. A `<pre>`, never a `<textarea>`.** The textarea is the version that
@@ -20,12 +77,13 @@
  * a class name only says a stylesheet somewhere might.
  *
  * **2. `onOpenAutoFocus` is prevented.** Radix's `Dialog` focuses its first
- * tabbable child on open. Here that is a button today and the pane selector
- * from Task 8 on -- either way, focus moving into the dialog's controls on a
- * phone is a keyboard. Focus goes to the dialog container instead, so Escape
- * still closes it and everything inside is still reachable by tab. This is the
- * first dialog in the app that needs it: do not copy the shape of
- * `DevicesDialog` or `KillDialog`, neither of which has this problem.
+ * tabbable child on open. Since Task 8 that child is the **pane selector**,
+ * which makes this prevention load-bearing rather than prophylactic: focus
+ * moving into a control on open is a keyboard on a phone, and a focused select
+ * is one an errant swipe can also change. Focus goes to the dialog container
+ * instead, so Escape still closes it and everything inside is still reachable
+ * by tab. This is the first dialog in the app that needs it: do not copy the
+ * shape of `DevicesDialog` or `KillDialog`, neither of which has this problem.
  *
  * **3. Copy-all copies from state already in memory and never fetches first.**
  * Two reasons, and they point the same way. iOS Safari rejects a `writeText`
@@ -68,6 +126,8 @@
 import { Copy, Loader2, RefreshCw } from 'lucide-react'
 import { useCallback, useEffect, useState } from 'react'
 
+import { paneEntries } from '@/components/Palette'
+import type { PaletteEntry } from '@/components/Palette'
 import { Button } from '@/components/ui/button'
 import {
   Dialog,
@@ -78,6 +138,7 @@ import {
 } from '@/components/ui/dialog'
 import { fetchCapture } from '@/lib/capture'
 import type { Capture } from '@/lib/capture'
+import type { SessionNode } from '@/lib/useSnapshot'
 
 /**
  * How old the capture on screen is, in the coarsest unit that still says
@@ -124,6 +185,60 @@ export function preventAutoFocus(e: Event): void {
   e.preventDefault()
 }
 
+/**
+ * How `handleSelectPane` is called from here.
+ *
+ * Structural rather than imported from `App`, which imports this module: the
+ * shape is three arguments and the third is the one this panel exists to pass.
+ */
+export type SelectPane = (paneId: string, groupKey: string, opts?: { focus?: boolean }) => void
+
+/**
+ * One row of the selector, in words.
+ *
+ * The palette's own fields, in the palette's own order, so a pane reads the
+ * same here as it does there -- `work › 1: api · pane 0 · claude`. The command is
+ * last because it is what a person actually looks for; `unreachable` is said
+ * out loud because a disabled row with no reason on it reads as a bug.
+ */
+export function paneOptionLabel(entry: PaletteEntry): string {
+  const parts = [entry.label]
+  if (entry.detail) parts.push(entry.detail)
+  parts.push(entry.command)
+  if (entry.unreachable) parts.push('unreachable')
+  return parts.join(' · ')
+}
+
+/**
+ * A row was chosen: move the tab, or do nothing at all.
+ *
+ * Three refusals, and each of them is a thing that would otherwise be sent to
+ * tmux. The pane already on screen is the first: re-selecting it writes the
+ * shared active pane again for no gain, and a selector that fired on every
+ * render rather than on every change would show up here and nowhere else. An
+ * `unreachable` row is the second -- the browser will not let a disabled
+ * `<option>` be chosen, and this is the half that does not depend on the
+ * browser. An id no row offers is the third: the placeholder, and a pane that
+ * died between the render and the tap.
+ *
+ * Nothing is captured here. The capture is keyed on the pane the tab is on, so
+ * it follows this call rather than racing it; see the module comment.
+ */
+export function choosePane(
+  entries: readonly PaletteEntry[],
+  chosen: string,
+  current: string | null,
+  selectPane: SelectPane,
+): void {
+  if (chosen === current) return
+  const entry = entries.find((e) => e.id === chosen)
+  if (!entry || entry.unreachable || entry.action.kind !== 'pane') return
+  // `{ focus: false }`, and this is the whole reason `handleSelectPane` has an
+  // options argument: from inside a Radix modal, focusing the terminal raises
+  // a phone's soft keyboard inside the tap gesture. See `focusAfterSelect`.
+  selectPane(entry.action.paneId, entry.action.groupKey, { focus: false })
+}
+
 /** The one thing this panel needs from `navigator.clipboard`. */
 export interface ClipboardWriter {
   writeText(text: string): Promise<void>
@@ -147,8 +262,18 @@ export function copyCapture(
 }
 
 export interface CapturePanelBodyProps {
-  /** The pane the capture is of, named in the header even before one arrives. */
+  /**
+   * The pane the capture is of, named in the header even before one arrives --
+   * and the selector's value. This is the tab's selection, handed down; the
+   * panel keeps no pane of its own for it to disagree with.
+   */
   paneId: string | null
+  /** Every session the snapshot can see, for the selector. */
+  groups: readonly SessionNode[]
+  /** The group this tab is attached to, which is what makes a row reachable. */
+  activeSession: string | null
+  /** `handleSelectPane`. Called with `{ focus: false }`; see `choosePane`. */
+  onSelectPane: SelectPane
   capture: Capture | null
   /** The daemon's own sentence about why there is no capture. */
   error: string | null
@@ -170,6 +295,9 @@ export interface CapturePanelBodyProps {
  */
 export function CapturePanelBody({
   paneId,
+  groups,
+  activeSession,
+  onSelectPane,
   capture,
   error,
   loading,
@@ -179,6 +307,12 @@ export function CapturePanelBody({
   onCopy,
 }: CapturePanelBodyProps) {
   const notice = capture ? truncationNotice(capture.truncated, capture.lines) : null
+  const entries = paneEntries(groups, paneId, activeSession)
+  // The pane the tab is on with no row to stand for it: it died between polls,
+  // or the snapshot has not loaded. Without this the control would show blank
+  // while the header names a pane, which is the one thing a single selection is
+  // supposed to make impossible.
+  const orphaned = paneId !== null && !entries.some((e) => e.id === paneId)
   return (
     <>
       <DialogHeader className="pr-8">
@@ -191,6 +325,27 @@ export function CapturePanelBody({
               : 'nothing captured'}
         </DialogDescription>
       </DialogHeader>
+
+      {/*
+        The selector, and it *is* the tab's selection -- see the module comment
+        for what that costs and why it is worth it. A native `<select>`: on a
+        phone it is a picker rather than a keyboard, and here it is markup a
+        test can read rather than a portal it cannot.
+      */}
+      <select
+        aria-label="Pane"
+        className="bg-background text-foreground w-full rounded-md border px-2 py-1 text-sm"
+        value={paneId ?? ''}
+        onChange={(e) => choosePane(entries, e.target.value, paneId, onSelectPane)}
+      >
+        {paneId === null && <option value="">No pane</option>}
+        {orphaned && <option value={paneId}>{paneId} · gone</option>}
+        {entries.map((entry) => (
+          <option key={entry.id} value={entry.id} disabled={entry.unreachable}>
+            {paneOptionLabel(entry)}
+          </option>
+        ))}
+      </select>
 
       <div className="flex flex-wrap items-center gap-2">
         <Button type="button" variant="outline" size="sm" onClick={onRecapture} disabled={loading}>
@@ -246,8 +401,18 @@ export function CapturePanelBody({
 export interface CapturePanelProps {
   open: boolean
   onOpenChange: (open: boolean) => void
-  /** The pane to capture. Task 8 puts a selector on this. */
+  /**
+   * The pane to capture: the tab's selection, and the selector's value. The
+   * panel holds no second copy of it -- moving the selector moves this, by
+   * going through `onSelectPane`.
+   */
   paneId: string | null
+  /** Every session the snapshot can see, for the selector. */
+  groups: readonly SessionNode[]
+  /** The group this tab is attached to. */
+  activeSession: string | null
+  /** `handleSelectPane`, unchanged, and called with `{ focus: false }`. */
+  onSelectPane: SelectPane
 }
 
 /**
@@ -256,7 +421,14 @@ export interface CapturePanelProps {
  * Opening captures, and Recapture captures again. Nothing else does -- see
  * decision 4 in the module comment.
  */
-export function CapturePanel({ open, onOpenChange, paneId }: CapturePanelProps) {
+export function CapturePanel({
+  open,
+  onOpenChange,
+  paneId,
+  groups,
+  activeSession,
+  onSelectPane,
+}: CapturePanelProps) {
   const [capture, setCapture] = useState<Capture | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -275,6 +447,10 @@ export function CapturePanel({ open, onOpenChange, paneId }: CapturePanelProps) 
     setCopied(false)
   }, [open])
 
+  // Opening, Recapture, and a change of pane. The third is the selector's:
+  // moving it moves the tab, which moves `paneId`, which lands here -- so the
+  // capture follows the selection instead of racing it, and there is no path
+  // that fetches one pane's scrollback under another pane's name.
   useEffect(() => {
     if (!open || paneId === null) return
     const controller = new AbortController()
@@ -335,6 +511,9 @@ export function CapturePanel({ open, onOpenChange, paneId }: CapturePanelProps) 
       >
         <CapturePanelBody
           paneId={paneId}
+          groups={groups}
+          activeSession={activeSession}
+          onSelectPane={onSelectPane}
           capture={capture}
           error={error}
           loading={loading}

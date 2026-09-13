@@ -123,6 +123,36 @@ function forcedSession(): string | null {
   return new URLSearchParams(window.location.search).get('session')
 }
 
+/** What a caller of `handleSelectPane` can ask for beyond the pane itself. */
+export interface SelectPaneOptions {
+  /**
+   * Hand the terminal the keyboard after the selection lands. Defaults to
+   * true; see `focusAfterSelect` for who says otherwise and why.
+   */
+  focus?: boolean
+}
+
+/**
+ * Whether a selection should end by focusing the terminal.
+ *
+ * True unless a caller says otherwise, and the default is the load-bearing
+ * half: the sidebar row and the palette both want it, for the reasons written
+ * beside the call. The one caller that passes `false` is the capture panel,
+ * which is a Radix modal -- focus moving to the terminal from inside one is
+ * dragged back by the focus scope, and on the way through the terminal's input
+ * takes focus *inside a tap gesture*, which is a soft keyboard rising in the
+ * full-screen dialog that exists to be read without one.
+ *
+ * A predicate rather than an inline `opts?.focus !== false` because that
+ * expression is the whole of the decision and this suite is `react-dom/server`
+ * in node: there is no other way to pin both directions of it, and pinning only
+ * one leaves `=== true` -- the sidebar and the palette silently no longer
+ * focusing anything -- alive.
+ */
+export function focusAfterSelect(opts?: SelectPaneOptions): boolean {
+  return opts?.focus !== false
+}
+
 /**
  * What is left to do about a cross-session click, given what the terminal now
  * says. The rule behind the effect in `App`, out here where it can be tested:
@@ -264,7 +294,7 @@ export default function App() {
   }, [pendingPane, status])
 
   const handleSelectPane = useCallback(
-    (paneId: string, groupKey: string) => {
+    (paneId: string, groupKey: string, opts?: SelectPaneOptions) => {
       if (groupKey !== session) {
         setPendingPane(paneId)
         setPicked(groupKey)
@@ -279,12 +309,14 @@ export default function App() {
         return
       }
       // Navigating means "I want to work in that pane", so the keyboard has to
-      // follow. Both affordances that get here take focus themselves -- a
-      // sidebar button keeps it, and the palette closing leaves it on <body> --
-      // so without this you land on a pane and cannot type into it until you
-      // click the terminal. On a phone that also means no on-screen keyboard,
-      // and the palette is the primary way to navigate there.
-      term.current.focus()
+      // follow. Both affordances that got here before the capture panel take
+      // focus themselves -- a sidebar button keeps it, and the palette closing
+      // leaves it on <body> -- so without this you land on a pane and cannot
+      // type into it until you click the terminal. On a phone that also means
+      // no on-screen keyboard, and the palette is the primary way to navigate
+      // there. The capture panel is the one caller that opts out; see
+      // `focusAfterSelect`.
+      if (focusAfterSelect(opts)) term.current.focus()
     },
     [session],
   )
@@ -588,8 +620,21 @@ export default function App() {
           One capture, on demand. It is mounted always and gated on `open` so
           the fetch is the dialog's own effect rather than something App has to
           sequence; nothing is captured until it is opened.
+
+          Its pane selector is `handleSelectPane`, the same call the sidebar row
+          and the palette make -- so the panel has no pane of its own and cannot
+          come to name a different one than the breadcrumb, the sidebar or (from
+          Phase D) the reply box. `{ focus: false }` is the panel's business and
+          is passed there rather than here; see `focusAfterSelect`.
         */}
-        <CapturePanel open={captureOpen} onOpenChange={setCaptureOpen} paneId={activePane} />
+        <CapturePanel
+          open={captureOpen}
+          onOpenChange={setCaptureOpen}
+          paneId={activePane}
+          groups={groups}
+          activeSession={session}
+          onSelectPane={handleSelectPane}
+        />
 
         <PromptDialog
           state={prompt}

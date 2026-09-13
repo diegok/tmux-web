@@ -308,6 +308,21 @@ func TestOneWedgedDirectoryDoesNotStallTheOthers(t *testing.T) {
 // The reader is made busy through its clock, which it reads once per pass: that
 // is the one place a pass is guaranteed to pause, and blocking it needs no seam
 // that exists only for this test.
+//
+// BOTH passes are gated, and the second gate is what this test lacked when it
+// was flaky. A pass retains only the directories of its OWN set, so the second
+// pass -- whose set is the third one, naming neither of the earlier
+// directories -- deletes the first directory's entry as its first act, before
+// it reads anything. Pass one's worker is still climbing the disk at that
+// moment, so with the second pass ungated the first branch was only ever
+// visible if the prune happened to run before the store: on an idle machine the
+// worker had a climb, a stat and a read to do and lost that race, and the test
+// passed; under whole-suite load it sometimes won, and the entry it stored was
+// deleted a moment later and never came back -- an empty branch for the whole
+// budget, which is the shape the flake had. Parking the second pass in the
+// clock puts the observation BETWEEN the two events rather than racing them,
+// and everything asserted here is asserted while the reader is stopped
+// somewhere it cannot contradict.
 func TestTheMailboxHoldsOneSetAndDropsTheRest(t *testing.T) {
 	root := t.TempDir()
 	first := repoAt(t, root, "first", "ref: refs/heads/one")
@@ -316,31 +331,30 @@ func TestTheMailboxHoldsOneSetAndDropsTheRest(t *testing.T) {
 
 	var mu sync.Mutex
 	var passes int
-	busy := make(chan struct{})
-	resume := make(chan struct{})
-	var once sync.Once
-	release := func() { once.Do(func() { close(resume) }) }
-	// So that a failure below leaves nothing parked in the clock.
-	t.Cleanup(release)
+	// One gate per pass: busy says the pass has reached the clock, resume lets
+	// it go on. A third pass is deliberately ungated -- it must not happen, and
+	// the pass count below is what says so.
+	busy := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
+	resume := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
+	var once [2]sync.Once
+	release := func(n int) { once[n].Do(func() { close(resume[n]) }) }
+	// So that a failure below leaves no pass parked in the clock.
+	t.Cleanup(func() { release(0); release(1) })
 	nowFn := func() time.Time {
 		mu.Lock()
 		passes++
 		n := passes
 		mu.Unlock()
-		if n == 1 {
-			close(busy)
-			<-resume
+		if n <= len(busy) {
+			close(busy[n-1])
+			<-resume[n-1]
 		}
 		return time.Now()
 	}
 	r := startReader(t, newTestFS(), nowFn)
 
 	r.want([]string{first})
-	select {
-	case <-busy: // the reader has taken the first set and is inside it
-	case <-time.After(testDeadline):
-		t.Fatal("the reader never started a pass over the first set")
-	}
+	awaitPass(t, busy[0], "the reader never started a pass over the first set")
 
 	// Both offers under a deadline: a mailbox whose send BLOCKS would park the
 	// poll goroutine here, and a test that hangs has killed nothing.
@@ -348,9 +362,15 @@ func TestTheMailboxHoldsOneSetAndDropsTheRest(t *testing.T) {
 		r.want([]string{second})
 		r.want([]string{third})
 	})
-	release()
+	release(0)
 
+	// The second pass has taken a set and is stopped in the clock, ahead of the
+	// prune and ahead of every read of its own. That is the one window in which
+	// the first set's branch is a settled fact rather than a race.
+	awaitPass(t, busy[1], "the reader never started a pass over the set left in the mailbox")
 	awaitBranch(t, r, first, "one")
+	release(1)
+
 	awaitBranch(t, r, third, "three")
 	if got := r.branch(second); got != "" {
 		t.Errorf("the reader read the second set too (%s = %q): the mailbox queued instead of dropping, "+
@@ -360,6 +380,19 @@ func TestTheMailboxHoldsOneSetAndDropsTheRest(t *testing.T) {
 	defer mu.Unlock()
 	if passes != 2 {
 		t.Errorf("the reader ran %d passes over three sets, want 2: the first, and the newest one waiting", passes)
+	}
+}
+
+// awaitPass waits for a gated pass to reach the clock and stop there. Like
+// mustReturn, it turns a pass that never arrives into a sentence rather than a
+// hung binary -- and the deadline is only ever paid on the way to that failure,
+// because a pass that does arrive closes its channel and the wait ends there.
+func awaitPass(t *testing.T, busy <-chan struct{}, never string) {
+	t.Helper()
+	select {
+	case <-busy:
+	case <-time.After(testDeadline):
+		t.Fatal(never)
 	}
 }
 

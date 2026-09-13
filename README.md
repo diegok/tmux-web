@@ -122,6 +122,21 @@ connections rather than only failing the next request.
 - Scroll with the mouse wheel to enter tmux's copy mode.
 - `Shift+click` or `Ctrl+click` a URL to open it. Real hyperlinks (`gh`, `delta`,
   `eza`) and bare URLs both work; a plain click still goes to tmux.
+- **Answer an agent from the box under the terminal.** Enter sends what you
+  typed and a Return; `Shift+Enter` gives you another line; the small `No ⏎`
+  button sends the text on its own, which is what a `y/n` prompt or a
+  single-key menu wants. The box cancels the pane's copy mode before the bytes
+  land, because prose contains `q` and copy mode would eat the reply at the
+  first one. Changing pane clears the draft and says so — the bytes follow the
+  selection, and half a sentence meant for one agent must not arrive at
+  another's prompt.
+- **Paste several lines and they arrive as several lines, not several turns.**
+  A multi-line paste goes out wrapped in bracketed paste, which every one of
+  the three agents asks for and honours — opencode even shows it as a
+  `[Pasted ~3 lines]` chip. The wrapping carries no Return, so the lines sit in
+  the agent's own prompt for you to read before you spend a turn on them:
+  submit from the pane, or with a one-line reply after it. A single-line paste
+  is an ordinary reply and still submits.
 - Close the tab whenever. tmux is where the state lives, so reconnecting drops
   you back on the same pane.
 

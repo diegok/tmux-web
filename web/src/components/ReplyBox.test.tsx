@@ -22,16 +22,32 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
 import {
+  PASTE_END,
+  PASTE_START,
   REPLY_PLACEHOLDER,
   ReplyBox,
   dispatchReply,
   draftAfterPaneChange,
+  draftOrigin,
   replyFrames,
   replyHint,
   replyKey,
   showReplyBox,
+  willBracket,
 } from './ReplyBox'
 import type { ReplySink } from './ReplyBox'
+
+/** The bytes of a string, as numbers, which is the only way to see a stray CR. */
+function codes(s: string): number[] {
+  return [...s].map((c) => c.charCodeAt(0))
+}
+
+/** The data frame of a send, or a failure naming what came back instead. */
+function dataOf(frames: ReturnType<typeof replyFrames>): string {
+  const last = frames.at(-1)
+  if (!last || last.kind !== 'data') throw new Error(`no data frame in ${JSON.stringify(frames)}`)
+  return last.bytes
+}
 
 /** A keydown, as `replyKey` reads one: no modifier held unless it is named. */
 function key(k: string, held: Partial<Record<'shiftKey' | 'ctrlKey' | 'altKey' | 'metaKey', boolean>> = {}) {
@@ -67,15 +83,15 @@ describe('replyFrames', () => {
     // `[]` and not "no data frame": an empty send has nothing to protect, and
     // an `end-mode` on its own would still pop the owner's copy mode -- his
     // scroll position, thrown away by a stray Enter.
-    expect(replyFrames('', { pane: '%3', withReturn: true })).toEqual([])
-    expect(replyFrames('', { pane: '%3', withReturn: false })).toEqual([])
+    expect(replyFrames('', { pane: '%3', withReturn: true, origin: 'type' })).toEqual([])
+    expect(replyFrames('', { pane: '%3', withReturn: false, origin: 'type' })).toEqual([])
   })
 
   it('sends a whitespace-only reply, which is not an empty one', () => {
     // A space is a legitimate answer -- it is what "press any key" wants, and
     // what advances a pager. The natural guess is the opposite, so it is
     // pinned here rather than left to whichever `trim()` someone adds later.
-    expect(replyFrames(' ', { pane: '%3', withReturn: false })).toEqual([
+    expect(replyFrames(' ', { pane: '%3', withReturn: false, origin: 'type' })).toEqual([
       { kind: 'end-mode', pane: '%3' },
       { kind: 'data', bytes: ' ' },
     ])
@@ -86,7 +102,7 @@ describe('replyFrames', () => {
     // finding. Task 16 measured it through a real PTY -- with the pane in copy
     // mode, `echo quit PARTIAL\r` loses its `q` to the cancel key and the
     // shell runs `uit PARTIAL`.
-    expect(replyFrames('hi', { pane: '%3', withReturn: true })).toEqual([
+    expect(replyFrames('hi', { pane: '%3', withReturn: true, origin: 'type' })).toEqual([
       { kind: 'end-mode', pane: '%3' },
       { kind: 'data', bytes: 'hi\r' },
     ])
@@ -95,7 +111,7 @@ describe('replyFrames', () => {
   it('ends the line with CR and never LF', () => {
     // The headline. `0x0a` is `C-j`, a different key, and an agent's prompt
     // does not answer to it.
-    const [, data] = replyFrames('hi', { pane: '%3', withReturn: true })
+    const [, data] = replyFrames('hi', { pane: '%3', withReturn: true, origin: 'type' })
     expect(data).toEqual({ kind: 'data', bytes: 'hi\r' })
     if (data.kind !== 'data') throw new Error('the second frame is the data')
     expect([...data.bytes].map((c) => c.charCodeAt(0))).toEqual([0x68, 0x69, 0x0d])
@@ -104,7 +120,7 @@ describe('replyFrames', () => {
   it('sends the bare text with no return when asked', () => {
     // The `y/n` case: one character, no Return, or the prompt takes the answer
     // and the Return as a second keystroke into whatever came next.
-    expect(replyFrames('y', { pane: '%3', withReturn: false })).toEqual([
+    expect(replyFrames('y', { pane: '%3', withReturn: false, origin: 'type' })).toEqual([
       { kind: 'end-mode', pane: '%3' },
       { kind: 'data', bytes: 'y' },
     ])
@@ -112,8 +128,8 @@ describe('replyFrames', () => {
 
   it('makes the two send controls differ by exactly the return', () => {
     // So that inverting `withReturn` cannot pass both cases above.
-    const withReturn = replyFrames('y', { pane: '%3', withReturn: true })
-    const without = replyFrames('y', { pane: '%3', withReturn: false })
+    const withReturn = replyFrames('y', { pane: '%3', withReturn: true, origin: 'type' })
+    const without = replyFrames('y', { pane: '%3', withReturn: false, origin: 'type' })
     expect(withReturn).not.toEqual(without)
     expect(withReturn.at(-1)).toEqual({ kind: 'data', bytes: 'y\r' })
     expect(without.at(-1)).toEqual({ kind: 'data', bytes: 'y' })
@@ -123,7 +139,7 @@ describe('replyFrames', () => {
     // `end-mode` names a pane and the server refuses an unnamed one, so there
     // is no frame to send -- but the data goes anyway. The bytes reach this
     // tab's client wherever tmux left it, which is where the user is looking.
-    expect(replyFrames('hi', { pane: null, withReturn: true })).toEqual([
+    expect(replyFrames('hi', { pane: null, withReturn: true, origin: 'type' })).toEqual([
       { kind: 'data', bytes: 'hi\r' },
     ])
   })
@@ -148,18 +164,134 @@ describe('dispatchReply', () => {
 
   it('walks the frames in order, onto the sink s two methods', () => {
     const { calls, sink } = recorder()
-    dispatchReply(replyFrames('hi', { pane: '%3', withReturn: true }), sink)
+    dispatchReply(replyFrames('hi', { pane: '%3', withReturn: true, origin: 'type' }), sink)
     expect(calls).toEqual(['end-mode %3', 'send hi\r'])
   })
 
   it('touches nothing for an empty reply', () => {
     const { calls, sink } = recorder()
-    dispatchReply(replyFrames('', { pane: '%3', withReturn: true }), sink)
+    dispatchReply(replyFrames('', { pane: '%3', withReturn: true, origin: 'type' }), sink)
     expect(calls).toEqual([])
   })
 
   it('drops the frames when there is no terminal', () => {
     expect(() => dispatchReply([{ kind: 'data', bytes: 'hi' }], null)).not.toThrow()
+  })
+})
+
+/**
+ * Bracketed paste.
+ *
+ * Measured on tmux 3.7b through the same PTY a tab's bytes take -- Claude Code
+ * 2.1.267, opencode 1.18.30 and pi all set `DECSET 2004` at their prompt and
+ * all three honour the wrappers, so this is the wrapping branch of Task 18 and
+ * not the refusal one. What the measurement also found, against the plan's
+ * premise: a bare LF is *not* submit in any of the three -- it inserts a line,
+ * and only CR (`0x0d`) submits. The wrappers are still what the bytes carry,
+ * because "LF happens not to submit in these three builds today" is an
+ * accident of three versions and `ESC[200~` is a contract; and because opencode
+ * only draws its `[Pasted ~3 lines]` chip when the wrappers told it a paste
+ * happened, which is the agent understanding the input rather than tolerating
+ * it.
+ */
+describe('bracketed paste', () => {
+  it('has the real escape byte in both halves, not a retyped one', () => {
+    // The recorded trap in this repo is an escape sequence copied out of prose:
+    // a two-character `\e`, or a rendered `^[`, both of which are ordinary text
+    // and neither of which tmux reads as a paste.
+    expect(codes(PASTE_START)).toEqual([0x1b, 0x5b, 0x32, 0x30, 0x30, 0x7e])
+    expect(codes(PASTE_END)).toEqual([0x1b, 0x5b, 0x32, 0x30, 0x31, 0x7e])
+  })
+
+  it('wraps a multi-line paste in exactly those bytes and no others', () => {
+    // The whole feature in one assertion, spelled as bytes: the two wrappers,
+    // the interior newline still `0x0a`, and nothing after `ESC[201~`. A
+    // trailing CR here is the submit the wrapping exists to withhold, and a
+    // missing `ESC[201~` leaves the agent's prompt in paste mode forever.
+    const frames = replyFrames('a\nb', { pane: '%3', withReturn: true, origin: 'paste' })
+    expect(codes(dataOf(frames))).toEqual([
+      0x1b, 0x5b, 0x32, 0x30, 0x30, 0x7e, 0x61, 0x0a, 0x62, 0x1b, 0x5b, 0x32, 0x30, 0x31, 0x7e,
+    ])
+  })
+
+  it('still cancels the pane s mode first', () => {
+    // A paste is prose too, and prose in copy mode loses its first cancel key.
+    expect(replyFrames('a\nb', { pane: '%3', withReturn: true, origin: 'paste' })[0]).toEqual({
+      kind: 'end-mode',
+      pane: '%3',
+    })
+  })
+
+  it('leaves a single-line paste alone, Return and all', () => {
+    // No interior newline, nothing to protect, and a Return the user wants:
+    // a one-line paste is the ordinary case and must keep behaving like one.
+    // This is also what a rule that fired on every paste would break.
+    expect(replyFrames('one line', { pane: '%3', withReturn: true, origin: 'paste' })).toEqual([
+      { kind: 'end-mode', pane: '%3' },
+      { kind: 'data', bytes: 'one line\r' },
+    ])
+  })
+
+  it('leaves a typed multi-line draft alone', () => {
+    // Same text, two origins, two answers -- the pair is the assertion. A
+    // Shift+Enter line is one the user asked for with the pane in front of
+    // them, and it still ends in the Return that submits it.
+    const pasted = dataOf(replyFrames('a\nb', { pane: '%3', withReturn: true, origin: 'paste' }))
+    const typed = dataOf(replyFrames('a\nb', { pane: '%3', withReturn: true, origin: 'type' }))
+    expect(typed).toBe('a\nb\r')
+    expect(pasted).not.toBe(typed)
+    expect(typed).not.toContain(PASTE_START)
+  })
+
+  it('gives both send controls the same bytes for a wrapped paste', () => {
+    // `withReturn` is what the two buttons differ by everywhere else, and the
+    // one place it stops mattering is here: there is no Return to withhold.
+    const a = replyFrames('a\nb', { pane: '%3', withReturn: true, origin: 'paste' })
+    const b = replyFrames('a\nb', { pane: '%3', withReturn: false, origin: 'paste' })
+    expect(a).toEqual(b)
+  })
+
+  it('sends nothing for an empty paste, as for an empty anything', () => {
+    expect(replyFrames('', { pane: '%3', withReturn: true, origin: 'paste' })).toEqual([])
+  })
+})
+
+describe('willBracket', () => {
+  it('is true only for a pasted draft with a newline in it', () => {
+    expect(willBracket('a\nb', 'paste')).toBe(true)
+    expect(willBracket('a\nb', 'type')).toBe(false)
+    expect(willBracket('a b', 'paste')).toBe(false)
+    expect(willBracket('a b', 'type')).toBe(false)
+  })
+
+  it('counts a trailing newline, which is what a copied line ends with', () => {
+    // Selecting a whole line in a terminal or an editor takes its newline with
+    // it, so `"one line\n"` is the commonest paste there is -- and it is a
+    // multi-line paste as far as an agent's prompt is concerned, because the
+    // newline is still a keystroke the prompt will read.
+    expect(willBracket('one line\n', 'paste')).toBe(true)
+  })
+})
+
+describe('draftOrigin', () => {
+  it('takes the paste when this change was one', () => {
+    expect(draftOrigin('type', 'a\nb', true)).toBe('paste')
+  })
+
+  it('stays a paste while the user types under it', () => {
+    // Paste a stack trace, then type "what causes this?" beneath it: the
+    // twelve lines above the question are still twelve lines.
+    expect(draftOrigin('paste', 'a\nb what causes this?', false)).toBe('paste')
+  })
+
+  it('is typing again once the box is empty', () => {
+    // Otherwise a draft cleared by hand and retyped would still be wrapped,
+    // and the origin would never come back without a remount.
+    expect(draftOrigin('paste', '', false)).toBe('type')
+  })
+
+  it('leaves a typed draft typed', () => {
+    expect(draftOrigin('type', 'hello', false)).toBe('type')
   })
 })
 
@@ -230,18 +362,34 @@ describe('draftAfterPaneChange', () => {
 
 describe('replyHint', () => {
   it('names the pane the bytes will reach', () => {
-    expect(replyHint('%3', false)).toContain('%3')
+    expect(replyHint('%3', false, false)).toContain('%3')
   })
 
   it('says the draft was cleared, rather than clearing it silently', () => {
-    const said = replyHint('%7', true)
-    expect(said).not.toBe(replyHint('%7', false))
+    const said = replyHint('%7', true, false)
+    expect(said).not.toBe(replyHint('%7', false, false))
     expect(said.toLowerCase()).toContain('cleared')
   })
 
   it('says something useful before the tab has learned its pane', () => {
-    expect(replyHint(null, false)).not.toBe('')
-    expect(replyHint(null, false)).not.toContain('null')
+    expect(replyHint(null, false, false)).not.toBe('')
+    expect(replyHint(null, false, false)).not.toContain('null')
+  })
+
+  it('warns that a wrapped paste carries no Return', () => {
+    // The one case where Send does not do what its label says. A user who
+    // pastes twelve lines, presses Send and sees the agent sit there needs the
+    // box to have told them beforehand, not the pane to tell them after.
+    const wrapped = replyHint('%3', false, true)
+    expect(wrapped).not.toBe(replyHint('%3', false, false))
+    expect(wrapped).toContain('%3')
+    expect(wrapped.toLowerCase()).toContain('no return')
+  })
+
+  it('still leads with the discarded draft, which is the more urgent news', () => {
+    // A cleared draft empties the box, so there is nothing left to wrap; if
+    // the two ever disagree the user needs to hear about the lost sentence.
+    expect(replyHint('%3', true, true)).toBe(replyHint('%3', true, false))
   })
 })
 
@@ -306,7 +454,7 @@ describe('the box itself', () => {
   })
 
   it('says where the bytes go', () => {
-    const hint = replyHint('%3', false)
+    const hint = replyHint('%3', false, false)
     expect(hint).not.toBe('')
     expect(footer('')).toContain(hint)
   })

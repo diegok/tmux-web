@@ -15,6 +15,15 @@
  * **The line ends with CR (`0x0d`), never LF.** `0x0a` is `C-j`, a different
  * key, and an agent's prompt does not answer to it.
  *
+ * **A multi-line paste is bracketed.** See `willBracket`: pasted text with a
+ * newline in it goes out inside `ESC[200~` … `ESC[201~`, and with no Return
+ * after it. Measured on tmux 3.7b, through the same PTY a browser tab's bytes
+ * take, against Claude Code 2.1.267, opencode 1.18.30 and pi -- all three set
+ * `DECSET 2004` at their prompt (`#{bracket_paste_flag}` is 1) and all three
+ * honour the wrappers: three lines land as one draft, unsubmitted, and
+ * opencode collapses them into its own `[Pasted ~3 lines]` chip, which is a
+ * thing it can only do because the wrappers told it a paste had happened.
+ *
  * ## Why the box is always here
  *
  * It does not appear on `blocked` and it does not take focus on mount. Three
@@ -62,6 +71,50 @@ export interface ReplySink {
 export const REPLY_PLACEHOLDER = 'Reply to this pane…'
 
 /**
+ * The two halves of a bracketed paste.
+ *
+ * Written with `\x1b` and never a rendered `^[` or a two-character `\e`: this
+ * repo has already lost a day to an escape sequence retyped out of prose rather
+ * than built from the byte, and the test checks the char codes for that reason.
+ */
+export const PASTE_START = '\x1b[200~'
+export const PASTE_END = '\x1b[201~'
+
+/** Where the draft in the box came from. */
+export type ReplyOrigin = 'paste' | 'type'
+
+/**
+ * The origin of the draft after one change to it.
+ *
+ * Sticky, and deliberately: paste a stack trace and then type "what causes
+ * this?" under it and the whole draft is still a paste, because the twelve
+ * lines above the question are still twelve lines. An empty box resets, so a
+ * draft cleared and retyped by hand is typing again.
+ *
+ * `fromPaste` is whether a `paste` event fired for *this* change. React runs
+ * `onPaste` before the `onChange` it causes, which is what makes a ref set in
+ * one and read in the other the honest answer rather than a guess.
+ */
+export function draftOrigin(prev: ReplyOrigin, next: string, fromPaste: boolean): ReplyOrigin {
+  if (next === '') return 'type'
+  return fromPaste ? 'paste' : prev
+}
+
+/**
+ * Whether this draft goes out wrapped.
+ *
+ * Two conditions, and the second one is the interesting half. A **single-line**
+ * paste is not wrapped: it has no interior newline to protect, so wrapping it
+ * would buy nothing and cost the Return -- and a rule that fires on everything
+ * is a rule no fixture can hold still. A **typed** draft is not wrapped either,
+ * even a multi-line one: Shift+Enter is a line the user asked for, one at a
+ * time, with the pane in front of them.
+ */
+export function willBracket(text: string, origin: ReplyOrigin): boolean {
+  return origin === 'paste' && text.includes('\n')
+}
+
+/**
  * What one press of a send control puts on the wire.
  *
  * Returns the frames in order, or `[]` for a send that must not happen at all.
@@ -76,13 +129,25 @@ export const REPLY_PLACEHOLDER = 'Reply to this pane…'
  * tab's client wherever tmux has it, which is the pane the user is looking at.
  * Blocking a reply on a pane id the app has not learned yet would refuse to
  * answer the agent on screen.
+ *
+ * A bracketed draft ignores `withReturn` and ends at `ESC[201~`. The Return is
+ * the submit, and twelve pasted lines are the one thing you want to read back
+ * off the pane before you spend a turn on them; both send controls therefore
+ * deliver the same bytes for a multi-line paste, and `replyHint` says so before
+ * the user presses either. Wrapping is a browser-side fact -- it is a property
+ * of what the input widget did, not of the pane -- so no flag for it goes on
+ * the wire and the daemon never learns a paste happened.
  */
 export function replyFrames(
   text: string,
-  opts: { pane: string | null; withReturn: boolean },
+  opts: { pane: string | null; withReturn: boolean; origin: ReplyOrigin },
 ): ReplyFrame[] {
   if (text === '') return []
-  const bytes = opts.withReturn ? `${text}\r` : text
+  const bytes = willBracket(text, opts.origin)
+    ? `${PASTE_START}${text}${PASTE_END}`
+    : opts.withReturn
+      ? `${text}\r`
+      : text
   const data: ReplyFrame = { kind: 'data', bytes }
   return opts.pane === null ? [data] : [{ kind: 'end-mode', pane: opts.pane }, data]
 }
@@ -148,13 +213,17 @@ export function draftAfterPaneChange(
 }
 
 /** The line under the box: where the bytes go, and what happened to the last draft. */
-export function replyHint(pane: string | null, discarded: boolean): string {
+export function replyHint(pane: string | null, discarded: boolean, bracketed: boolean): string {
   if (discarded) return 'The pane changed — the draft was cleared.'
   // No mention of Ctrl+C anywhere in this component: in a text field that is
   // the browser's copy, it cannot be reclaimed, and an interrupt stays
   // something you send by focusing the terminal. Saying otherwise would be
   // promising a key that does nothing.
   const where = pane === null ? 'this pane' : pane
+  // The one case where the send controls do not do what their labels say, so
+  // the line says it instead of letting the user find out by pressing Send and
+  // watching nothing get answered.
+  if (bracketed) return `Pasted lines go to ${where} as text — no Return, submit them in the pane.`
   return `Enter sends to ${where}, Shift+Enter for a newline.`
 }
 
@@ -191,8 +260,13 @@ export interface ReplyBoxProps {
  */
 export function ReplyBox({ pane, onSend, className }: ReplyBoxProps) {
   const [text, setText] = useState('')
+  const [origin, setOrigin] = useState<ReplyOrigin>('type')
   const [discarded, setDiscarded] = useState(false)
   const box = useRef<HTMLTextAreaElement | null>(null)
+  // Set by `onPaste`, read by the `onChange` that same event causes, cleared
+  // there. A ref and not state because it must be readable inside the very next
+  // render's handler rather than after a re-render.
+  const pasting = useRef(false)
 
   // React's own "adjust state when a prop changes" shape, rather than an
   // effect: the clear has to happen before the box is painted against the new
@@ -202,14 +276,18 @@ export function ReplyBox({ pane, onSend, className }: ReplyBoxProps) {
     const next = draftAfterPaneChange(text, seenPane, pane)
     setSeenPane(pane)
     setText(next.draft)
+    setOrigin('type')
     setDiscarded(next.discarded)
   }
 
+  const bracketed = willBracket(text, origin)
+
   function fire(withReturn: boolean) {
-    const frames = replyFrames(text, { pane, withReturn })
+    const frames = replyFrames(text, { pane, withReturn, origin })
     if (frames.length === 0) return
     onSend(frames)
     setText('')
+    setOrigin('type')
     setDiscarded(false)
   }
 
@@ -240,7 +318,12 @@ export function ReplyBox({ pane, onSend, className }: ReplyBoxProps) {
           value={text}
           onChange={(e) => {
             setText(e.target.value)
+            setOrigin(draftOrigin(origin, e.target.value, pasting.current))
+            pasting.current = false
             setDiscarded(false)
+          }}
+          onPaste={() => {
+            pasting.current = true
           }}
           onKeyDown={onKeyDown}
           placeholder={REPLY_PLACEHOLDER}
@@ -248,10 +331,19 @@ export function ReplyBox({ pane, onSend, className }: ReplyBoxProps) {
           className="max-h-32 min-h-8 resize-none py-1 font-mono text-sm"
         />
         <span className="text-muted-foreground px-0.5 text-[10px]">
-          {replyHint(pane, discarded)}
+          {replyHint(pane, discarded, bracketed)}
         </span>
       </div>
-      <Button type="button" size="sm" onClick={() => fire(true)} title="Send the reply and a Return">
+      <Button
+        type="button"
+        size="sm"
+        onClick={() => fire(true)}
+        title={
+          bracketed
+            ? 'Send the pasted lines as text — no Return, so nothing is submitted'
+            : 'Send the reply and a Return'
+        }
+      >
         Send
       </Button>
       {/*

@@ -157,7 +157,12 @@ func registerResumeAgent(t *testing.T, name string) (argvFile string) {
 	script := filepath.Join(dir, name)
 	// pwd -P rather than $PWD: tmux sets the process's working directory, but
 	// the PWD in the inherited environment is whatever the daemon's was.
-	body := "#!/bin/sh\n{ pwd -P; printf '%s\\n' \"$@\"; } > " + argvFile + "\nsleep 30\n"
+	//
+	// Written to a neighbour and renamed into place, because waitFor polls for
+	// a non-empty file and the two lines are two writes: a reader that arrives
+	// between them sees only the directory and reports one argument where there
+	// are two. A rename is atomic, so the file is either absent or complete.
+	body := "#!/bin/sh\n{ pwd -P; printf '%s\\n' \"$@\"; } > " + argvFile + ".part\nmv " + argvFile + ".part " + argvFile + "\nsleep 30\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatalf("write fake agent: %v", err)
 	}

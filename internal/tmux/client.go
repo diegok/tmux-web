@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Client runs tmux commands against one server.
@@ -495,4 +497,112 @@ func (c *Client) Capture(ctx context.Context, paneID string) (string, error) {
 		return "", fmt.Errorf("capture pane: %w", err)
 	}
 	return c.Run(ctx, "capture-pane", "-p", "-J", "-t", paneID)
+}
+
+// MaxCaptureBytes bounds one scrollback capture.
+//
+// The cap is on BYTES and not on lines, because a line is not a unit of size: a
+// 200-column pane's line is worth twice an 80-column pane's, and a full-width
+// 5000-line history at 200 columns is about 1 MB. Measured on a 200x50 pane
+// with a 5000-line history of ~88-character lines: the visible screen is 3904
+// bytes and 2.6 ms, `-S -2000` is 167 904 bytes and 5.1-5.7 ms, and the whole
+// history is 327 227 bytes and 7.6-8.0 ms. Depth is not what costs; the fork is.
+const MaxCaptureBytes = 256 << 10
+
+// maxCaptureLines is the deepest scrollback a caller may ask for.
+const maxCaptureLines = 5000
+
+// CaptureRange returns a pane's scrollback plus its visible screen, bounded.
+//
+// Separate from Capture, which the classifier owns and which deliberately has
+// no -S: a negative start line reaches into scrollback where a just-answered
+// approval box lives, and that is a false `blocked`. That reasoning is about
+// the classifier and does not transfer to a panel, so the panel gets its own
+// call rather than widening the classifier's.
+//
+// Truncation is from the TOP, on a rune boundary. The newest lines are the ones
+// the panel was opened for, and cutting the tail would throw away the answer to
+// keep the question. truncated says whether that happened, so the panel can say
+// so rather than showing a capture that silently begins mid-sentence.
+func (c *Client) CaptureRange(ctx context.Context, paneID string, lines int) (text string, truncated bool, err error) {
+	// As in Capture: tmux resolves an empty target to "whatever is current"
+	// and exits 0, so an unvalidated id shows the browser some other pane's
+	// scrollback under this pane's name.
+	if err := ValidatePaneID(paneID); err != nil {
+		return "", false, fmt.Errorf("capture range: %w", err)
+	}
+	out, err := c.Run(ctx, captureRangeArgs(paneID, lines)...)
+	if err != nil {
+		return "", false, err
+	}
+	text, truncated = capCapture(out)
+	return text, truncated, nil
+}
+
+// capCapture applies MaxCaptureBytes to one capture and reports whether it bit.
+//
+// Split out from CaptureRange because the boundary is the only part of this
+// that can be tested without a tmux server, and an off-by-one here is a panel
+// that claims a complete capture was truncated -- or, the other way, one that
+// silently drops a byte and says nothing.
+func capCapture(s string) (text string, truncated bool) {
+	if len(s) <= MaxCaptureBytes {
+		return s, false
+	}
+	return truncateHeadAtRuneBoundary(s, MaxCaptureBytes), true
+}
+
+// captureRangeArgs builds the command line, clamped.
+//
+// The clamp is here as well as in the handler, and the two are about different
+// things: the handler's is about rejecting a bad request, this one is about the
+// method being safe to call from anywhere. Its own test reads these args
+// because the output cannot show them -- tmux clamps a start line to the
+// history it has, so an over-deep -S returns exactly what a correct one does.
+//
+// -S -<N> is N lines of scrollback PLUS the visible screen. It must stay
+// negative: a positive start line counts from the top of the history instead of
+// back from the screen, and tmux reports no error for it.
+//
+// -J is kept from Capture: it rejoins a line the pane wrapped, so a URL split
+// across rows copies as one string.
+//
+// -N is NOT a numeric start line, which is the reading its name invites; it
+// means "preserve trailing spaces". Measured on 3.7b, and contrary to the
+// design's note, it is a NO-OP next to -J -- which preserves them already:
+// `-p -J -N` and `-p -J` came back byte-identical (286 bytes) on a 40-column
+// fixture, while the same capture without -J went from 284 bytes to 452 padded.
+// So the padding the design books against -N is real only for a capture this
+// code does not make, and the flag's absence can be asserted on the args and
+// nowhere else. See TestCaptureRangeArgsCarryNoPaddingOrEscapes.
+//
+// -e stays off because its SGR sequences render as garbage in a <pre> and
+// travel into whatever the clipboard is pasted into; leaving it off cost 54
+// bytes out of 180 140 on a measured capture.
+func captureRangeArgs(paneID string, lines int) []string {
+	if lines < 1 {
+		lines = 1
+	}
+	if lines > maxCaptureLines {
+		lines = maxCaptureLines
+	}
+	return []string{"capture-pane", "-p", "-J", "-S", "-" + strconv.Itoa(lines), "-t", paneID}
+}
+
+// truncateHeadAtRuneBoundary keeps the LAST maxBytes of s, cutting forward to
+// the start of a rune rather than back. Sibling of truncateAtRuneBoundary, and
+// the direction is the whole point: see MaxCaptureBytes.
+func truncateHeadAtRuneBoundary(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	// s[cut] is the first byte kept. If it does not begin a rune the cut falls
+	// inside one, so walk forward over the rest of that rune -- the opposite
+	// direction to truncateAtRuneBoundary, which walks back because the bytes
+	// it is keeping are on the other side.
+	cut := len(s) - maxBytes
+	for cut < len(s) && !utf8.RuneStart(s[cut]) {
+		cut++
+	}
+	return s[cut:]
 }

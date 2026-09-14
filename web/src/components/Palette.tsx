@@ -20,7 +20,8 @@
  *
  * ## What is in it
  *
- * Panes, and the three things the header row offers: into copy mode, out of it,
+ * Panes, and the two things the header row offers: the copy-mode control --
+ * one row, pointing into copy mode or back out of it depending on the pane --
  * and the reply box's toggle. Not devices, not the theme: those live one click
  * away in the footer menu, they are used about once a month, and a palette that
  * matches them competes with the panes for the first row -- typing "de" to
@@ -45,6 +46,7 @@ import {
   CommandShortcut,
 } from '@/components/ui/command'
 import { replyToggleLabel } from '@/components/ReplyBox'
+import type { CopyControl } from '@/lib/copyMode'
 import { newSessionPrompt, rowMenu } from '@/lib/manage'
 import type { MenuEntry, MenuIntent, RowTarget } from '@/lib/manage'
 import { findPane } from '@/lib/useSnapshot'
@@ -91,8 +93,10 @@ export function installPaletteChord(target: EventTarget, toggle: () => void): ()
 /** What selecting a row does. */
 export type PaletteAction =
   | { kind: 'pane'; paneId: string; groupKey: string }
-  | { kind: 'copy-mode' }
-  | { kind: 'end-mode' }
+  // One kind for the one copy-mode control, whichever way it is pointing. Two
+  // kinds were two rows, and two rows for one idea is the defect this replaced:
+  // the owner could not tell what "End mode" meant next to "Copy mode".
+  | { kind: 'toggle-copy' }
   | { kind: 'toggle-reply' }
 
 /** One row. */
@@ -243,13 +247,18 @@ export interface PaletteProps {
   activeSession: string | null
   onSelectPane: (paneId: string, groupKey: string) => void
   /**
-   * Enter tmux copy mode. Returns false when the socket is not ready, which
-   * this component reports rather than swallowing: a palette that closes on a
-   * command that did nothing is indistinguishable from one that worked.
+   * The copy-mode control as it stands right now: which way it points, and what
+   * the row says. Computed in App from the attached pane's `#{pane_mode}`, so
+   * this palette and the header button can never disagree about it.
    */
-  onCopyMode: () => boolean
-  /** Leave it again. False for the same reasons, and reported the same way. */
-  onEndMode: () => boolean
+  copy: CopyControl
+  /**
+   * Take the control's action -- into copy mode, or back out of it. Returns
+   * false when the socket is not ready, which this component reports rather
+   * than swallowing: a palette that closes on a command that did nothing is
+   * indistinguishable from one that worked.
+   */
+  onToggleCopy: () => boolean
   /** Whether the reply box is on screen, which is what its row's label says. */
   replyOpen: boolean
   /** Show the reply box, or put it away. */
@@ -273,8 +282,8 @@ export function Palette({
   activePane,
   activeSession,
   onSelectPane,
-  onCopyMode,
-  onEndMode,
+  copy,
+  onToggleCopy,
   replyOpen,
   onToggleReply,
   onFocusReply,
@@ -315,18 +324,16 @@ export function Palette({
       case 'pane':
         onSelectPane(action.paneId, action.groupKey)
         break
-      case 'copy-mode':
-        if (!onCopyMode()) {
-          // Stay open and say so. The terminal refuses copy mode when the
+      case 'toggle-copy':
+        if (!onToggleCopy()) {
+          // Stay open and say so. The terminal refuses both directions when the
           // socket is not ready, and that is exactly the moment a user would
           // otherwise assume the key went through.
-          setFailure('The terminal is not connected, so copy mode did nothing.')
-          return
-        }
-        break
-      case 'end-mode':
-        if (!onEndMode()) {
-          setFailure('The terminal is not connected, so leaving copy mode did nothing.')
+          setFailure(
+            copy.inCopy
+              ? 'The terminal is not connected, so leaving copy mode did nothing.'
+              : 'The terminal is not connected, so copy mode did nothing.',
+          )
           return
         }
         break
@@ -374,6 +381,7 @@ export function Palette({
         actions={actions}
         failure={failure}
         replyOpen={replyOpen}
+        copy={copy}
         onRun={run}
         onIntent={(intent) => {
           onIntent(intent)
@@ -393,6 +401,8 @@ export interface PaletteBodyProps {
   failure: string | null
   /** What the reply row offers to do: show the box, or put it away. */
   replyOpen: boolean
+  /** The copy-mode control: one row, pointing whichever way the pane needs. */
+  copy: CopyControl
   onRun: (action: PaletteAction) => void
   onIntent: (intent: MenuIntent) => void
 }
@@ -410,6 +420,7 @@ export function PaletteBody({
   actions,
   failure,
   replyOpen,
+  copy,
   onRun,
   onIntent,
 }: PaletteBodyProps) {
@@ -479,23 +490,19 @@ export function PaletteBody({
           the header is where a phone has the least room. The reply toggle is
           here for the same reason -- it is the affordance the box now depends
           on, and a chord-driven palette is the fastest way to it.
+
+          The copy-mode row is ONE row and follows the pane, for the reason the
+          header button does: this list used to carry "Enter copy mode" and
+          "Leave copy mode" side by side, and a user who cannot tell which of
+          them applies is a user the palette has made guess. The row that does
+          not apply is not disabled, it is absent -- a greyed row in a fuzzy
+          list is still something to read past.
         */}
         <CommandGroup heading="Terminal">
-          <CommandItem
-            value="copy mode scrollback search"
-            onSelect={() => onRun({ kind: 'copy-mode' })}
-          >
-            <Copy aria-hidden />
-            Enter copy mode
-            <CommandShortcut>scrollback</CommandShortcut>
-          </CommandItem>
-          <CommandItem
-            value="end mode leave copy mode exit scrollback"
-            onSelect={() => onRun({ kind: 'end-mode' })}
-          >
-            <CopySlash aria-hidden />
-            Leave copy mode
-            <CommandShortcut>typing reaches the pane</CommandShortcut>
+          <CommandItem value={copy.search} onSelect={() => onRun({ kind: 'toggle-copy' })}>
+            {copy.inCopy ? <CopySlash aria-hidden /> : <Copy aria-hidden />}
+            {copy.label}
+            <CommandShortcut>{copy.hint}</CommandShortcut>
           </CommandItem>
           <CommandItem
             value="reply box write type answer agent keyboard"

@@ -59,6 +59,9 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     command: 'zsh',
     // What tmux gives a pane nothing has titled: the hostname.
     title: 'devbox',
+    // No mode: where most panes are, and what the copy-mode control offers
+    // to enter from.
+    paneMode: '',
     // The pane's working directory, as of the poll. On the wire and in the
     // tree; nothing renders it yet.
     path: '/srv/work',
@@ -132,7 +135,7 @@ describe('contract with the daemon', () => {
     // A literal, never `Object.keys(row()).length`: the count is here to make a
     // field added on one side only fail, and a count derived from the
     // TypeScript side would agree with itself forever.
-    expect(tags).toHaveLength(20)
+    expect(tags).toHaveLength(21)
     expect(Object.keys(row()).sort()).toEqual(tags.sort())
   })
 })
@@ -249,6 +252,22 @@ describe('groupRows', () => {
   it('carries the branch onto the pane, beside the directory it was read from', () => {
     const [session] = groupRows([row({ path: '/srv/api', branch: 'feature/x' })])
     expect(session.windows[0].panes[0].branch).toBe('feature/x')
+  })
+
+  // The header's copy-mode control reads the mode off the tree, through
+  // `findPane` -- so a field on the wire that stops at `groupRows` is a field
+  // the control cannot see, and the control then quietly offers the wrong
+  // action forever. That has happened here before: `branch` reached
+  // `SnapshotRow` and neither `PaneNode` nor this function, and nothing noticed
+  // until something tried to read `pane.branch`.
+  it('carries the pane mode onto the pane, which is what names the copy control', () => {
+    const [session] = groupRows([row({ paneMode: 'copy-mode' })])
+    expect(session.windows[0].panes[0].paneMode).toBe('copy-mode')
+    // And the empty case is carried rather than dropped: "" is the answer for
+    // most panes, and a node missing the key reads as `undefined` to anything
+    // comparing it.
+    const [plain] = groupRows([row({ paneMode: '' })])
+    expect(plain.windows[0].panes[0]).toHaveProperty('paneMode', '')
   })
 
   it('carries the agent fields onto the pane, since the dot is made of them', () => {
@@ -1371,6 +1390,14 @@ describe('SnapshotPoller', () => {
     // under which it is dropped from `rowsEqual` as dead weight -- and then the
     // chip that Task 13 draws names the branch the pane has left.
     ['branch', { branch: 'feature/x' }],
+    // `paneMode` is the field with a control hanging directly off it: the
+    // header's one copy-mode button is named from it, and a pane enters or
+    // leaves copy mode with its title, its command and its state all standing
+    // still. Left out of `rowsEqual`, the previous tree object survives, React
+    // reconciles nothing, and the button goes on offering the action the pane
+    // is already past -- which is precisely the "did that button do anything?"
+    // this feature exists to answer.
+    ['paneMode', { paneMode: 'copy-mode' }],
   ])('rebuilds the tree when only %s changed', async (_name, moved) => {
     const base = row({ paneId: '%1', command: 'claude', agentState: 'working' })
 

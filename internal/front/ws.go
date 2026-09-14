@@ -94,6 +94,21 @@ type TerminalConfig struct {
 	// handler built without a poller behind it has to do.
 	WindowFor func(paneID string) (string, bool)
 
+	// PollNow forces a snapshot poll and returns once its result has been
+	// published -- Poller.PollNow is what the server passes, the same method the
+	// management verbs settle on (see `settle` in manage.go).
+	//
+	// It is here for exactly one reason: the header's copy-mode button reads its
+	// label off #{pane_mode}, which reaches the browser on a poll. Without this
+	// the tab that just pressed the button waits out the poll interval before
+	// the snapshot agrees with what it did, so the browser has to hold an
+	// optimistic label for that whole time -- and an optimism held long enough
+	// is indistinguishable from a control that did nothing.
+	//
+	// nil is allowed and means the tab waits out the interval, which is what a
+	// handler built without a poller behind it has to do.
+	PollNow func(ctx context.Context) error
+
 	// PingInterval and PingTimeout override the keepalive timings. Zero means
 	// the defaults above; they exist so tests can observe a keepalive without
 	// waiting twenty seconds for one.
@@ -473,7 +488,11 @@ func (h *TerminalHandler) control(ctx context.Context, sess *ptybridge.Session, 
 	case "copy-mode":
 		if err := h.copyMode(ctx, sess, m.Pane); err != nil {
 			slog.Warn("terminal: copy-mode failed", "pane", m.Pane, "err", err)
+			break
 		}
+		// The pane's mode has changed, so the cached snapshot is wrong about the
+		// one field the header's button renders. See settle.
+		h.settle(ctx)
 	case "end-mode":
 		// Pop the copy-mode layer of a pane before writing a reply into it.
 		//
@@ -492,7 +511,13 @@ func (h *TerminalHandler) control(ctx context.Context, sess *ptybridge.Session, 
 		// that treated it as an error would fail every ordinary reply.
 		if err := h.endMode(ctx, m.Pane); err != nil {
 			slog.Debug("terminal: end-mode did not apply", "pane", m.Pane, "err", err)
+			break
 		}
+		// Only when it applied. This message goes out before every non-empty
+		// reply and refuses on the pane most replies go to, so settling
+		// unconditionally would buy a tmux fork per reply to re-read a mode
+		// stack nothing touched. See settle.
+		h.settle(ctx)
 	case "where":
 		// "Which pane did I land on?", asked once per outstanding question
 		// rather than once per socket: on open, immediately after the tab has
@@ -528,6 +553,30 @@ func (h *TerminalHandler) control(ctx context.Context, sess *ptybridge.Session, 
 		slog.Warn("terminal: ignoring unknown control message", "type", m.Type)
 	}
 	return wsExit{}, false
+}
+
+// settle forces a snapshot poll after a control message has changed something
+// the snapshot reports, so the tab's next read of /api/snapshot already agrees
+// with what it just did.
+//
+// The same thing `settle` in manage.go does after a management verb, for the
+// same reason and with the same two rules: AFTER the command, never before --
+// a poll taken first caches the state the browser is trying to get ahead of --
+// and the error is dropped, because a poll that could not be forced leaves the
+// tab exactly as stale as it was before any of this existed. What a failure
+// costs here is one interval of a button labelled optimistically.
+//
+// It runs on the read goroutine, like every other tmux call this handler makes,
+// so the keystrokes behind it wait for the poll. ctx is the control message's
+// own wsTmuxTimeout, which is what bounds that -- and a mode change is a thing
+// the user just asked for by hand, not something the reply path does in a loop.
+//
+// nil is a no-op: a handler with no poller behind it has nothing to force.
+func (h *TerminalHandler) settle(ctx context.Context) {
+	if h.cfg.PollNow == nil {
+		return
+	}
+	_ = h.cfg.PollNow(ctx)
 }
 
 // windowFor is the configured cache read, or "no answer" when there is no cache.

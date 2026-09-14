@@ -57,6 +57,51 @@ test('enrolls a browser and round-trips a keystroke through real tmux', async ({
     .toContain('e2e-ok')
 })
 
+test('one control both enters and leaves copy mode, and follows the pane', async ({
+  page,
+  tmuxWeb,
+}) => {
+  // The header carried "Copy mode" and "End mode" side by side until the owner
+  // asked what the second one meant. There is one button now, and what it says
+  // comes from `#{pane_mode}` on the wire -- which is the half no unit test can
+  // reach: the rule is pinned in `copyMode.test.ts` and the field in
+  // `internal/tmux`, but whether the daemon's snapshot actually reaches this
+  // button, and whether the pane actually changes when it is pressed, needs all
+  // three pieces at once.
+  await enroll(page, tmuxWeb, 'laptop')
+
+  const control = page.getByRole('button', { name: /^(Copy mode|Exit copy)$/ })
+  const paneMode = () =>
+    tmuxWeb.tmux('display-message', '-p', '-t', `${BASE_SESSION}:0`, '#{pane_mode}')
+
+  await expect(control).toHaveText('Copy mode')
+  expect(paneMode(), 'the pane is already in a mode, so this test is about nothing').toBe('')
+
+  // In. The label flips on the click rather than on the poll -- a button that
+  // renamed itself 1.5s later would read as broken -- so this assertion is
+  // deliberately short-fused, and tmux is what says the click did something.
+  await control.click()
+  await expect(control).toHaveText('Exit copy', { timeout: 1_000 })
+  await expect.poll(paneMode).toBe('copy-mode')
+
+  // The pane leaves copy mode without this tab touching it -- which is what
+  // happens when the owner presses `q` at their own terminal. The button has to
+  // come back on its own: the optimistic flip it is still holding expires, and
+  // the poll's answer wins. An optimism that never re-synced would sit here
+  // saying "Exit copy" for the life of the tab.
+  tmuxWeb.tmux('send-keys', '-X', '-t', `${BASE_SESSION}:0`, 'cancel')
+  await expect(control).toHaveText('Copy mode')
+
+  // And the other direction, with no click at all: the label follows the pane.
+  tmuxWeb.tmux('copy-mode', '-t', `${BASE_SESSION}:0`)
+  await expect(control).toHaveText('Exit copy')
+
+  // Out, through the same button that offered the way in.
+  await control.click()
+  await expect(control).toHaveText('Copy mode', { timeout: 1_000 })
+  await expect.poll(paneMode).toBe('')
+})
+
 test('the sidebar follows real tmux, and clicking a window moves the terminal', async ({
   page,
   tmuxWeb,
@@ -148,7 +193,7 @@ test('revoking the device over the admin socket severs the live terminal', async
   // runs no handlers -- so it survived task 22's unit tests.
   await page.getByRole('button', { name: /Jump to/ }).click()
   await expect(page.locator('[data-slot="command-input"]')).toBeVisible()
-  await page.getByRole('option', { name: /Enter copy mode/ }).click()
+  await page.getByRole('option', { name: /Copy mode/ }).click()
   await expect(page.getByRole('alert')).toContainText('copy mode did nothing')
   // Stays open: a palette that closed would look like a command that worked.
   await expect(page.locator('[data-slot="command-input"]')).toBeVisible()

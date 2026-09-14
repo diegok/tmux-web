@@ -84,6 +84,9 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     paneActive: true,
     command: 'zsh',
     title: 'devbox',
+    // No mode: where most panes are, and what the copy-mode control offers
+    // to enter from.
+    paneMode: '',
     path: '/srv/work',
     branch: '',
     agentState: '',

@@ -22,6 +22,7 @@ import {
   paneEntries,
 } from './Palette'
 import { replyToggleLabel } from './ReplyBox'
+import { copyControl } from '@/lib/copyMode'
 import { ZOOM_HINT } from '@/lib/manage'
 import { groupRows } from '@/lib/useSnapshot'
 import type { SnapshotRow } from '@/lib/useSnapshot'
@@ -44,6 +45,9 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     command: 'zsh',
     // tmux's default for an untouched pane: the hostname.
     title: 'devbox',
+    // No mode: where most panes are, and what the copy-mode control offers
+    // to enter from.
+    paneMode: '',
     // The pane's working directory, as of the poll; nothing renders it yet.
     path: '/srv/work',
     // Not in a work tree, which is what "" means. Nothing renders it yet.
@@ -315,8 +319,8 @@ describe('<Palette>', () => {
         activePane="%0"
         activeSession="work"
         onSelectPane={() => {}}
-        onCopyMode={() => true}
-        onEndMode={() => true}
+        copy={copyControl('', '%0', null, 0)}
+        onToggleCopy={() => true}
         replyOpen={false}
         onToggleReply={() => {}}
         onFocusReply={() => {}}
@@ -348,7 +352,9 @@ describe('<PaletteBody>', () => {
     row({ windowIndex: 1, windowName: 'api', paneId: '%4', command: 'claude' }),
   ])
 
-  function render(over: { activePane?: string | null; replyOpen?: boolean } = {}): string {
+  function render(
+    over: { activePane?: string | null; replyOpen?: boolean; paneMode?: string } = {},
+  ): string {
     const activePane = over.activePane === undefined ? '%4' : over.activePane
     return renderToStaticMarkup(
       <PaletteBody
@@ -356,6 +362,7 @@ describe('<PaletteBody>', () => {
         actions={actionEntries(groups, activePane, 'work')}
         failure={null}
         replyOpen={over.replyOpen ?? false}
+        copy={copyControl(over.paneMode ?? '', activePane, null, 0)}
         onRun={() => {}}
         onIntent={() => {}}
       />,
@@ -366,19 +373,36 @@ describe('<PaletteBody>', () => {
     const markup = render()
     expect(markup).toContain('Panes')
     expect(markup).toContain('Manage')
-    expect(markup).toContain('Enter copy mode')
+    expect(markup).toContain('Copy mode')
   })
 
-  it('offers every header button a palette row, end-mode included', () => {
-    // The row this palette went without from Task 17 to Task 23. The header has
-    // had an "End mode" button since Task 14 and the palette is the only way in
-    // on a phone, where the header row is cramped -- and it is the surface the
-    // reply box's own toggle had to be added to anyway, so the missing one went
-    // in beside it.
+  it('offers every header button a palette row', () => {
     const markup = render()
-    expect(markup).toContain('Enter copy mode')
-    expect(markup).toContain('Leave copy mode')
+    expect(markup).toContain('Copy mode')
     expect(markup).toContain(replyToggleLabel(false))
+  })
+
+  // The defect that merged the two header buttons, and the reason it has to be
+  // fixed in the palette too: the same action must not appear under two names.
+  // Whichever way the pane is, exactly one of the two rows is offered.
+  it('offers only the copy-mode row that applies', () => {
+    const out = render({ paneMode: '' })
+    expect(out).toContain(copyControl('', '%4', null, 0).label)
+    expect(out).not.toContain(copyControl('copy-mode', '%4', null, 0).label)
+
+    const back = render({ paneMode: 'copy-mode' })
+    expect(back).toContain(copyControl('copy-mode', '%4', null, 0).label)
+    expect(back).not.toContain(copyControl('', '%4', null, 0).label)
+  })
+
+  // Modes stack, and only the top layer is one this app can leave. A pane
+  // sitting in a choose-tree is "in a mode" and still gets the way IN: entering
+  // copy mode stacks on top of the tree, which is what `end-mode` pops back off.
+  it('offers copy mode on a pane that is in a mode it cannot leave', () => {
+    for (const mode of ['tree-mode', 'clock-mode']) {
+      expect(render({ paneMode: mode }), mode).toContain('Copy mode')
+      expect(render({ paneMode: mode }), mode).not.toContain('Exit copy')
+    }
   })
 
   it('says what the reply toggle will do, in both states', () => {

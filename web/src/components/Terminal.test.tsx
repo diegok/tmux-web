@@ -246,6 +246,9 @@ function row(over: Partial<SnapshotRow> & Pick<SnapshotRow, 'sessionName'>): Sna
     paneActive: true,
     command: 'zsh',
     title: 't',
+    // No mode: where most panes are, and what the copy-mode control offers
+    // to enter from.
+    paneMode: '',
     // The pane's working directory, as of the poll; nothing renders it yet.
     path: '/srv/work',
     // Not in a work tree, which is what "" means. Nothing renders it yet.

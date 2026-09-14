@@ -55,6 +55,8 @@ import type { TerminalHandle, TerminalStatus } from '@/components/Terminal'
 import { Separator } from '@/components/ui/separator'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 import { Toaster } from '@/components/ui/sonner'
+import { copyControl } from '@/lib/copyMode'
+import type { CopyFlip } from '@/lib/copyMode'
 import { newSessionPrompt, runManage } from '@/lib/manage'
 import type { ManageAction, MenuIntent } from '@/lib/manage'
 import { useTabBadge } from '@/lib/tabBadge'
@@ -532,30 +534,58 @@ export default function App() {
     void send(kill.plan.action).finally(() => dispatchKill({ type: 'dismiss' }))
   }, [kill, send])
 
-  // False means the socket is not ready, which the palette reports rather than
-  // closing on a command that did nothing. The header button is disabled in
-  // that state, so it never gets there.
-  const copyMode = useCallback(() => {
-    const ok = term.current?.copyMode() ?? false
-    // Copy mode is driven from the keyboard, so it is useless without focus --
-    // and the header button steals it on click.
-    if (ok) term.current?.focus()
-    return ok
-  }, [])
+  /**
+   * The copy-mode control: one button, and one palette row, whose label and
+   * action follow the mode the attached pane is actually in.
+   *
+   * The mode comes off the snapshot -- `#{pane_mode}` for this tab's pane --
+   * which is up to 1.5s behind, hence `copyFlip`: what the last click asked
+   * for, held until the poll confirms it or a deadline passes. Everything about
+   * that is in `copyControl`; `Date.now()` is read here so the rule stays a
+   * function of its arguments.
+   *
+   * The pane's mode is shared with every client attached to it, so this label
+   * also follows a mode the owner entered at their own terminal.
+   */
+  const [copyFlip, setCopyFlip] = useState<CopyFlip | null>(null)
+  const copy = copyControl(located?.pane.paneMode ?? '', activePane, copyFlip, Date.now())
 
   /**
-   * Out of copy mode again. The header has offered a way *in* since v1 and, as
-   * of Task 14, this is the way back out -- worth a button of its own quite
-   * apart from the reply box, which sends it as a frame before every reply.
+   * Take that action, and flip the label without waiting for the poll.
    *
-   * Returns false when there is no pane to name or the socket refuses, which is
-   * what the palette reports rather than closing on a command that did nothing.
-   * The header button is disabled in both states, so it never gets there.
+   * False means the socket is not ready or there is no pane to name, which the
+   * palette reports rather than closing on a command that did nothing. The
+   * header button is disabled in that state, so it never gets there.
+   *
+   * The flip is recorded only when the command was accepted, and the refresh is
+   * what usually ends it: the daemon forces its own poll as soon as the mode
+   * changes (see `settle` in ws.go), so this re-read normally comes back
+   * already agreeing. When it does not -- a `cancel` tmux refused, because the
+   * pane left copy mode between the poll and the click -- the flip expires and
+   * the poll's answer wins. See `COPY_FLIP_MS`.
    */
-  const endMode = useCallback(() => {
-    if (!activePane) return false
-    return term.current?.endMode(activePane) ?? false
-  }, [activePane])
+  const toggleCopy = useCallback(() => {
+    // Read off the control rather than re-derived: what it says and what it
+    // does have to come from the same decision, or the button sends one message
+    // while its label promises the other.
+    const entering = copy.action === 'copy-mode'
+    let ok: boolean
+    if (entering) {
+      ok = term.current?.copyMode() ?? false
+      // Copy mode is driven from the keyboard, so it is useless without focus
+      // -- and the header button steals it on click.
+      if (ok) term.current?.focus()
+    } else {
+      // Always named, unlike the way in: the daemon refuses an end-mode with no
+      // pane rather than aiming it at whatever is current.
+      ok = activePane ? (term.current?.endMode(activePane) ?? false) : false
+    }
+    if (ok) {
+      setCopyFlip({ paneId: activePane, copy: entering, at: Date.now() })
+      refresh()
+    }
+    return ok
+  }, [copy.action, activePane, refresh])
 
   /**
    * Show or hide the reply box, and remember which for next time.
@@ -657,23 +687,34 @@ export default function App() {
                   {PALETTE_CHORD_LABEL}
                 </kbd>
               </button>
+              {/*
+                One button for one idea. It said "Copy mode" and "End mode"
+                side by side until the owner asked what the second one meant --
+                which is the answer: the same action must not have two names,
+                and a control that is already done should offer the way back
+                rather than sit there greyed out. The label follows the pane's
+                own mode, so it also follows a copy mode the owner entered at
+                their terminal rather than here.
+
+                Disabled on a socket that is not ready and nothing else. The
+                way *out* needs a pane to name, but the label only says so
+                because a pane's row said it was in copy mode, so there is one.
+
+                No `aria-pressed`, unlike the reply toggle next door, and the
+                difference is the changing label: a toggle button carries its
+                state in that attribute and keeps ONE name, so a control that
+                renames itself as well would announce the state twice and
+                disagree with itself the moment the two got out of step. The
+                name is the state here.
+              */}
               <button
                 type="button"
-                onClick={() => copyMode()}
+                onClick={() => toggleCopy()}
                 disabled={status?.phase !== 'ready'}
                 className="hover:bg-accent hover:text-accent-foreground rounded-md border px-2 py-1 text-xs font-medium disabled:opacity-50"
-                title="Enter tmux copy mode, where this app's scrollback lives"
+                title={copy.title}
               >
-                Copy mode
-              </button>
-              <button
-                type="button"
-                onClick={endMode}
-                disabled={status?.phase !== 'ready' || !activePane}
-                className="hover:bg-accent hover:text-accent-foreground rounded-md border px-2 py-1 text-xs font-medium disabled:opacity-50"
-                title="Leave copy mode, so typing reaches the pane again"
-              >
-                End mode
+                {copy.label}
               </button>
               {/*
                 Off by default and driven by nothing but this button and its
@@ -769,8 +810,8 @@ export default function App() {
           activePane={activePane}
           activeSession={session}
           onSelectPane={handleSelectPane}
-          onCopyMode={copyMode}
-          onEndMode={endMode}
+          copy={copy}
+          onToggleCopy={toggleCopy}
           replyOpen={replyOpen}
           onToggleReply={() => showReply(!replyOpen)}
           onFocusReply={focusReply}

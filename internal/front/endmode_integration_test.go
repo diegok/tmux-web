@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/diegok/tmux-web/internal/front"
 	"github.com/diegok/tmux-web/internal/ptybridge"
 )
 
@@ -37,7 +38,15 @@ type endModeFixture struct {
 
 func newEndModeFixture(t *testing.T) *endModeFixture {
 	t.Helper()
-	f := defaultWSFixture(t)
+	return newEndModeFixtureWith(t, front.TerminalConfig{AllowedOrigin: wsCanonical})
+}
+
+// newEndModeFixtureWith is the same fixture under a handler configured by the
+// caller -- modepoll_integration_test.go needs one with a PollNow hook, and the
+// two-pane arrangement below is exactly what that test needs too.
+func newEndModeFixtureWith(t *testing.T, cfg front.TerminalConfig) *endModeFixture {
+	t.Helper()
+	f := newWSFixture(t, cfg)
 	f.srv.Run(t, "split-window", "-d", "-t", "=work:0")
 	panes := strings.Split(f.srv.Run(t, "list-panes", "-t", "=work:0", "-F", "#{pane_id}"), "\n")
 	if len(panes) != 2 {

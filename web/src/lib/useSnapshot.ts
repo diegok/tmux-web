@@ -157,6 +157,22 @@ export interface SnapshotRow {
    */
   title: string
   /**
+   * `#{pane_mode}`: the name of the **top layer** of the pane's mode stack, and
+   * `""` for a pane in no mode at all -- which is most of them.
+   *
+   * tmux's own mode names, measured rather than guessed: `copy-mode`,
+   * `view-mode`, `tree-mode`, `clock-mode`, `options-mode`. Modes stack and
+   * this names only the topmost, which is the whole reason it is here rather
+   * than a boolean: the header's one copy-mode control can leave a copy layer
+   * and cannot leave a choose-tree, and `#{pane_in_mode}` -- a count -- cannot
+   * tell those apart. `inCopyMode` in `copyMode.ts` is the rule; nothing else
+   * should read this field directly.
+   *
+   * It rides the same `list-panes` the rest of this record comes from, so it
+   * costs no extra fork.
+   */
+  paneMode: string
+  /**
    * The pane's working directory, as of the poll that produced this row.
    *
    * It rides a tagged block of its own in the daemon's one tmux invocation,
@@ -354,6 +370,16 @@ export interface PaneNode {
   /** `@tmux_web_label`, or "" -- the only one of the three the user chose. */
   label: string
   /**
+   * `SnapshotRow.paneMode`: the top layer of the pane's mode stack, or "".
+   *
+   * Carried onto the node because the header's copy-mode control reads it for
+   * the pane the tab is looking at, and `findPane` is how it gets there. When
+   * `branch` was added to the wire it was left out of this interface and out of
+   * `groupRows`, so `pane.branch` did not exist and nobody noticed until
+   * something tried to render it.
+   */
+  paneMode: string
+  /**
    * `SnapshotRow.path`: the pane's working directory as of the poll, or "".
    *
    * Carried through the tree though nothing renders it, so that the first
@@ -520,6 +546,7 @@ export function groupRows(rows: readonly SnapshotRow[]): SessionNode[] {
       command: row.command,
       title: row.title,
       label: row.label,
+      paneMode: row.paneMode,
       path: row.path,
       branch: row.branch,
       active: row.paneActive,
@@ -1128,6 +1155,12 @@ function rowsEqual(a: readonly SnapshotRow[], b: readonly SnapshotRow[]): boolea
       x.command === y.command &&
       x.title === y.title &&
       x.label === y.label &&
+      // The field a control renders directly: the header's copy-mode button is
+      // named from it. A pane enters or leaves copy mode with its title, its
+      // command and its state all standing still, so a comparison that skips
+      // this keeps the previous tree object, React reconciles nothing, and the
+      // button goes on offering the action the pane is already past.
+      x.paneMode === y.paneMode &&
       // Compared though nothing renders it, and for the reason this function's
       // header gives: "every field the wire carries, not only the ones
       // something renders today". A pane that `cd`s somewhere else moves this

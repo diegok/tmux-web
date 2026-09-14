@@ -208,7 +208,7 @@ func TestParseServerStart(t *testing.T) {
 // day a pane really does go missing.
 func TestParseRowsSkipsTheGenerationLine(t *testing.T) {
 	fields := []string{
-		snapshotTag, "work", "$0", "work", "%0", "0", "", "@0", "0", "win", "1", "zsh", "title", "label",
+		snapshotTag, "work", "$0", "work", "%0", "0", "", "@0", "0", "win", "1", "zsh", "title", "", "label",
 	}
 	out := strings.Join([]string{
 		strings.Join(fields, Sep),

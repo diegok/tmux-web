@@ -256,8 +256,8 @@ func TestParseReports(t *testing.T) {
 	// One batch output: the snapshot block, then the report block. Each parser
 	// owns one tag and ignores the other's lines.
 	out := strings.Join([]string{
-		rec("work", "$0", "work", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", ""),
-		rec("work", "$0", "work", "%2", "1", "", "@1", "1", "win", "0", "zsh", "t", ""),
+		rec("work", "$0", "work", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "", ""),
+		rec("work", "$0", "work", "%2", "1", "", "@1", "1", "win", "0", "zsh", "t", "", ""),
 		reportTag + Sep + "%1" + Sep + "1;working;1789075200000;run go",
 		reportTag + Sep + "%2" + Sep + "",
 	}, "\n")
@@ -307,7 +307,7 @@ func TestParseRowsRefusesALineWithAnUnknownTag(t *testing.T) {
 	// fieldCount fields, tag "X", and valid integers where ParseRows calls
 	// Atoi -- field 5 (pane index) and field 8 (window index).
 	line := strings.Join([]string{
-		"X", "work", "$0", "work", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "",
+		"X", "work", "$0", "work", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "", "",
 	}, Sep)
 	if n := len(strings.Split(line, Sep)); n != fieldCount {
 		t.Fatalf("the fixture has %d fields, want %d: a record too short to be "+

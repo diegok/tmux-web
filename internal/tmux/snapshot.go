@@ -35,9 +35,9 @@ const (
 // minimum, not an equality: the label is the last field and may contain the
 // separator, so a record can legitimately arrive with more. See ParseRows.
 //
-// Fourteen rather than thirteen since the batched read: the block tag is field
-// 0, which every positional index below is offset by.
-const fieldCount = 14
+// Fifteen rather than fourteen since the pane's mode joined the record: the
+// block tag is field 0, which every positional index below is offset by.
+const fieldCount = 15
 
 // MaxTitle bounds a pane title. tmux normalises control bytes out of titles but
 // does not cap length; an 8KB title was observed stored and reported in full,
@@ -77,6 +77,22 @@ type Row struct {
 	PaneActive  bool   `json:"paneActive"`
 	Command     string `json:"command"`
 	Title       string `json:"title"` // tmux-sanitised, truncated
+	// PaneMode is #{pane_mode}: the name of the TOP layer of the pane's mode
+	// stack, and "" for a pane in no mode at all -- which is most of them.
+	//
+	// Measured on 3.7b: "copy-mode", "view-mode", "tree-mode", "clock-mode",
+	// "options-mode". It is the top layer only, and pane_in_mode beside it is a
+	// COUNT, so a pane scrolled up inside a choose-tree reports "copy-mode" at
+	// depth 2 while a pane sitting in the tree itself reports "tree-mode" at
+	// depth 1. The header's one copy-mode button turns on exactly that
+	// difference: `send-keys -X cancel` pops the copy layer and refuses on
+	// anything else, so "in a mode" is not the question it can answer.
+	//
+	// Unlike Label, nothing but tmux can write this. It is not a user option: it
+	// is generated from the mode the pane is in, out of a fixed set of names
+	// compiled into tmux, so it needs none of the sanitising the label gets and
+	// does not compete for the last slot in the record.
+	PaneMode string `json:"paneMode"`
 	// Activity is what the agent's own integration says it is doing. "" when no
 	// integration is installed, when its report is stale, and for every pane
 	// that is not an agent. Sanitised and capped on write and again on read.
@@ -229,6 +245,11 @@ var formatFields = []string{
 	"#{pane_active}",
 	"#{pane_current_command}",
 	"#{pane_title}",
+	// Before the label, like everything else, and for the reason the paragraphs
+	// above give: the last slot belongs to the one field tmux does not
+	// sanitise. This one tmux generates itself -- a mode name out of a fixed
+	// set, never a user option -- so it can sit anywhere that is not last.
+	"#{pane_mode}",
 	labelField,
 }
 
@@ -359,6 +380,7 @@ func ParseRows(out string) (rows []Row, dropped int, err error) {
 			PaneActive:  fields[10] == "1",
 			Command:     fields[11],
 			Title:       truncateAtRuneBoundary(fields[12], MaxTitle),
+			PaneMode:    fields[13],
 			// Rejoined with the separator it was split on, so a label that
 			// arrived with a raw 0x1f in it is reconstructed rather than
 			// silently reassembled into something else.

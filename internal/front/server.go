@@ -1041,6 +1041,11 @@ func newDaemon(cfg Config) (*daemon, error) {
 		// instead of three times. Wired here for the same reason as
 		// UsePathCache above, and read the same way: as a hint.
 		WindowFor: d.poller.WindowFor,
+		// And the same poller settles the snapshot after a control message
+		// changes a pane's mode, so the tab that pressed the copy-mode button
+		// reads its own change back on the next poll rather than 1.5s later.
+		// The management verbs already do this; see `settle` in manage.go.
+		PollNow: d.poller.PollNow,
 		// Fed from the middleware's own allowlist rather than rebuilt, so
 		// the handshake asks the same question of the same list. A second
 		// copy of the rule is a second thing to keep in step with --dev.

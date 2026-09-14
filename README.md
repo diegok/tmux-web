@@ -130,6 +130,18 @@ connections rather than only failing the next request.
   such list** — it carries on the most recent session there, which is what its
   `--continue` does, so its entry says *Continue* rather than *Resume*.
 - Scroll with the mouse wheel to enter tmux's copy mode.
+- **One button for copy mode, which says which way it goes.** The header control
+  reads **Copy mode** on a pane that is not in one and **Exit copy** on a pane
+  that is, and the palette offers whichever of the two applies. It follows the
+  pane rather than the click, so it also says *Exit copy* for a copy mode you
+  entered at your own terminal — panes are shared, and so is their mode. It used
+  to be two buttons, and nobody could say what the second one meant.
+
+  A pane can be in more than one mode at once: scrolling up inside tmux's
+  session tree leaves the tree open underneath. The button reads the top layer
+  only, so leaving copy mode there puts you back in the tree rather than out of
+  everything — and a pane sitting in the tree, or in the clock, is still offered
+  the way *in*.
 - `Shift+click` or `Ctrl+click` a URL to open it. Real hyperlinks (`gh`, `delta`,
   `eza`) and bare URLs both work; a plain click still goes to tmux.
 - **Answer an agent from a box under the terminal, when you ask for one.** The

@@ -1,0 +1,10 @@
+.git
+node_modules
+web/node_modules
+web/dist
+internal/front/dist
+test-results
+playwright-report
+e2e
+docs
+tmux-web

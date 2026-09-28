@@ -1,4 +1,4 @@
-.PHONY: build test test-go test-web test-e2e front dist-keep
+.PHONY: build container-build test test-go test-web test-e2e front dist-keep
 
 # CGO_ENABLED=0 makes this a genuinely static binary. Without it Go links
 # against the build machine's libc for DNS and user lookups, so a binary built
@@ -9,6 +9,11 @@
 # and nothing else depends on the name.
 build: front
 	CGO_ENABLED=0 go build -o tmux-web ./cmd/tmux-web
+
+# Same binary as `build`, but Go and pnpm live in a container instead of on
+# this machine. Only the Containerfile's last stage is exported: ./tmux-web.
+container-build:
+	podman build --target export --output type=local,dest=. -f Containerfile .
 
 front:
 	cd web && pnpm install && pnpm build

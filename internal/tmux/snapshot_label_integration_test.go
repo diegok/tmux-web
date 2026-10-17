@@ -28,9 +28,27 @@ import (
 // so "the app validates on write" is no longer the whole story.
 func TestSnapshotHostileLabelCannotRemoveAPane(t *testing.T) {
 	srv := testutil.NewServer(t)
-	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
-	srv.Run(t, "new-window", "-t", "work", "-n", "api")
-	srv.Run(t, "split-window", "-t", "work:api")
+	// Named windows running `cat`, not the machine's login shell, for the reason
+	// spelled out over the fixture of
+	// TestSnapshotHostilePaneDirectoryCannotRemoveAPane in
+	// snapshot_path_internal_test.go. The short version: this test compares
+	// WHOLE ROWS against a baseline, and #{pane_current_command} is a property
+	// of a live process tree rather than of the pane. Measured on 3.7b against
+	// panes created the way this test used to create them, it reads "tmux", then
+	// "zsh", then whatever the developer's rc forks -- "bash" and "mkdir" seen
+	// here -- for the first ~600ms. settledSnapshot only asks for two identical
+	// reads 20ms apart, so the baseline lands on a plateau inside that and a
+	// later subtest fails on a field this test is not about. That is not
+	// hypothetical: it is how this test failed in a full `make test`, on
+	// `Command:mkdir` against a baseline of `Command:zsh`, while the sibling
+	// test two files over had been immune to it all along.
+	//
+	// An explicit -n matters for the same reason: without it automatic-rename
+	// walks the window name from "tmux" to the shell's, and WindowName is
+	// compared too.
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24", "-n", "shell", "cat")
+	srv.Run(t, "new-window", "-t", "work", "-n", "api", "cat")
+	srv.Run(t, "split-window", "-t", "work:api", "cat")
 	// A neighbour with a label of its own: a fix that threw all labels away, or
 	// that let one pane's label leak into the next record, has to fail here.
 	srv.Run(t, "set", "-p", "-t", "work:api.1", tmux.LabelOption, "neighbour")
@@ -139,6 +157,12 @@ func TestSnapshotHostileLabelCannotRemoveAPane(t *testing.T) {
 // new-window disagrees with every later snapshot for a reason that has nothing
 // to do with labels. Waiting for the rows to stop moving keeps the
 // row-for-row comparison strict instead of dropping the fields that flicker.
+//
+// It is NOT enough on its own and must not be leaned on as if it were: two
+// identical reads 20ms apart are a plateau, not a settled pane, and a shell
+// can fork something new at any later moment. What makes the strict comparison
+// sound is the fixture pinning every pane's command; this only spares the
+// baseline the first few milliseconds.
 func settledSnapshot(t *testing.T, c *tmux.Client) []tmux.Row {
 	t.Helper()
 	prev, err := c.Snapshot(context.Background())

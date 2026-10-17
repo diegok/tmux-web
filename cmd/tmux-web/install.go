@@ -107,9 +107,11 @@ var agents = map[string]agentSpec{
 			note: "a global pi extension is auto-loaded in every project, with no entry in any settings file " +
 				"and no trust prompt -- which is less gated than a project-local one, which needs `--approve`.\n" +
 				"  tmux-web does not edit pi's own settings.json and does not run `pi install`: MEASURED on pi " +
-				"0.85.1, `pi install` and `pi remove` keep every value and the key order but reformat the whole " +
-				"file -- indentation normalised, arrays exploded one element per line, the trailing newline " +
-				"dropped. That is a wholesale rewrite of a file you own, which is the one thing this command " +
+				"0.85.1 and again on 1.3.0, `pi install` and `pi remove` keep every value and the key order " +
+				"but reformat the whole file -- indentation normalised, arrays exploded one element per " +
+				"line, the trailing newline " +
+				"dropped. `pi remove` does not put it back either: it leaves its key behind as an empty " +
+				"array. That is a wholesale rewrite of a file you own, which is the one thing this command " +
 				"will not do. Uninstalling is deleting the one file above",
 			validate: validatePiArtifact,
 		},

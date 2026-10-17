@@ -219,9 +219,9 @@ func TestPiValidationRunsOnlyWhereItIsNeeded(t *testing.T) {
 
 // TestARealPiLoadsTheArtifactThisInstallerWrites is the probe against the thing
 // it exists to check, and it is the only test in this package that can tell you
-// the answer is still true on pi 0.85.1. It SKIPS LOUDLY without pi: a
-// validation gate whose only test is a table of canned strings is a table of
-// canned strings.
+// the answer is still true on whatever pi is installed -- last green on pi
+// 1.3.0. It SKIPS LOUDLY without pi: a validation gate whose only test is a
+// table of canned strings is a table of canned strings.
 func TestARealPiLoadsTheArtifactThisInstallerWrites(t *testing.T) {
 	requirePi(t)
 

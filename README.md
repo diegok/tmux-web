@@ -244,10 +244,11 @@ edited:
 - pi: `$PI_CODING_AGENT_DIR/extensions/tmux-web.ts` (`~/.pi/agent` when that is
   unset), which pi auto-loads with no settings entry and no trust prompt.
   `~/.pi/agent/settings.json` is not edited and `pi install` is not run:
-  measured on pi 0.85.1, `pi install` and `pi remove` keep every value and the
-  key order but **reformat the whole file** — indentation normalised, arrays
-  exploded one element per line, the trailing newline dropped. That is a
-  wholesale rewrite of a file you own.
+  measured on pi 0.85.1 and again on 1.3.0, `pi install` and `pi remove` keep
+  every value and the key order but **reformat the whole file** — indentation
+  normalised, arrays exploded one element per line, the trailing newline
+  dropped. `pi remove` does not put it back: it leaves its key behind as an
+  empty array. That is a wholesale rewrite of a file you own.
 
 **A global pi extension is loaded by every pi on the machine, and one pi cannot
 load stops pi *starting* in every project.** So `--global --agent pi` loads the

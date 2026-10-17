@@ -131,9 +131,9 @@ func TestPiExtensionWiresTheFiveEventsToTheReportArgv(t *testing.T) {
 // only thing that does, which is why the gate fails closed and why this test
 // asserts on SILENCE rather than on a state.
 //
-// `pi -p` is that process: measured on pi 0.85.1, it reports mode "print" and
-// hasUI false and emits session_start, input, agent_start, turn_end and
-// agent_settled just like the root.
+// `pi -p` is that process: measured on pi 0.85.1 and re-checked on 1.3.0, it
+// reports mode "print" and hasUI false and emits session_start, input,
+// agent_start, turn_end and agent_settled just like the root.
 func TestPiExtensionReportsNothingFromANonTUIProcess(t *testing.T) {
 	pi := requirePi(t)
 	dir := t.TempDir()

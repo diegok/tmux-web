@@ -27,11 +27,11 @@ import (
 //   - claude --resume -- `claude --help`: "-r, --resume [value]  Resume a
 //     conversation by session ID, or ...". With no value it opens Claude's own
 //     picker.
-//   - pi --resume -- `pi --help` (pi 0.85.1): "--resume, -r  Select a session
-//     to resume". Run in a throwaway directory with a throwaway
-//     PI_CODING_AGENT_DIR it printed pi's own "Resume Session (Current
-//     Folder)" list, so it is a picker and it is already scoped to the
-//     directory the window opens in.
+//   - pi --resume -- `pi --help` (pi 0.85.1, unchanged on 1.3.0):
+//     "--resume, -r  Select a session to resume". Run in a throwaway
+//     directory with a throwaway PI_CODING_AGENT_DIR it printed pi's own
+//     "Resume Session (Current Folder)" list, so it is a picker and it is
+//     already scoped to the directory the window opens in.
 //   - opencode --continue -- `opencode --help`: "-c, --continue  continue the
 //     last session", plus "-s, --session  session id to continue". THERE IS NO
 //     PICKER. opencode takes the most recent session in the directory with no

@@ -447,12 +447,14 @@ func TestAGlobalInstallDoesNotWarnAboutARepositoryItIsNotIn(t *testing.T) {
 // Both agents have a settings file that could register an extension, and this
 // command edits neither. For pi that conclusion is unchanged from the refusal
 // this test replaced, but its PREMISE is not: "that file's shape is unverified"
-// was true then and is false now. MEASURED on pi 0.85.1: `pi install` and
-// `pi remove` preserve every value and the key order, and REFORMAT THE WHOLE
-// FILE -- indentation normalised, arrays exploded one element per line, the
-// trailing newline dropped. That is exactly the wholesale reformatting of a
-// user-owned file that rule 2 of this installer exists to avoid, so the answer
-// is the same and the reason is now a measurement.
+// was true then and is false now. MEASURED on pi 0.85.1, and again on 1.3.0:
+// `pi install` and `pi remove` preserve every value and the key order, and
+// REFORMAT THE WHOLE FILE -- indentation normalised, arrays exploded one
+// element per line, the trailing newline dropped. `pi remove` is not an undo
+// either: it leaves its key behind as an empty array. That is exactly the
+// wholesale reformatting of a user-owned file that rule 2 of this installer
+// exists to avoid, so the answer is the same and the reason is now a
+// measurement.
 func TestTheGlobalNoteSaysWhyTheAgentsOwnSettingsAreNotEdited(t *testing.T) {
 	globalHome(t)
 

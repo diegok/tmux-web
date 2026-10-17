@@ -16,8 +16,8 @@ import (
 // A pi extension in $PI_CODING_AGENT_DIR/extensions/ auto-loads in EVERY
 // project on the machine -- no settings entry, no trust prompt, which makes it
 // LESS gated than a project-local extension, not more: that one needs
-// `--approve`. Measured on pi 0.85.1, a file there that pi cannot load makes pi
-// fail to start, exit 1, in every one of those projects:
+// `--approve`. Measured on pi 0.85.1 and again on 1.3.0, a file there that pi
+// cannot load makes pi fail to start, exit 1, in every one of those projects:
 //
 //	Error: Failed to load extension "…/tmux-web.ts": Extension does not export a
 //	valid factory function: …

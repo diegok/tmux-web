@@ -360,11 +360,18 @@ is no tidy way to hide them yet.
 [5536]: https://github.com/tmux/tmux/issues/5536
 
 If you do co-view often, `set -wg window-size smallest` in your own tmux config
-fits every shared window to the smallest client watching it — the browser is
-then always whole and the wider terminal carries dead margin instead. tmux-web
-does not set this for you and should not: `window-size` is a *window* option and
-grouped sessions share their windows, so a value the daemon set for its own
-throwaway session would land on yours as well.
+fits the shared window to the smallest client watching it, so the browser is
+always whole and the wider terminal carries the dead margin instead. Pair it
+with `setw -g aggressive-resize on`, which is what makes that bearable: with
+aggressive-resize, only the clients a window is *current* for are counted, so
+only the window the phone is actually looking at shrinks and the windows the
+desktop is on keep their size. MEASURED on 3.7b, a 264x77 client and a 43x45
+client attached to grouped sessions and each looking at a different window: with
+aggressive-resize on, the two windows are 264x76 and 43x44; with it off, both
+are 43x44. tmux-web does not set either of them for you and should not:
+`window-size` is a *window* option and grouped sessions share their windows, so
+a value the daemon set for its own throwaway session would land on yours as
+well.
 
 There is one service worker, and the only thing it holds is a page it writes
 itself: the "tmux-web is not reachable" screen you get when a navigation cannot

@@ -62,8 +62,12 @@
 import { Terminal as WTermView, useTerminal } from '@wterm/react'
 import { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import type { Ref } from 'react'
+import { toast } from 'sonner'
 
+import { writeTerminalClipboard } from '@/lib/clipboard'
 import { installLinkOpener } from '@/lib/links'
+import { Osc52Scanner } from '@/lib/osc52'
+import { installSwipeScroll } from '@/lib/touchScroll'
 import { Transport } from '@/lib/transport'
 import type { TransportClose } from '@/lib/transport'
 import { fetchSnapshot } from '@/lib/useSnapshot'
@@ -441,6 +445,16 @@ export interface TerminalSessionOptions {
   paneKey: string
   /** Sink for PTY bytes. */
   onData: (bytes: Uint8Array) => void
+  /**
+   * Called with text tmux put on the clipboard through OSC 52 -- which is every
+   * copy the user makes in a pane, mouse drag included. Optional because the
+   * sequence is worth decoding even where there is nowhere to put it: a test
+   * harness, or a build with no clipboard permission.
+   *
+   * See `lib/osc52.ts` for what was arriving and being discarded, and
+   * `lib/clipboard.ts` for why the write can be refused.
+   */
+  onClipboard?: (text: string) => void
   /** Called on every state change, including the first. */
   onStatus: (status: TerminalStatus) => void
   /** Defaults to `sessionStorage`; null disables persistence. */
@@ -958,12 +972,18 @@ export class TerminalSession {
   #connect(): void {
     this.#retryDelayMs = 0
     this.#phase = this.#attempt === 0 ? 'connecting' : 'reconnecting'
+    // One scanner per SOCKET, not per session, and that is the point of
+    // building it here: an OSC 52 body left half-read by a socket that died
+    // must not be completed by the next socket's bytes. The two halves would
+    // decode to something that was never on anybody's clipboard.
+    const clipboard = new Osc52Scanner()
     const transport = new Transport({
       url: this.#opts.url,
       now: this.#now,
       onData: (bytes) => {
         if (transport !== this.#transport) return
         this.#frameArrived()
+        for (const text of clipboard.feed(bytes)) this.#opts.onClipboard?.(text)
         this.#opts.onData(bytes)
       },
       onControl: (message) => {
@@ -1293,6 +1313,15 @@ export function Terminal({ session, label, url, className, onStatusChange, ref }
     return el ? installLinkOpener(el) : undefined
   }, [])
 
+  // A vertical swipe scrolls the pane. On a phone this is the only way into the
+  // scrollback: @wterm/dom registers no touch listener at all, so a swipe used
+  // to change nothing -- measured, with real touch events, against a wheel
+  // event that entered copy-mode immediately. See lib/touchScroll.ts.
+  useEffect(() => {
+    const el = hostRef.current
+    return el ? installSwipeScroll(el) : undefined
+  }, [])
+
   const socketUrl = url ?? terminalUrl(session)
 
   // One socket per (session, url). Note that React's StrictMode runs this
@@ -1305,6 +1334,20 @@ export function Terminal({ session, label, url, className, onStatusChange, ref }
       session,
       paneKey: paneStorageKey(session),
       onData: paint,
+      // tmux already sends the selection here on every copy; it was being
+      // thrown away because @wterm/dom has no OSC hook. The write has no user
+      // gesture behind it, so a refusal is an expected outcome and the answer
+      // is a button -- a tap on it IS one. Success is silent on purpose: the
+      // gesture that causes it is a mouse drag.
+      onClipboard: (text) => {
+        void writeTerminalClipboard(text).then((failure) => {
+          if (!failure) return
+          toast.error('Could not copy the selection', {
+            description: failure.reason,
+            action: { label: 'Copy', onClick: () => void writeTerminalClipboard(text) },
+          })
+        })
+      },
       onStatus: (next) => {
         setStatus(next)
         statusCallback.current?.(next)

@@ -129,7 +129,26 @@ connections rather than only failing the next request.
   each show their own list of past sessions in that directory; **opencode has no
   such list** — it carries on the most recent session there, which is what its
   `--continue` does, so its entry says *Continue* rather than *Resume*.
-- Scroll with the mouse wheel to enter tmux's copy mode.
+- **Scroll with the wheel, or with a finger.** Either enters tmux's copy mode,
+  which is where this app's scrollback lives. On a phone the swipe is the only
+  way in: the terminal widget has no touch handling of its own, so before this a
+  swipe did nothing at all while a wheel scrolled immediately. A swipe needs a
+  few millimetres before it counts as one, so a tap is still a tap — which is
+  what tells tmux which pane you touched. Pinch-zoom over the terminal is given
+  up to get this, deliberately: without claiming the vertical gesture the
+  browser keeps it for panning a page that has nowhere to pan.
+- **Select in a pane and it goes to your clipboard.** tmux already sends every
+  copy to whatever is drawing it, as OSC 52, and the browser was throwing it
+  away. Now it does not, so a mouse drag — or a copy made in copy mode, on a
+  phone, with no keyboard anywhere — ends up on the clipboard of the device you
+  are sitting at. If the browser refuses the write, which iOS Safari may because
+  there is no tap behind it, a toast appears with a **Copy** button; the tap on
+  that is the gesture it wanted.
+
+  If your own config pipes selections somewhere, as
+  `copy-pipe-and-cancel "xclip …"` does, that still happens — and it still
+  writes the clipboard of the machine tmux runs on, which is nowhere near your
+  phone. The two do not conflict: tmux emits the OSC 52 as well.
 - **One button for copy mode, which says which way it goes.** The header control
   reads **Copy mode** on a pane that is not in one and **Exit copy** on a pane
   that is, and the palette offers whichever of the two applies. It follows the
@@ -317,6 +336,28 @@ session and are therefore shared with anyone else attached:
 None of these bite unless you are watching the same window from two places at
 once. There is no way to scope them per client in tmux; the design document has
 the details.
+
+**On tmux 3.7, add this to your own config:**
+
+```tmux
+bind s choose-tree -ZsG
+bind w choose-tree -ZwG
+```
+
+tmux 3.7 made tree mode show only the first member of each session group, and
+the filtering leaves the chooser **completely blank** — `prefix s` and
+`prefix w` draw nothing at all ([tmux/tmux#5493][5493]). Because this app
+attaches by creating a grouped session, it is what puts your sessions in a
+group, and `session_group` is **not** cleared when the app's session dies: once
+a tab has attached, the chooser stays blank even with no browser open. `-G`
+shows every member of the group and renders normally. Measured on 3.7b: without
+`-G` the chooser draws one line, the status bar; with `-G`, thirty-two. The cost
+is that the app's own `_web-*` sessions appear in the list, and `choose-tree -f`
+does not filter session rows on 3.7b either ([tmux/tmux#5536][5536]), so there
+is no tidy way to hide them yet.
+
+[5493]: https://github.com/tmux/tmux/issues/5493
+[5536]: https://github.com/tmux/tmux/issues/5536
 
 If you do co-view often, `set -wg window-size smallest` in your own tmux config
 fits every shared window to the smallest client watching it — the browser is

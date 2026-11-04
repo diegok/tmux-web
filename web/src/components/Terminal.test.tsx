@@ -205,6 +205,7 @@ function makeSession(
 ) {
   const statuses: TerminalStatus[] = []
   const received: Uint8Array[] = []
+  const clipboard: string[] = []
   const storage = opts.storage === undefined ? memoryStorage() : opts.storage
   const probe = makeProbe()
   const term = new TerminalSession({
@@ -212,6 +213,7 @@ function makeSession(
     session: 'work',
     paneKey: paneStorageKey('work'),
     onData: (bytes) => void received.push(bytes),
+    onClipboard: (text) => void clipboard.push(text),
     onStatus: (s) => {
       statuses.push(s)
       opts.onStatus?.(s)
@@ -225,7 +227,28 @@ function makeSession(
     probe: opts.probe ?? probe.probe,
     host: opts.host,
   })
-  return { term, statuses, received, storage, probe }
+  return { term, statuses, received, storage, probe, clipboard }
+}
+
+/**
+ * Deliver PTY bytes from the server, framed as the daemon frames them.
+ *
+ * Built from the raw bytes for the reason `serverControl` is: the prefix byte
+ * is a cross-language contract, and a helper shared with the production code
+ * would make both sides agree by construction.
+ */
+function serverData(ws: MockWebSocket, bytes: Uint8Array): void {
+  const frame = new Uint8Array(bytes.length + 1)
+  frame[0] = FRAME_DATA
+  frame.set(bytes, 1)
+  ws.receive(frame)
+}
+
+/** An OSC 52 clipboard sequence carrying text, as tmux emits one. */
+function osc52(text: string): Uint8Array {
+  let binary = ''
+  for (const byte of new TextEncoder().encode(text)) binary += String.fromCharCode(byte)
+  return new TextEncoder().encode(`\x1b]52;c;${btoa(binary)}\x1b\\`)
 }
 
 /** A snapshot row, with only the fields this file cares about spelled out. */
@@ -2082,5 +2105,68 @@ describe('storage failures', () => {
     term.start()
     MockWebSocket.last.open()
     expect(term.select('%3')).toBe(true)
+  })
+})
+
+describe('the clipboard', () => {
+  // The wiring, not the decode: `lib/osc52.test.ts` owns the format. What is
+  // only observable here is that the scanner is fed at all, that it is fed the
+  // bytes the socket delivered, and that feeding it does not consume them.
+  it('hands tmux a copy through to the clipboard sink', async () => {
+    const { term, clipboard, received } = makeSession()
+    term.start()
+    MockWebSocket.last.open()
+    await flush()
+
+    serverData(MockWebSocket.last, osc52('selected in a pane'))
+    expect(clipboard).toEqual(['selected in a pane'])
+
+    // Observe, never rewrite: the terminal still gets the bytes as they
+    // arrived, sequence included. Painting a stripped stream would mean
+    // rebuilding every buffer that contains one, for nothing.
+    const painted = received.map((b) => new TextDecoder().decode(b)).join('')
+    expect(painted).toContain('\x1b]52;c;')
+  })
+
+  it('copies a sequence that arrived in pieces', async () => {
+    const { term, clipboard } = makeSession()
+    term.start()
+    MockWebSocket.last.open()
+    await flush()
+
+    const seq = osc52('split across frames')
+    const cut = Math.floor(seq.length / 2)
+    serverData(MockWebSocket.last, seq.subarray(0, cut))
+    expect(clipboard).toEqual([])
+    serverData(MockWebSocket.last, seq.subarray(cut))
+    expect(clipboard).toEqual(['split across frames'])
+  })
+
+  // The scanner belongs to the socket. A body half-read by a socket that died
+  // must not be finished by the next socket's bytes: the two halves would
+  // decode to text that was never on anybody's clipboard, and this app
+  // reconnects onto a NEW throwaway tmux session, so the second half would
+  // come from a different pane.
+  it('does not finish a sequence across a reconnect', async () => {
+    const { term, clipboard } = makeSession()
+    term.start()
+    const first = MockWebSocket.last
+    first.open()
+    await flush()
+
+    const seq = osc52('never completed')
+    const cut = Math.floor(seq.length / 2)
+    serverData(first, seq.subarray(0, cut))
+    first.emitClose(1006, '', false)
+    await flush()
+    await vi.advanceTimersByTimeAsync(60_000)
+    await flush()
+
+    const second = MockWebSocket.last
+    expect(second).not.toBe(first)
+    second.open()
+    await flush()
+    serverData(second, seq.subarray(cut))
+    expect(clipboard).toEqual([])
   })
 })

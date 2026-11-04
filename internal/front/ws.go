@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -210,7 +211,7 @@ func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return // Accept has already written the response
 	}
-	h.serve(r.Context(), conn, target)
+	h.serve(r.Context(), conn, target, r.RemoteAddr)
 }
 
 // wsSessionTarget turns the ?session= value into a tmux target.
@@ -295,10 +296,76 @@ func wsNormalizeOrigin(s string) string {
 
 // wsExit is how one loop tells the handler why the connection is over, and
 // whether the peer is still there to be told about it.
+//
+// cause is for the log and nothing else: it never reaches the peer, because the
+// paths that have one are exactly the paths where there is no peer left to tell.
+// It exists because a connection that ends by vanishing used to end by
+// discarding the only evidence of how -- see the note over wsStats.
 type wsExit struct {
 	status   websocket.StatusCode
 	reason   string
 	graceful bool
+	cause    error
+}
+
+// wsConnSeq numbers connections, for the log alone. "A terminal connected" and
+// "a terminal disconnected" are not a pair when two tabs are open; the id is
+// the only thing that says which line goes with which.
+var wsConnSeq atomic.Int64
+
+// wsStats is what a connection can say about itself once it is over.
+//
+// WHY THIS IS HERE. The owner reported keystrokes that stop arriving and are
+// then either flushed all at once or lost. The daemon had been up for two and a
+// half weeks and its whole log for that period held not one line about a
+// WebSocket -- only net/http's own GOAWAY and TLS noise. The one bug that costs
+// the user work was the one bug this process could not see.
+//
+// WHAT EACH NUMBER IS FOR, because a counter nobody can reason from is
+// decoration. A keystroke that never reached tmux is either a frame this server
+// never received or a frame it received and dropped, and those are opposite
+// bugs. `frames_in` flat and `since_last_read` long says it was not being fed,
+// which puts the loss in the browser's own socket buffer -- the browser hands
+// `send()` to a socket that is still OPEN on a stalled link, and those bytes
+// live nowhere else. `slowest_write` is the mirror image and the only view this
+// side has of a stalled link while it is still up: a peer that has stopped
+// draining shows up as seconds here long before the connection dies.
+//
+// Atomics rather than a mutex: these are written on the per-frame path, which
+// already does a syscall, and read once from a defer that races nothing.
+type wsStats struct {
+	framesIn  atomic.Int64
+	bytesIn   atomic.Int64
+	framesOut atomic.Int64
+	bytesOut  atomic.Int64
+
+	// When the last inbound frame arrived, in unix nanoseconds. Seeded with the
+	// connection's start, so "nothing ever arrived" reads as the whole age
+	// rather than as 1970.
+	lastReadAt atomic.Int64
+
+	// The longest single conn.Write, in nanoseconds.
+	slowestWrite atomic.Int64
+}
+
+// noteRead counts one inbound frame. n is the frame as it arrived, prefix byte
+// included: this is traffic on the wire, not payload delivered to the PTY.
+func (s *wsStats) noteRead(n int, now time.Time) {
+	s.framesIn.Add(1)
+	s.bytesIn.Add(int64(n))
+	s.lastReadAt.Store(now.UnixNano())
+}
+
+// noteWrite counts one outbound frame and keeps the slowest write seen.
+func (s *wsStats) noteWrite(n int, took time.Duration) {
+	s.framesOut.Add(1)
+	s.bytesOut.Add(int64(n))
+	for {
+		prev := s.slowestWrite.Load()
+		if int64(took) <= prev || s.slowestWrite.CompareAndSwap(prev, int64(took)) {
+			return
+		}
+	}
 }
 
 // serve runs the connection until one of its three loops ends, then tears the
@@ -309,7 +376,7 @@ type wsExit struct {
 // the same string the existence check passed, so `new-session -t` cannot
 // prefix-match its way onto a different session than the one this handler
 // approved.
-func (h *TerminalHandler) serve(ctx context.Context, conn *websocket.Conn, target string) {
+func (h *TerminalHandler) serve(ctx context.Context, conn *websocket.Conn, target, peer string) {
 	conn.SetReadLimit(wsReadLimit)
 
 	// context.Background, not the request context, and deliberately so. The
@@ -328,6 +395,43 @@ func (h *TerminalHandler) serve(ctx context.Context, conn *websocket.Conn, targe
 		return
 	}
 
+	// Everything below this point is accounted for in the log. The connected
+	// line is written after the attach succeeded, so that every connected line
+	// has a disconnected line: the failure above has a message of its own.
+	id := wsConnSeq.Add(1)
+	stats := &wsStats{}
+	start := time.Now()
+	stats.lastReadAt.Store(start.UnixNano())
+	slog.Info("terminal: connected", "conn", id, "session", target, "peer", peer)
+
+	var exit wsExit
+	defer func() {
+		now := time.Now()
+		attrs := []any{
+			"conn", id,
+			"session", target,
+			"peer", peer,
+			// The number, not the library's String(): an undefined code prints as
+			// `StatusCode(0)`, and this field is read by grep more than by eye.
+			"status", int(exit.status),
+			"reason", exit.reason,
+			"graceful", exit.graceful,
+			"age", now.Sub(start).Round(time.Millisecond),
+			"frames_in", stats.framesIn.Load(),
+			"bytes_in", stats.bytesIn.Load(),
+			"frames_out", stats.framesOut.Load(),
+			"bytes_out", stats.bytesOut.Load(),
+			"since_last_read", now.Sub(time.Unix(0, stats.lastReadAt.Load())).Round(time.Millisecond),
+			"slowest_write", time.Duration(stats.slowestWrite.Load()).Round(time.Millisecond),
+		}
+		// Only when there is one, so that its presence is itself information:
+		// a cause means the connection ended by failing rather than by asking.
+		if exit.cause != nil {
+			attrs = append(attrs, "cause", exit.cause)
+		}
+		slog.Info("terminal: disconnected", attrs...)
+	}()
+
 	// One cancellation ends all three loops: it aborts a parked Read, Write or
 	// Ping -- coder/websocket closes the connection on a context expiry -- and
 	// it is the other arm of the write loop's select.
@@ -345,11 +449,11 @@ func (h *TerminalHandler) serve(ctx context.Context, conn *websocket.Conn, targe
 	done := make(chan wsExit, 3)
 	var wg sync.WaitGroup
 	wg.Add(3)
-	go func() { defer wg.Done(); done <- h.readLoop(ctx, conn, sess, ctrl) }()
-	go func() { defer wg.Done(); done <- wsWriteLoop(ctx, conn, sess.Output(), ctrl) }()
+	go func() { defer wg.Done(); done <- h.readLoop(ctx, conn, sess, ctrl, stats) }()
+	go func() { defer wg.Done(); done <- wsWriteLoop(ctx, conn, sess.Output(), ctrl, stats) }()
 	go func() { defer wg.Done(); done <- h.pingLoop(ctx, conn) }()
 
-	exit := <-done
+	exit = <-done
 
 	// The close frame goes out before the cancellation, and it has to: cancel
 	// aborts the parked Read, and aborting a read closes the connection, so a
@@ -372,24 +476,26 @@ func (h *TerminalHandler) serve(ctx context.Context, conn *websocket.Conn, targe
 // readLoop carries the browser's keystrokes and control messages. It is the
 // only caller of conn.Read, which is the one method on a Conn that is not safe
 // to call concurrently.
-func (h *TerminalHandler) readLoop(ctx context.Context, conn *websocket.Conn, sess *ptybridge.Session, ctrl chan<- []byte) wsExit {
+func (h *TerminalHandler) readLoop(ctx context.Context, conn *websocket.Conn, sess *ptybridge.Session, ctrl chan<- []byte, stats *wsStats) wsExit {
 	for {
 		typ, msg, err := conn.Read(ctx)
 		if err != nil {
 			// The peer closed, vanished, or we are shutting down. There is
-			// nobody left to send a status to.
-			return wsExit{}
+			// nobody left to send a status to -- but the error is the only
+			// account of HOW, so it goes in the log rather than nowhere.
+			return wsExit{cause: err}
 		}
+		stats.noteRead(len(msg), time.Now())
 		// Binary only. Text frames would force UTF-8 validation on a stream
 		// that is not text -- a browser hands them over as strings that have
 		// already had invalid bytes replaced, which corrupts escape sequences
 		// irrecoverably.
 		if typ != websocket.MessageBinary {
-			return wsExit{websocket.StatusUnsupportedData, "binary frames only", true}
+			return wsExit{status: websocket.StatusUnsupportedData, reason: "binary frames only", graceful: true}
 		}
 		kind, payload, err := ptybridge.Decode(msg)
 		if err != nil {
-			return wsExit{websocket.StatusUnsupportedData, "malformed frame", true}
+			return wsExit{status: websocket.StatusUnsupportedData, reason: "malformed frame", graceful: true}
 		}
 		switch kind {
 		case ptybridge.FrameData:
@@ -458,7 +564,7 @@ const wsPaneType = "pane"
 func (h *TerminalHandler) control(ctx context.Context, sess *ptybridge.Session, payload []byte, ctrl chan<- []byte) (wsExit, bool) {
 	var m wsControlMessage
 	if err := json.Unmarshal(payload, &m); err != nil {
-		return wsExit{websocket.StatusUnsupportedData, "malformed control message", true}, true
+		return wsExit{status: websocket.StatusUnsupportedData, reason: "malformed control message", graceful: true}, true
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, wsTmuxTimeout)
@@ -656,27 +762,37 @@ func (h *TerminalHandler) endMode(ctx context.Context, pane string) error {
 // that produced them because coder/websocket supports one writer at a time, and
 // two goroutines writing frames onto the same socket is a corrupted stream
 // rather than a race that shows up as a test failure.
-func wsWriteLoop(ctx context.Context, conn *websocket.Conn, out <-chan []byte, ctrl <-chan []byte) wsExit {
+func wsWriteLoop(ctx context.Context, conn *websocket.Conn, out <-chan []byte, ctrl <-chan []byte, stats *wsStats) wsExit {
 	for {
 		select {
 		case <-ctx.Done():
 			return wsExit{}
 		case m := <-ctrl:
-			if err := conn.Write(ctx, websocket.MessageBinary, ptybridge.EncodeControl(m)); err != nil {
-				return wsExit{}
+			if err := wsSend(ctx, conn, ptybridge.EncodeControl(m), stats); err != nil {
+				return wsExit{cause: err}
 			}
 		case b, ok := <-out:
 			if !ok {
 				// The session ended: the user typed exit, the base session was
 				// killed, or the bridge closed itself. Say so, so the browser
 				// can tell this from a network fault it should reconnect after.
-				return wsExit{websocket.StatusNormalClosure, "session ended", true}
+				return wsExit{status: websocket.StatusNormalClosure, reason: "session ended", graceful: true}
 			}
-			if err := conn.Write(ctx, websocket.MessageBinary, ptybridge.EncodeData(b)); err != nil {
-				return wsExit{}
+			if err := wsSend(ctx, conn, ptybridge.EncodeData(b), stats); err != nil {
+				return wsExit{cause: err}
 			}
 		}
 	}
+}
+
+// wsSend is conn.Write with the one measurement that only this side can make.
+func wsSend(ctx context.Context, conn *websocket.Conn, frame []byte, stats *wsStats) error {
+	started := time.Now()
+	if err := conn.Write(ctx, websocket.MessageBinary, frame); err != nil {
+		return err
+	}
+	stats.noteWrite(len(frame), time.Since(started))
+	return nil
 }
 
 // pingLoop is the only thing that can tell a quiet terminal from a dead peer.
@@ -704,7 +820,7 @@ func (h *TerminalHandler) pingLoop(ctx context.Context, conn *websocket.Conn) ws
 			if err != nil {
 				// Not graceful: a close handshake with a peer that just failed
 				// to answer a ping would only wait out its own timeout.
-				return wsExit{}
+				return wsExit{cause: err}
 			}
 		}
 	}

@@ -455,6 +455,16 @@ export interface TerminalSessionOptions {
    * `lib/clipboard.ts` for why the write can be refused.
    */
   onClipboard?: (text: string) => void
+  /**
+   * Input this tab wrote that the daemon never confirmed, and that could not
+   * be safely sent again -- handed back as text so the user can have it rather
+   * than lose it.
+   *
+   * It is only called when the replay was REFUSED. A replay that happens is
+   * silent on purpose: the text appears in the pane, which is the whole answer.
+   * See `#settleOrphan` for the three conditions.
+   */
+  onLostInput?: (text: string) => void
   /** Called on every state change, including the first. */
   onStatus: (status: TerminalStatus) => void
   /** Defaults to `sessionStorage`; null disables persistence. */
@@ -511,6 +521,43 @@ export class TerminalSession {
    * reconnect chains means two tmux sessions racing to be this tab's.
    */
   #transport: Transport | null = null
+
+  /**
+   * Input a dead socket wrote and was never told had arrived, with the pane it
+   * was meant for.
+   *
+   * Held, not sent: see `#settleOrphan`. The pane is this tab's pane as of the
+   * close, which is a simplification worth naming -- bytes typed before a
+   * mid-typing pane switch would be attributed to the pane switched TO. In
+   * practice an ack follows every frame within milliseconds, so what is
+   * outstanding at a close is what was typed in the last moments before it,
+   * and the simplification costs a refused replay rather than a misdirected
+   * one, because a refusal is what a mismatch produces.
+   */
+  #orphan: { bytes: Uint8Array; pane: string | null; truncated: boolean } | null = null
+
+  /**
+   * Whether anything has been written since the current socket opened. It is
+   * what stops a replay from landing BEHIND input the user has already typed,
+   * which would reorder their own text under them.
+   */
+  #typedSinceOpen = false
+
+  /**
+   * Whether the write happening right now is the terminal answering the daemon
+   * rather than the user typing.
+   *
+   * MEASURED, and the reason this field exists at all: every attach makes the
+   * terminal write without anyone touching the keyboard. tmux asks the
+   * terminal its size with `CSI 14 t` and `@wterm` answers
+   * `\x1b[4;732;1000t` -- 13 bytes, synchronously, from inside the delivery of
+   * the server's own bytes, before the `where` answer has come back. Counting
+   * that as "the user has started typing" made `#settleOrphan` refuse every
+   * replay there will ever be, on every reconnect, and no unit test could see
+   * it: they call `write` directly, with no terminal on the other end to
+   * answer anything.
+   */
+  #feeding = false
 
   #phase: TerminalPhase = 'connecting'
   #attempt = 0
@@ -704,6 +751,9 @@ export class TerminalSession {
       this.#noteDrop()
       return false
     }
+    // Before any replay could be, so a replay never overtakes it -- but only
+    // when this is the user. See `#feeding`.
+    if (!this.#feeding) this.#typedSinceOpen = true
     return true
   }
 
@@ -961,6 +1011,7 @@ export class TerminalSession {
       this.#wakeProbe = null
     }
     const dead = this.#transport
+    if (dead) this.#rescue(dead)
     this.#transport = null
     this.#awaitingWhere = false
     dead?.close(4001, 'socket did not answer')
@@ -984,7 +1035,16 @@ export class TerminalSession {
         if (transport !== this.#transport) return
         this.#frameArrived()
         for (const text of clipboard.feed(bytes)) this.#opts.onClipboard?.(text)
-        this.#opts.onData(bytes)
+        // Bracketed so that a write the terminal makes in answer to these
+        // bytes is recognisable as such. try/finally because `onData` paints,
+        // and a paint that throws must not leave the flag stuck on -- that
+        // would make real typing invisible to `#settleOrphan`.
+        this.#feeding = true
+        try {
+          this.#opts.onData(bytes)
+        } finally {
+          this.#feeding = false
+        }
       },
       onControl: (message) => {
         if (transport !== this.#transport) return
@@ -1007,6 +1067,7 @@ export class TerminalSession {
     this.#attempt = 0
     this.#retryDelayMs = 0
     this.#inputDropped = false
+    this.#typedSinceOpen = false
     this.#openEpoch++
 
     // The server attaches at 80x24 until told otherwise, so a reconnect that
@@ -1057,13 +1118,85 @@ export class TerminalSession {
     // does an answer to a question this session did not ask.
     if (!this.#awaitingWhere) return
     this.#awaitingWhere = false
+    // Before the early return below: whether the pane is the one this tab
+    // already thought it was on says nothing about the orphaned input, which
+    // is waiting on this exact answer.
+    this.#settleOrphan(pane)
     if (pane === this.#pane) return
     this.#pane = pane
     this.#emit()
   }
 
+  /**
+   * Take what a dying socket was never told had arrived.
+   *
+   * Appended rather than replaced: a reconnect that itself fails before the
+   * pane is confirmed must not throw away the first socket's text.
+   */
+  #rescue(dead: Transport): void {
+    const bytes = dead.unacked
+    if (bytes.length === 0) return
+    const previous = this.#orphan
+    if (previous) {
+      const joined = new Uint8Array(previous.bytes.length + bytes.length)
+      joined.set(previous.bytes)
+      joined.set(bytes, previous.bytes.length)
+      this.#orphan = {
+        bytes: joined,
+        pane: this.#pane,
+        truncated: previous.truncated || dead.unackedTruncated,
+      }
+      return
+    }
+    this.#orphan = { bytes, pane: this.#pane, truncated: dead.unackedTruncated }
+  }
+
+  /**
+   * Decide what becomes of the orphaned input now that the daemon has said
+   * which pane this tab is on.
+   *
+   * Three conditions, and all three are about safety rather than tidiness:
+   *
+   *  - THE SAME PANE. A reconnect starts a new throwaway session, which lands
+   *    on the group's first window. Bytes typed at one agent's prompt can
+   *    therefore arrive at another agent's shell, where a trailing Return runs
+   *    them. This is the condition that matters; the other two are about not
+   *    making a mess of the text itself.
+   *  - NOTHING TYPED YET. A replay has to go in front of what the user types
+   *    next, or their own sentence comes out interleaved.
+   *  - NOT TRUNCATED. A fragment of a command line is a different command.
+   *
+   * When any of them fails the text goes back to the user instead, which is
+   * the whole point: the old behaviour was to lose it silently.
+   */
+  #settleOrphan(pane: string): void {
+    const orphan = this.#orphan
+    if (!orphan) return
+    this.#orphan = null
+
+    // `pane` is a confirmed pane id, so an orphan with no pane of its own
+    // fails this comparison without needing a null check of its own.
+    const safe = orphan.pane === pane && !this.#typedSinceOpen && !orphan.truncated
+    if (safe && this.#transport?.send(orphan.bytes)) return
+    this.#handBack(orphan.bytes)
+  }
+
+  /** Give up on replaying and hand the text to the user. */
+  #abandonOrphan(): void {
+    const orphan = this.#orphan
+    if (!orphan) return
+    this.#orphan = null
+    this.#handBack(orphan.bytes)
+  }
+
+  #handBack(bytes: Uint8Array): void {
+    const text = new TextDecoder().decode(bytes)
+    if (text !== '') this.#opts.onLostInput?.(text)
+  }
+
   #closed(transport: Transport, event: TransportClose): void {
     if (transport !== this.#transport) return
+    this.#rescue(transport)
     this.#transport = null
     this.#awaitingWhere = false
     if (this.#resizeTimer) {
@@ -1081,6 +1214,9 @@ export class TerminalSession {
     if (!shouldReconnect(event)) {
       this.#phase = 'ended'
       this.#retryDelayMs = 0
+      // No socket is coming to confirm a pane, so holding this would be
+      // holding it forever.
+      this.#abandonOrphan()
       this.#emit()
       // "session ended" is what a kill looks like from inside an attached tab
       // as well as what `exit` looks like, and the two want different words and
@@ -1346,6 +1482,18 @@ export function Terminal({ session, label, url, className, onStatusChange, ref }
             description: failure.reason,
             action: { label: 'Copy', onClick: () => void writeTerminalClipboard(text) },
           })
+        })
+      },
+      // What the connection lost and this tab would not retype for you. The
+      // toast is deliberately persistent and deliberately shows the text: it
+      // is the user's own sentence, it is nowhere else now, and a toast that
+      // faded after four seconds would be the same loss with extra steps.
+      onLostInput: (text) => {
+        toast.warning('This never reached tmux', {
+          description: text,
+          duration: Infinity,
+          closeButton: true,
+          action: { label: 'Copy', onClick: () => void writeTerminalClipboard(text) },
         })
       },
       onStatus: (next) => {

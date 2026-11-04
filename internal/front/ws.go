@@ -42,7 +42,11 @@ const wsReadLimit = 1 << 20
 // this is slack rather than capacity; the send is non-blocking so that a
 // browser which has stopped reading cannot park the read goroutine, and the
 // ping loop is what eventually collects such a peer.
-const wsControlBuffer = 4
+// Raised from 4 when input acks joined it: a "where" is asked once or twice a
+// connection, but an ack goes out for every frame of input, so this queue went
+// from slack to a path the fastest typist shares with the write loop. Still
+// slack, just enough of it -- and an ack that does not fit is dropped for free.
+const wsControlBuffer = 32
 
 // The size the attach starts at. A browser terminal has no dimensions until it
 // has laid out, so the first thing the frontend sends is a resize; this is only
@@ -477,6 +481,11 @@ func (h *TerminalHandler) serve(ctx context.Context, conn *websocket.Conn, targe
 // only caller of conn.Read, which is the one method on a Conn that is not safe
 // to call concurrently.
 func (h *TerminalHandler) readLoop(ctx context.Context, conn *websocket.Conn, sess *ptybridge.Session, ctrl chan<- []byte, stats *wsStats) wsExit {
+	// Input bytes this connection has handed to the pty, which is what its acks
+	// report. Per connection on purpose: the browser's journal of unacked bytes
+	// is per Transport, and a Transport owns exactly one socket for its life.
+	var written int64
+
 	for {
 		typ, msg, err := conn.Read(ctx)
 		if err != nil {
@@ -499,9 +508,19 @@ func (h *TerminalHandler) readLoop(ctx context.Context, conn *websocket.Conn, se
 		}
 		switch kind {
 		case ptybridge.FrameData:
-			if _, err := sess.Write(payload); err != nil {
+			// An empty data frame is legal and carries no input. Acking it
+			// would tell the browser something landed when nothing did.
+			if len(payload) == 0 {
+				break
+			}
+			n, err := sess.Write(payload)
+			if err != nil {
 				return wsExit{} // the PTY is gone; the write loop is ending too
 			}
+			// n, not len(payload): a short write must not be acknowledged as a
+			// whole one, or the browser frees bytes the pty never saw.
+			written += int64(n)
+			wsAck(written, ctrl)
 		case ptybridge.FrameControl:
 			if exit, fatal := h.control(ctx, sess, payload, ctrl); fatal {
 				return exit
@@ -547,6 +566,47 @@ type wsPaneMessage struct {
 // TypeScript one both pin the literal, and a rename that changed only one of
 // them would leave a tab that never learns where it is.
 const wsPaneType = "pane"
+
+// wsAckMessage tells the browser how much of its input has actually reached the
+// pty, counted in bytes and cumulative over the connection.
+//
+// WHY IT EXISTS. Keystrokes used to leave the browser and never be mentioned
+// again, so a tab had no way to tell a frame that arrived from a frame sitting
+// in its own socket buffer on a stalled link. Measured from this daemon's log,
+// on a connection that died while the owner was typing into an agent's prompt:
+// frames_in=289 bytes_in=2219 (7.7 bytes a frame -- keystrokes),
+// slowest_write=0s (this side never blocked), killed by a pong that never came
+// back. Those bytes lived nowhere but the browser's socket buffer, and they
+// died with it. With an ack the browser knows exactly which of its bytes are
+// still only its own, and can hand them back to the user instead of losing
+// them.
+//
+// WHY CUMULATIVE. Because it makes an ack free to drop. A total supersedes
+// every total before it, so a full control queue costs nothing but a later
+// free; a per-frame delta would make every drop a permanent hole.
+type wsAckMessage struct {
+	Type  string `json:"type"`
+	Bytes int64  `json:"bytes"`
+}
+
+// wsAckType is the "type" of that message, pinned literally on both sides of
+// the wire like wsPaneType.
+const wsAckType = "ack"
+
+// wsAck offers the browser a new total. Dropped without a word when the
+// control queue is full: unlike the pane message there is nothing to warn
+// about, because the next ack carries everything this one would have.
+func wsAck(bytes int64, ctrl chan<- []byte) {
+	msg, err := json.Marshal(wsAckMessage{Type: wsAckType, Bytes: bytes})
+	if err != nil {
+		slog.Warn("terminal: cannot encode the ack", "bytes", bytes, "err", err)
+		return
+	}
+	select {
+	case ctrl <- msg:
+	default:
+	}
+}
 
 // control applies one control message.
 //

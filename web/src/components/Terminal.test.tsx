@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { FRAME_CONTROL, FRAME_DATA } from '@/lib/transport'
+import { FRAME_CONTROL, FRAME_DATA, UNACKED_LIMIT_BYTES } from '@/lib/transport'
 import { SNAPSHOT_URL } from '@/lib/useSnapshot'
 import type { SnapshotRow } from '@/lib/useSnapshot'
 
@@ -201,19 +201,25 @@ function makeSession(
     probe?: () => Promise<SessionPresence>
     now?: () => number
     host?: () => { contains(node: unknown): boolean } | null
+    onData?: (bytes: Uint8Array) => void
   } = {},
 ) {
   const statuses: TerminalStatus[] = []
   const received: Uint8Array[] = []
   const clipboard: string[] = []
+  const lost: string[] = []
   const storage = opts.storage === undefined ? memoryStorage() : opts.storage
   const probe = makeProbe()
   const term = new TerminalSession({
     url: 'ws://localhost/ws?session=work',
     session: 'work',
     paneKey: paneStorageKey('work'),
-    onData: (bytes) => void received.push(bytes),
+    onData: (bytes) => {
+      received.push(bytes)
+      opts.onData?.(bytes)
+    },
     onClipboard: (text) => void clipboard.push(text),
+    onLostInput: (text) => void lost.push(text),
     onStatus: (s) => {
       statuses.push(s)
       opts.onStatus?.(s)
@@ -227,7 +233,7 @@ function makeSession(
     probe: opts.probe ?? probe.probe,
     host: opts.host,
   })
-  return { term, statuses, received, storage, probe, clipboard }
+  return { term, statuses, received, storage, probe, clipboard, lost }
 }
 
 /**
@@ -2168,5 +2174,221 @@ describe('the clipboard', () => {
     await flush()
     serverData(second, seq.subarray(cut))
     expect(clipboard).toEqual([])
+  })
+})
+
+// --- input that never reached tmux ------------------------------------------
+//
+// WHY THIS EXISTS. From the daemon's log, on a connection that died while the
+// owner was typing into an agent's prompt: frames_in=289 bytes_in=2219 (7.7
+// bytes a frame -- keystrokes), slowest_write=0s, killed by a pong that never
+// came back. The browser had handed those keystrokes to a socket that was still
+// OPEN on a stalled link, so every `send` returned true and they died in the
+// socket's own buffer.
+//
+// The transport can now say which of its bytes were never acknowledged. What
+// lives HERE is the dangerous half: deciding whether sending them again is
+// safe. A reconnect lands on the group's first window, so bytes typed at one
+// agent's prompt can arrive at another agent's shell -- `transport.test.ts`
+// still has the test that spells the hazard out as `rm -rf /\r`.
+
+describe('input that never reached tmux', () => {
+  /** Open a socket and let the tab learn which pane it is on. */
+  function openOn(pane: string) {
+    const ws = MockWebSocket.last
+    ws.open()
+    serverControl(ws, { type: 'pane', pane })
+    return ws
+  }
+
+  const sent = (ws: MockWebSocket) => data(ws).map((f) => f.text)
+
+  it('is sent again when the new socket confirms the same pane', () => {
+    vi.useFakeTimers()
+    const { term, lost } = makeSession()
+    term.start()
+    const first = openOn('%1')
+    expect(term.write('hola')).toBe(true)
+
+    first.emitClose(1006)
+    vi.advanceTimersByTime(60_000)
+    const second = openOn('%1')
+
+    expect(sent(second)).toContain('hola')
+    expect(lost).toEqual([])
+  })
+
+  it('is handed back rather than typed into a pane it was not meant for', () => {
+    vi.useFakeTimers()
+    const { term, lost } = makeSession()
+    term.start()
+    const first = openOn('%1')
+    term.write('hola')
+
+    first.emitClose(1006)
+    vi.advanceTimersByTime(60_000)
+    // tmux left this tab somewhere else -- the group's first window, which is
+    // where a fresh throwaway session lands.
+    const second = openOn('%9')
+
+    expect(sent(second)).not.toContain('hola')
+    expect(lost).toEqual(['hola'])
+  })
+
+  // Order, which matters more than recovery: the replay goes in front of
+  // whatever is typed next, and once the user has started typing there is no
+  // longer a safe place to put it.
+  it('is handed back once something has been typed on the new socket', () => {
+    vi.useFakeTimers()
+    const { term, lost } = makeSession()
+    term.start()
+    const first = openOn('%1')
+    term.write('hola')
+
+    first.emitClose(1006)
+    vi.advanceTimersByTime(60_000)
+    const second = MockWebSocket.last
+    second.open()
+    term.write('impatient')
+    serverControl(second, { type: 'pane', pane: '%1' })
+
+    expect(sent(second)).toEqual(['impatient'])
+    expect(lost).toEqual(['hola'])
+  })
+
+  it('is forgotten once the daemon says it arrived', () => {
+    vi.useFakeTimers()
+    const { term, lost } = makeSession()
+    term.start()
+    const first = openOn('%1')
+    term.write('hola')
+    serverControl(first, { type: 'ack', bytes: 4 })
+
+    first.emitClose(1006)
+    vi.advanceTimersByTime(60_000)
+    const second = openOn('%1')
+
+    expect(sent(second)).toEqual([])
+    expect(lost).toEqual([])
+  })
+
+  it('is partly forgotten when only part of it arrived', () => {
+    vi.useFakeTimers()
+    const { term, lost } = makeSession()
+    term.start()
+    const first = openOn('%1')
+    term.write('hola')
+    serverControl(first, { type: 'ack', bytes: 2 })
+
+    first.emitClose(1006)
+    vi.advanceTimersByTime(60_000)
+    const second = openOn('%1')
+
+    expect(sent(second)).toEqual(['la'])
+    expect(lost).toEqual([])
+  })
+
+  // Nothing is coming to confirm a pane, so holding it would be holding it
+  // forever.
+  it('is handed back at once when the session has ended for good', () => {
+    vi.useFakeTimers()
+    const { term, lost } = makeSession()
+    term.start()
+    const first = openOn('%1')
+    term.write('hola')
+
+    first.emitClose(1000, 'session ended', true)
+
+    expect(lost).toEqual(['hola'])
+  })
+
+  // A fragment of a command is a different command. Replaying the tail of a
+  // truncated journal could run something nobody typed.
+  it('is never replayed when the journal had to drop part of it', () => {
+    vi.useFakeTimers()
+    const { term, lost } = makeSession()
+    term.start()
+    const first = openOn('%1')
+    term.write('x'.repeat(UNACKED_LIMIT_BYTES + 5))
+
+    first.emitClose(1006)
+    vi.advanceTimersByTime(60_000)
+    const second = openOn('%1')
+
+    expect(sent(second)).toEqual([])
+    expect(lost).toHaveLength(1)
+    expect(lost[0]).toHaveLength(UNACKED_LIMIT_BYTES)
+  })
+
+  // A flaky link does not fail once. The second socket here opens, is typed
+  // into, and dies before anything confirms a pane -- so both losses have to
+  // end up in one replay, in the order they were typed.
+  it('gathers what two successive sockets lost, in order', () => {
+    vi.useFakeTimers()
+    const { term, lost } = makeSession()
+    term.start()
+    const first = openOn('%1')
+    term.write('uno')
+    first.emitClose(1006)
+
+    vi.advanceTimersByTime(60_000)
+    const second = MockWebSocket.last
+    second.open() // ready, but never told which pane
+    term.write('dos')
+    second.emitClose(1006)
+
+    vi.advanceTimersByTime(60_000)
+    const third = openOn('%1')
+
+    expect(sent(third)).toContain('unodos')
+    expect(lost).toEqual([])
+  })
+
+  // The bug the end-to-end test caught and no unit test could have: every
+  // attach makes the terminal write on its own. tmux asks its size with
+  // `CSI 14 t` and the terminal answers, synchronously, inside the delivery of
+  // the server's bytes and before the pane is confirmed. Counting that as
+  // typing refused every replay there would ever be.
+  it('is still replayed although the terminal answered the daemon first', () => {
+    vi.useFakeTimers()
+    const answer = '\x1b[4;732;1000t'
+    let replyOnce = true
+    const { term, lost } = makeSession({
+      // What @wterm does: given server bytes, it writes back. Done from inside
+      // onData because that is where it really happens.
+      onData: () => {
+        if (!replyOnce) return
+        replyOnce = false
+        term.write(answer)
+      },
+    })
+    term.start()
+    const first = openOn('%1')
+    term.write('hola')
+    first.emitClose(1006)
+
+    vi.advanceTimersByTime(60_000)
+    const second = MockWebSocket.last
+    second.open()
+    // The server says something, and the terminal answers it unprompted.
+    serverData(second, new TextEncoder().encode('prompt$ '))
+    expect(sent(second)).toContain(answer)
+    serverControl(second, { type: 'pane', pane: '%1' })
+
+    expect(sent(second)).toContain('hola')
+    expect(lost).toEqual([])
+  })
+
+  it('says nothing when there was nothing outstanding', () => {
+    vi.useFakeTimers()
+    const { term, lost } = makeSession()
+    term.start()
+    const first = openOn('%1')
+
+    first.emitClose(1006)
+    vi.advanceTimersByTime(60_000)
+    openOn('%1')
+
+    expect(lost).toEqual([])
   })
 })

@@ -20,10 +20,39 @@
  * and `send` says so by returning false.
  *
  * The invariant is structural rather than defensive: a Transport owns exactly
- * one WebSocket for its whole life, holds no outbound queue at all, and never
- * reopens. Reconnecting means constructing a new Transport -- which is also
- * where the caller (the terminal component) restores the remembered
- * `session:window.pane` before it re-enables input.
+ * one WebSocket for its whole life, never writes a byte it was not handed while
+ * that socket was open, and never reopens. Reconnecting means constructing a
+ * new Transport -- which is also where the caller (the terminal component)
+ * restores the remembered `session:window.pane` before it re-enables input.
+ *
+ * ## The journal of unconfirmed input
+ *
+ * It does keep a bounded JOURNAL of the input it has written, which is a
+ * different thing from a queue: nothing in it is ever sent anywhere by this
+ * class, on any event, ever. It exists because of a bug that cost the owner
+ * work. From the daemon's own log, on a connection that died while he was
+ * typing into an agent's prompt:
+ *
+ *   frames_in=289 bytes_in=2219 since_last_read=3.223s slowest_write=0s
+ *   cause="failed to ping: failed to wait for pong: context deadline exceeded"
+ *
+ * 7.7 bytes an inbound frame -- keystrokes -- and a server that was never once
+ * blocked writing, killed by a pong that never came back. A browser hands
+ * `send()` to a socket that is still OPEN on a stalled link, so `send` returned
+ * true for every one of those keystrokes and the app believed them delivered.
+ * They were in the socket's own buffer, which is the one place in this system
+ * nothing can see, and they died with the connection. Two other connections
+ * the same afternoon measured the window: one read nothing for 13s and
+ * recovered -- that is the "it all arrives at once" case -- and one for 1m09.9s
+ * and was reset.
+ *
+ * So the daemon now acknowledges input by the cumulative count of bytes it has
+ * handed to the pty (`wsAckType` in internal/front/ws.go), and `unacked` is
+ * what this socket wrote and was never told about. The caller decides what to
+ * do with it, and it must decide carefully: replaying it blind is the hazard
+ * described above -- a reconnect lands on the group's first window, so bytes
+ * typed at one agent's prompt could be typed into another's shell. The pane has
+ * to be confirmed first. See the reconnect handling in `@/components/Terminal`.
  *
  * ## Keepalive
  *
@@ -50,6 +79,24 @@ export const FRAME_CONTROL = 0x01
  * cares where the frame boundaries fell.
  */
 export const MAX_DATA_PAYLOAD = 1 << 19
+
+/**
+ * How many unconfirmed input bytes the journal will hold.
+ *
+ * A bound, because a tab can live for weeks. When it is reached the OLDEST
+ * bytes go: if something has to be dropped, the start of a huge paste is a
+ * better loss than the end of what was just typed, and `unackedTruncated` says
+ * it happened. 64KiB is far more than a stalled link can collect from a person
+ * typing -- the longest stall measured was 1m09.9s, a few hundred bytes of
+ * typing -- and is nothing in a browser tab.
+ */
+export const UNACKED_LIMIT_BYTES = 1 << 16
+
+/**
+ * The `type` of the daemon's input acknowledgement, pinned against `wsAckType`
+ * in internal/front/ws.go by `transport.test.ts`.
+ */
+export const ACK_MESSAGE = 'ack'
 
 /**
  * WebSocket.OPEN. Spelled out rather than read off the global so that the
@@ -154,6 +201,24 @@ export class Transport {
 
   #lastRecvAt: number
 
+  /** Input bytes handed to this socket, cumulative, matching the server's count. */
+  #sentBytes = 0
+
+  /**
+   * The unconfirmed input, oldest first. `start` is the cumulative offset of
+   * the first byte, which is what lets a partial ack trim an entry exactly.
+   *
+   * The byte arrays are views onto frames this class allocated and nothing else
+   * holds, so a caller that reuses its own buffer cannot rewrite them, and
+   * nothing here ever writes to them.
+   */
+  #journal: { start: number; bytes: Uint8Array }[] = []
+
+  /** Total length of #journal, kept rather than recomputed per keystroke. */
+  #journalBytes = 0
+
+  #truncated = false
+
   /**
    * Set by `close()`. Suppresses every callback from that point on, so a
    * caller that tore this Transport down does not then get an `onClose` it
@@ -232,6 +297,34 @@ export class Transport {
    */
   get lastRecvAt(): number {
     return this.#lastRecvAt
+  }
+
+  /**
+   * The input this socket wrote that the daemon never confirmed reaching the
+   * pty. Empty on a healthy socket, because an ack follows every frame.
+   *
+   * A snapshot, freshly allocated per call: the caller is going to hold it
+   * across a reconnect. Read it after the socket has closed and it is the text
+   * the user typed and lost -- but see the class comment before replaying it
+   * anywhere.
+   */
+  get unacked(): Uint8Array {
+    const out = new Uint8Array(this.#journalBytes)
+    let at = 0
+    for (const entry of this.#journal) {
+      out.set(entry.bytes, at)
+      at += entry.bytes.length
+    }
+    return out
+  }
+
+  /**
+   * Whether `unacked` is missing older bytes because the journal filled up.
+   * The caller needs it to avoid telling the user "this is what you typed"
+   * when it is only the end of it.
+   */
+  get unackedTruncated(): boolean {
+    return this.#truncated
   }
 
   /**
@@ -325,7 +418,77 @@ export class Transport {
     frame[0] = kind
     frame.set(payload, 1)
     this.#ws.send(frame)
+    // Only input, and only once it is on the socket. A write that returned
+    // false above is gone and is documented as gone; journaling it would make
+    // `unacked` a record of two different things. Control messages are not
+    // journaled because the server does not count them either.
+    //
+    // The length check is kept although no test can see it, which mutation
+    // testing confirmed: a zero-length entry adds nothing to `unacked`. What it
+    // prevents is the array growing without bound while #journalBytes stays 0
+    // and the cap therefore never trims -- invisible through this class's
+    // surface, and still a leak.
+    if (kind === FRAME_DATA && payload.length > 0) this.#journalSent(frame.subarray(1))
     return true
+  }
+
+  /** Record input written to the socket, dropping the oldest if over the cap. */
+  #journalSent(bytes: Uint8Array): void {
+    this.#journal.push({ start: this.#sentBytes, bytes })
+    this.#sentBytes += bytes.length
+    this.#journalBytes += bytes.length
+    while (this.#journalBytes > UNACKED_LIMIT_BYTES) {
+      const head = this.#journal[0]
+      const over = this.#journalBytes - UNACKED_LIMIT_BYTES
+      if (over >= head.bytes.length) {
+        this.#journal.shift()
+        this.#journalBytes -= head.bytes.length
+      } else {
+        head.bytes = head.bytes.subarray(over)
+        head.start += over
+        this.#journalBytes -= over
+      }
+      this.#truncated = true
+    }
+  }
+
+  /**
+   * Free everything the daemon has confirmed.
+   *
+   * The type check is load-bearing and not defensive paranoia: JavaScript
+   * coerces, so a `bytes` of "4" would compare equal to 4 and free input the
+   * pty never took. A value that is not a number is ignored instead, because
+   * holding bytes that did arrive costs nothing and freeing bytes that did not
+   * costs the user their text.
+   *
+   * There is deliberately NO guard against an ack that repeats or goes
+   * backwards, and no clamp to what was sent. Both were here and both were
+   * measured to be unobservable: the loop below only ever removes entries that
+   * lie entirely below the count, so a lower count removes nothing and a count
+   * past the end removes everything there is. Mutation testing is what said so
+   * -- removing either changed no behaviour any test could see, which is the
+   * definition of code that should not be here.
+   */
+  #noteAck(bytes: unknown): void {
+    if (typeof bytes !== 'number' || !Number.isFinite(bytes)) return
+    const acked = bytes
+    while (this.#journal.length > 0) {
+      const head = this.#journal[0]
+      if (head.start + head.bytes.length <= acked) {
+        this.#journal.shift()
+        this.#journalBytes -= head.bytes.length
+        continue
+      }
+      if (head.start < acked) {
+        const drop = acked - head.start
+        head.bytes = head.bytes.subarray(drop)
+        head.start = acked
+        this.#journalBytes -= drop
+      }
+      break
+    }
+    // Nothing is outstanding, so nothing is being withheld from the caller.
+    if (this.#journal.length === 0) this.#truncated = false
   }
 
   #receive(event: MessageEvent): void {
@@ -372,6 +535,16 @@ export class Transport {
       message = JSON.parse(decoder.decode(payload))
     } catch {
       console.warn('transport: ignoring malformed control message')
+      return
+    }
+    // This class's own bookkeeping about its own writes, so it stops here
+    // rather than going to a caller that owns the meaning of everything else.
+    if (
+      typeof message === 'object' &&
+      message !== null &&
+      (message as { type?: unknown }).type === ACK_MESSAGE
+    ) {
+      this.#noteAck((message as { bytes?: unknown }).bytes)
       return
     }
     this.#opts.onControl?.(message)

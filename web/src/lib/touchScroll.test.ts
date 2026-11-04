@@ -55,6 +55,38 @@ describe('a tap', () => {
 })
 
 describe('a vertical swipe', () => {
+  // MEASURED end to end before this existed: from a pane not in copy mode, the
+  // finger had to travel 180px -- half a phone screen -- before one line of
+  // text moved. 12px to pass the threshold, then a whole 85px notch that tmux
+  // spends entering copy mode without scrolling, then a second notch to
+  // actually move. That is what "unresponsive" was.
+  //
+  // So the gesture answers at the threshold with a priming notch. It is NOT
+  // charged to the accumulator, and that is the whole point: charging it would
+  // repay the loan out of the first real notch and put the first movement back
+  // at 170px, which is the bug. The cost is in `reverses mid-gesture`.
+  it('emits a notch the instant it engages, so the gesture answers at once', () => {
+    const s = new SwipeScroller()
+    s.start(100, 400, NOTCH)
+    expect(s.move(100, 400 + SWIPE_THRESHOLD_PX)).toBe(-1)
+  })
+
+  it('primes in the direction the finger is going, not always back', () => {
+    const s = new SwipeScroller()
+    s.start(100, 400, NOTCH)
+    expect(s.move(100, 400 - SWIPE_THRESHOLD_PX)).toBe(1)
+  })
+
+  // The lead is one notch for the whole gesture, not one per sample: a priming
+  // notch per move would run away from the finger.
+  it('primes once, not once per sample', () => {
+    const s = new SwipeScroller()
+    s.start(100, 400, NOTCH)
+    s.move(100, 400 + SWIPE_THRESHOLD_PX)
+    expect(s.move(100, 400 + SWIPE_THRESHOLD_PX + 1)).toBe(0)
+    expect(s.move(100, 400 + SWIPE_THRESHOLD_PX + 2)).toBe(0)
+  })
+
   it('engages once past the threshold', () => {
     const s = new SwipeScroller()
     s.start(100, 400, NOTCH)
@@ -64,14 +96,16 @@ describe('a vertical swipe', () => {
 
   // Dragging DOWN pulls older content down from above, which is what every
   // touch surface does and what `deltaY < 0` means to @wterm (code 64).
+  // One notch of travel is one notch of content PLUS the priming notch above,
+  // in every total below.
   it('scrolls back into history when the finger moves down', () => {
-    expect(drag([400, 400 + NOTCH])).toBe(-1)
-    expect(drag([400, 400 + 3 * NOTCH])).toBe(-3)
+    expect(drag([400, 400 + NOTCH])).toBe(-2)
+    expect(drag([400, 400 + 3 * NOTCH])).toBe(-4)
   })
 
   it('scrolls forward when the finger moves up', () => {
-    expect(drag([400, 400 - NOTCH])).toBe(1)
-    expect(drag([400, 400 - 3 * NOTCH])).toBe(3)
+    expect(drag([400, 400 - NOTCH])).toBe(2)
+    expect(drag([400, 400 - 3 * NOTCH])).toBe(4)
   })
 
   // The content has to follow the finger whether the browser delivers the
@@ -80,7 +114,7 @@ describe('a vertical swipe', () => {
     const total = 4 * NOTCH
     const positions = [400]
     for (let i = 1; i <= steps; i++) positions.push(400 + (total * i) / steps)
-    expect(drag(positions)).toBe(-4)
+    expect(drag(positions)).toBe(-5)
   })
 
   // Travel is kept, not rounded away: a slow drag of half a notch at a time
@@ -95,26 +129,33 @@ describe('a vertical swipe', () => {
       y += NOTCH / 2
       total += s.move(100, y)
     }
-    expect(total).toBe(-4)
+    expect(total).toBe(-5)
   })
 
   it('counts the threshold travel towards the first notch', () => {
     // Exactly one notch of total travel produces exactly one notch, even
     // though the first SWIPE_THRESHOLD_PX of it went into deciding.
-    expect(drag([400, 400 + SWIPE_THRESHOLD_PX, 400 + NOTCH])).toBe(-1)
+    expect(drag([400, 400 + SWIPE_THRESHOLD_PX, 400 + NOTCH])).toBe(-2)
   })
 
-  // The totals here are net, and the content following the finger is what they
-  // mean: a gesture that ends one notch above where it started has scrolled
-  // forward by one, whatever route it took to get there.
-  it('reverses mid-gesture without losing count', () => {
-    // Down a notch (-1), then up two from there (+2): net +1, and the finger
-    // did end one notch above the start.
-    expect(drag([400, 400 + NOTCH, 400 - NOTCH])).toBe(1)
-    // One more notch up: net +2, finger two notches above the start.
-    expect(drag([400, 400 + NOTCH, 400 - NOTCH, 400 - 2 * NOTCH])).toBe(2)
-    // And the invariant behind both: the net is the total displacement.
-    expect(drag([400, 400 + 2 * NOTCH, 400])).toBe(0)
+  // The totals here are net, and they are the displacement MINUS the priming
+  // notch -- which is the price of the priming notch, stated. A gesture that
+  // returns to where it began has still scrolled one notch in the direction it
+  // set off in, because that notch was never charged for. Everything after the
+  // first notch tracks the finger exactly, which is what makes the offset a
+  // constant and not a drift.
+  it('reverses mid-gesture, one notch behind the displacement', () => {
+    // Down a notch then back up to the start: displacement 0, and what is left
+    // is the priming notch, still spent downward.
+    expect(drag([400, 400 + NOTCH, 400 - NOTCH])).toBe(0)
+    // One notch further up: displacement +1, net +1 -- not +2, for the same
+    // reason.
+    expect(drag([400, 400 + NOTCH, 400 - NOTCH, 400 - 2 * NOTCH])).toBe(1)
+    // Two notches down and all the way back: displacement 0, net -1.
+    expect(drag([400, 400 + 2 * NOTCH, 400])).toBe(-1)
+    // The drift test: a longer round trip leaves the SAME single notch behind,
+    // never a growing one.
+    expect(drag([400, 400 + 6 * NOTCH, 400])).toBe(-1)
   })
 })
 
@@ -144,7 +185,7 @@ describe('gestures that are not a scroll', () => {
   it('engages on a mostly-vertical diagonal', () => {
     const s = new SwipeScroller()
     s.start(100, 400, NOTCH)
-    expect(s.move(100 + SWIPE_THRESHOLD_PX, 400 + 2 * NOTCH)).toBe(-2)
+    expect(s.move(100 + SWIPE_THRESHOLD_PX, 400 + 2 * NOTCH)).toBe(-3)
     expect(s.engaged).toBe(true)
   })
 

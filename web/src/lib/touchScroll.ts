@@ -34,6 +34,35 @@
  * TMUX_LINES_PER_NOTCH is tmux's default rather than a law -- a configured
  * `WheelUpPane` could make it anything -- and getting it wrong changes how fast
  * the content moves, never whether it moves.
+ *
+ * ## The priming notch, and the dead zone it removes
+ *
+ * 1:1 is right in the steady state and was wrong at the start. MEASURED on a
+ * 390x844 viewport against a real tmux, swiping down from a pane in no mode:
+ *
+ *   |  finger travel | what the user saw                        |
+ *   | -------------- | ---------------------------------------- |
+ *   |      0 - 75px  | nothing                                  |
+ *   |          90px  | copy-mode entered, scroll_position 0     |
+ *   |         180px  | scroll_position 5 -- the FIRST movement  |
+ *
+ * Half a phone screen of travel before one line moved, because the threshold
+ * costs 12px and then tmux spends an entire notch entering copy-mode without
+ * scrolling. Latency was not the problem: the position was already updated
+ * ~5ms after each move, so tmux was keeping up the whole time.
+ *
+ * So `move` emits one notch the moment it engages. In a pane already in
+ * copy-mode the content moves at 12px of travel; in a pane that has to enter
+ * copy-mode first that notch is swallowed, and the first movement comes at
+ * 95px instead of 180px. The remaining 85px is tmux's own 5-line quantum, not
+ * something this module can shrink while it scrolls with the wheel.
+ *
+ * The priming notch is not charged to the accumulator, and that is a real
+ * trade, not an oversight: charging it would repay the loan out of the first
+ * real notch and put the first movement back at 170px. The cost is that a
+ * gesture leads the finger by one notch, so a swipe that goes down and comes
+ * back to where it started has scrolled one notch back. `touchScroll.test.ts`
+ * nails both halves.
  */
 
 /**
@@ -117,6 +146,7 @@ export class SwipeScroller {
   move(x: number, y: number): number {
     if (this.#rejected) return 0
 
+    let priming = 0
     if (this.#engaged) {
       this.#pending += y - this.#lastY
     } else {
@@ -131,10 +161,15 @@ export class SwipeScroller {
       // Counted from the start, not from here: the travel that proved this was
       // a swipe is still travel, and dropping it makes the first notch late.
       this.#pending = dy
+      // And one notch right now, in the direction of travel, so the gesture
+      // answers at the threshold instead of at a full notch. See the module
+      // comment: this is what takes the first visible movement from 180px of
+      // finger travel down to 95px. Deliberately NOT charged to #pending.
+      priming = dy > 0 ? -1 : 1
     }
     this.#lastY = y
 
-    let notches = 0
+    let notches = priming
     while (Math.abs(this.#pending) >= this.#pxPerNotch) {
       if (this.#pending > 0) {
         // The finger moved down, so older content comes down from above, which

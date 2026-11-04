@@ -100,6 +100,52 @@ test('a swipe down scrolls back into the scrollback, and up comes back', async (
     .toBe('')
 })
 
+// The dead zone, which is what "the swipe is unresponsive" turned out to mean.
+// MEASURED before the priming notch existed: from a pane in no mode, the finger
+// had to travel 180px -- half this viewport -- before one line of text moved,
+// because 12px go to the threshold and then tmux spends a whole 85px notch
+// entering copy-mode without scrolling. Only a real tmux can tell you this: the
+// unit tests know the arithmetic and cannot know that tmux eats the first
+// notch.
+test('the text starts moving within half a notch of travel, not two', async ({
+  page,
+  tmuxWeb,
+}) => {
+  await enroll(page, tmuxWeb, 'deadzone')
+  await fillScrollback(tmuxWeb)
+  expect(ask(tmuxWeb, '#{pane_mode}')).toBe('')
+
+  const cdp = await page.context().newCDPSession(page)
+  const x = 195
+  const send = (type: 'touchStart' | 'touchMove' | 'touchEnd', y: number) =>
+    cdp.send('Input.dispatchTouchEvent', {
+      type,
+      touchPoints: type === 'touchEnd' ? [] : [{ x, y }],
+    })
+
+  // Creep down 20px at a time and note the travel at which the content first
+  // moved. 100px is the budget: the threshold plus the one notch tmux spends
+  // entering the mode, and nothing more.
+  const BUDGET_PX = 100
+  let movedAt = -1
+  await send('touchStart', 120)
+  for (let travel = 20; travel <= 300 && movedAt < 0; travel += 20) {
+    await send('touchMove', 120 + travel)
+    await page.waitForTimeout(150)
+    if (Number(tmuxWeb.tmux('display-message', '-p', '-t', pane, '#{scroll_position}')) > 0) {
+      movedAt = travel
+    }
+  }
+  await send('touchEnd', 420)
+  await cdp.detach()
+
+  expect(movedAt, 'the content never moved at all within 300px of travel').toBeGreaterThan(0)
+  expect(
+    movedAt,
+    `the first line of text only moved after ${movedAt}px of finger travel`,
+  ).toBeLessThanOrEqual(BUDGET_PX)
+})
+
 // The other half of the gesture contract, and the reason for the threshold: a
 // tap is how the user puts the cursor somewhere and how tmux learns which pane
 // was touched. A recogniser that engaged on a stray pixel would cost them that,

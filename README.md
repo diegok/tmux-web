@@ -385,6 +385,31 @@ are 43x44. tmux-web does not set either of them for you and should not:
 a value the daemon set for its own throwaway session would land on yours as
 well.
 
+The app ships its own monospaced font, **Geist Mono**, and the terminal waits for
+it before it measures the grid. Both halves are load-bearing. `@wterm/dom` draws
+a row as runs of text in one `<span>` under `white-space: pre` rather than a box
+per cell, so the grid holds together only while every glyph on the line has
+exactly the cell's advance width — one glyph from another font shifts everything
+to its right. Until this font was bundled the terminal asked for Menlo, then
+Consolas, then DejaVu Sans Mono, and on a phone got the bare `monospace`
+generic, whose coverage is not the terminal's problem to know. MEASURED in
+Chromium at 14px: with the box-drawing subset withheld, sixty `─` draw 505.73px
+where the grid is 480.00px — 25.7px, more than three columns of drift on one
+line. Of the three monospaced families on fontsource that were measured, Geist
+Mono is the only one carrying `U+2500-259F`, the box drawing and the blocks an
+agent's frames are made of; JetBrains Mono and Noto Sans Mono both stop at the
+latin and cyrillic ranges. It costs 23KB plus 5.8KB over the wire, and its
+narrower cell is worth columns: 8.00px against DejaVu Sans Mono's 8.43px, so a
+390px phone gets 45 columns where it got 43. The wait exists because wterm
+measures the cell once as it mounts and then only when its own box resizes, so a
+face arriving a moment later would leave tmux sized to the fallback's cell until
+something resized the pane — on a phone, until it was rotated. It is bounded: a
+font that never arrives does not leave you looking at a blank pane. Glyphs
+outside that subset — U+23FA and U+273B, the dot and the spinner `claude` prints
+— still come from the device and still drift by a fraction of a cell; pinning
+those would mean a box per cell, which is the renderer's decision rather than
+this app's.
+
 There is one service worker, and the only thing it holds is a page it writes
 itself: the "tmux-web is not reachable" screen you get when a navigation cannot
 reach the daemon at all. It never caches the app, its bundles or anything under

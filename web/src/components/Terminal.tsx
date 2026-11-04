@@ -61,11 +61,13 @@
 
 import { Terminal as WTermView, useTerminal } from '@wterm/react'
 import { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
-import type { Ref } from 'react'
+import type { CSSProperties, Ref } from 'react'
 import { toast } from 'sonner'
 
 import { writeTerminalClipboard } from '@/lib/clipboard'
 import { installLinkOpener } from '@/lib/links'
+import { TERM_FONT_STACK, monoFontReady } from '@/lib/monoFont'
+import type { FontLoader } from '@/lib/monoFont'
 import { Osc52Scanner } from '@/lib/osc52'
 import { installSwipeScroll } from '@/lib/touchScroll'
 import { Transport } from '@/lib/transport'
@@ -1417,7 +1419,66 @@ const INITIAL_STATUS: TerminalStatus = {
   inputDropped: false,
 }
 
-export function Terminal({ session, label, url, className, onStatusChange, ref }: TerminalProps) {
+/**
+ * `document.fonts`, where there is one. A server render has no `document` at
+ * all, and jsdom has a `document` without the font loading API; both answer
+ * "nothing to wait for".
+ */
+function fontLoader(): FontLoader | undefined {
+  if (typeof document === 'undefined') return undefined
+  const fonts: FontLoader | undefined = document.fonts
+  return typeof fonts?.load === 'function' ? fonts : undefined
+}
+
+/**
+ * Whether the grid may be measured yet.
+ *
+ * `WTerm` measures the cell from a hidden `W` as it mounts and then only when
+ * its own box resizes, so a face that swaps in afterwards leaves tmux sized to
+ * the *fallback* cell until something else resizes the pane -- on a phone,
+ * until it is rotated. The wait is what makes the first measurement the right
+ * one, and `monoFontReady` bounds it: every outcome, including a font that
+ * never came, ends in `true`.
+ */
+function useMonoFontReady(): boolean {
+  const [ready, setReady] = useState(() => !fontLoader())
+  useEffect(() => {
+    if (ready) return
+    let live = true
+    void monoFontReady(fontLoader()).then((outcome) => {
+      if (!live) return
+      if (outcome === 'timeout' || outcome === 'failed') {
+        // Worth saying out loud: the grid is about to be measured in whatever
+        // the device has, which is the misalignment this wait exists to avoid.
+        console.warn(`tmux-web: monospaced font ${outcome}; the terminal grid may not line up`)
+      }
+      setReady(true)
+    })
+    return () => {
+      live = false
+    }
+  }, [ready])
+  return ready
+}
+
+/**
+ * The terminal, once it can be measured in the font it will be drawn in.
+ *
+ * Nothing starts before then -- not the socket either. An attach that opened
+ * first would paint tmux's first screen into a terminal sized by the fallback
+ * cell, which is the same wrong size the wait exists to prevent, and would also
+ * have to put those bytes somewhere while there is no canvas.
+ */
+export function Terminal(props: TerminalProps) {
+  const ready = useMonoFontReady()
+  // The same box, so nothing below it moves when the terminal arrives.
+  if (!ready) {
+    return <div className={`relative h-full w-full overflow-hidden ${props.className ?? ''}`} />
+  }
+  return <TerminalBody {...props} />
+}
+
+function TerminalBody({ session, label, url, className, onStatusChange, ref }: TerminalProps) {
   // `write` is bound as `paint`, and the rename is the guard: this hook's
   // `write` puts characters on the local canvas and sends nothing, while
   // `TerminalSession.write` is the socket. Under their real names the two are
@@ -1570,6 +1631,11 @@ export function Terminal({ session, label, url, className, onStatusChange, ref }
         onData={handleData}
         onResize={handleResize}
         className={`h-full w-full transition-opacity ${live ? '' : 'opacity-60'}`}
+        // Inline, not in a stylesheet: @wterm/dom defines --term-font-family on
+        // `.wterm` itself, so a rule of ours would have to out-specify it and
+        // win the import order of a stylesheet pulled in from a module. An
+        // inline custom property is beyond both arguments.
+        style={{ '--term-font-family': TERM_FONT_STACK } as CSSProperties}
       />
       <ConnectionPill
         status={status}

@@ -2,12 +2,19 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
 
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
     --font-heading: var(--font-sans);
     --font-sans: 'Geist Variable', sans-serif;
+    /* Kept in step with TERM_FONT_STACK in src/lib/monoFont.ts, which an
+       e2e test pins to what the terminal actually resolves. Everything
+       monospaced in this app -- the capture panel, the reply box, the
+       sidebar's command capsules -- reads this, so a pane and the text
+       quoted out of it line up in the same font. */
+    --font-mono: 'Geist Mono Variable', ui-monospace, 'Menlo', 'Consolas', 'DejaVu Sans Mono', monospace;
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);

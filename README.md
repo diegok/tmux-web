@@ -129,14 +129,26 @@ connections rather than only failing the next request.
   each show their own list of past sessions in that directory; **opencode has no
   such list** — it carries on the most recent session there, which is what its
   `--continue` does, so its entry says *Continue* rather than *Resume*.
-- **Scroll with the wheel, or with a finger.** Either enters tmux's copy mode,
-  which is where this app's scrollback lives. On a phone the swipe is the only
-  way in: the terminal widget has no touch handling of its own, so before this a
-  swipe did nothing at all while a wheel scrolled immediately. A swipe needs a
-  few millimetres before it counts as one, so a tap is still a tap — which is
-  what tells tmux which pane you touched. Pinch-zoom over the terminal is given
-  up to get this, deliberately: without claiming the vertical gesture the
-  browser keeps it for panning a page that has nowhere to pan.
+- **Scroll with the wheel, or with a finger, and throw it.** Either enters
+  tmux's copy mode, which is where this app's scrollback lives. On a phone the
+  swipe is the only way in: the terminal widget has no touch handling of its
+  own, so before this a swipe did nothing at all while a wheel scrolled
+  immediately. A swipe needs a few millimetres before it counts as one, so a tap
+  is still a tap — which is what tells tmux which pane you touched — and the
+  text starts moving at those few millimetres rather than after a whole notch:
+  measured, a pane in no mode needed 180px of travel before one line moved,
+  because tmux spends an entire five-line notch entering copy mode. A flick
+  keeps going after the finger leaves and slows to a stop, bounded by the speed
+  clamp and the friction at about 94 lines; a drag of the same distance stops
+  where it is put, and a touch stops a flick in its tracks. Pinch-zoom over the
+  terminal is given up to get any of this, deliberately: without claiming the
+  vertical gesture the browser keeps it for panning a page that has nowhere to
+  pan.
+
+  In a pane whose program asks for the mouse — `claude` and `pi` both do, and
+  tmux reports it as `mouse_any_flag` — tmux hands the wheel to that program
+  instead of entering copy mode, so a swipe there scrolls the agent's own view
+  and how far is the agent's decision, not this app's.
 - **Select in a pane and it goes to your clipboard.** tmux already sends every
   copy to whatever is drawing it, as OSC 52, and the browser was throwing it
   away. Now it does not, so a mouse drag — or a copy made in copy mode, on a

@@ -40,6 +40,38 @@ async function swipe(page: Page, y0: number, y1: number, steps = 10): Promise<vo
   await cdp.detach()
 }
 
+/**
+ * Drag with a pause between samples, so the finger leaves slowly.
+ *
+ * 25px every 120ms is 0.21px/ms, below MIN_FLICK_PX_PER_MS: a deliberate drag,
+ * which must stop where it is put.
+ */
+async function slowDrag(page: Page, y0: number, y1: number): Promise<void> {
+  const cdp = await page.context().newCDPSession(page)
+  const x = 195
+  const send = (type: 'touchStart' | 'touchMove' | 'touchEnd', y: number) =>
+    cdp.send('Input.dispatchTouchEvent', {
+      type,
+      touchPoints: type === 'touchEnd' ? [] : [{ x, y }],
+    })
+  const steps = Math.round(Math.abs(y1 - y0) / 25)
+  await send('touchStart', y0)
+  for (let i = 1; i <= steps; i++) {
+    await send('touchMove', y0 + ((y1 - y0) * i) / steps)
+    await page.waitForTimeout(120)
+  }
+  await send('touchEnd', y1)
+  await cdp.detach()
+}
+
+/** Put a finger down and lift it, without moving: below the swipe threshold. */
+async function tap(page: Page, x: number, y: number): Promise<void> {
+  const cdp = await page.context().newCDPSession(page)
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] })
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+  await cdp.detach()
+}
+
 const ask = (tmuxWeb: TmuxWeb, format: string) =>
   tmuxWeb.tmux('display-message', '-p', '-t', pane, format)
 
@@ -64,7 +96,12 @@ test('a swipe down scrolls back into the scrollback, and up comes back', async (
   // that was already there.
   expect(ask(tmuxWeb, '#{pane_mode}')).toBe('')
 
-  await swipe(page, 300, 700)
+  // DRAGGED, not thrown, and that is now load-bearing: a flick keeps moving
+  // after the finger is up, so reading a position straight after one measures
+  // a moving target. MEASURED: this same gesture thrown settles at line 110,
+  // and read immediately it gives 25 -- a number that would pass the bound
+  // below by luck of timing. The flick has its own test.
+  await slowDrag(page, 300, 700)
 
   await expect
     .poll(() => ask(tmuxWeb, '#{pane_mode}'), {
@@ -159,4 +196,99 @@ test('a tap does not scroll', async ({ page, tmuxWeb }) => {
   await page.waitForTimeout(1500)
 
   expect(ask(tmuxWeb, '#{pane_mode}')).toBe('')
+})
+
+// --- the flick ---------------------------------------------------------------
+//
+// A gesture that stops dead when the finger lifts means one screenful per
+// swipe: MEASURED, 700px of travel is 30 lines, so reading back through what an
+// agent printed took a dozen swipes. `lib/touchScroll.test.ts` owns the physics
+// and cannot say whether a thrown finger moves a real tmux further than a
+// dragged one. That pair is the whole contract, and it needs both halves:
+// without the slow drag, a gain bug would pass this file.
+
+test('a thrown finger carries on, and a dragged one stops where it is put', async ({
+  page,
+  tmuxWeb,
+}) => {
+  test.setTimeout(90_000)
+  await enroll(page, tmuxWeb, 'flick')
+  await fillScrollback(tmuxWeb)
+  expect(ask(tmuxWeb, '#{pane_mode}')).toBe('')
+
+  // The same 300px of travel, dragged. MEASURED without a glide: 300px is
+  // three notches past the one tmux spends entering copy-mode, so about 15
+  // lines.
+  await slowDrag(page, 120, 420)
+  await expect
+    .poll(() => ask(tmuxWeb, '#{pane_mode}'), { timeout: 15_000 })
+    .toBe('copy-mode')
+  const dragged = Number(ask(tmuxWeb, '#{scroll_position}'))
+  expect(dragged, 'a slow drag did not scroll at all').toBeGreaterThan(4)
+  expect(
+    dragged,
+    `a 300px drag reached line ${dragged}, which means it glided when it should not`,
+  ).toBeLessThan(40)
+
+  // Back to the bottom, so the flick starts from the same place.
+  tmuxWeb.tmux('send-keys', '-X', '-t', pane, 'cancel')
+  await expect.poll(() => ask(tmuxWeb, '#{pane_mode}'), { timeout: 15_000 }).toBe('')
+
+  // And now the same distance, thrown.
+  await swipe(page, 120, 420, 4)
+  await expect
+    .poll(() => ask(tmuxWeb, '#{pane_mode}'), { timeout: 15_000 })
+    .toBe('copy-mode')
+
+  // It is still moving, so wait for it to settle rather than reading mid-flight.
+  let settled = 0
+  await expect
+    .poll(
+      () => {
+        const now = Number(ask(tmuxWeb, '#{scroll_position}'))
+        const stable = now === settled
+        settled = now
+        return stable && now > 0
+      },
+      { message: 'the flick never came to a stop', timeout: 20_000 },
+    )
+    .toBe(true)
+
+  expect(
+    settled,
+    `the flick stopped at line ${settled}, no further than the drag reached (${dragged})`,
+  ).toBeGreaterThan(dragged * 2)
+  // And bounded: GLIDE_MAX_TRAVEL_PX is 4000px, about 235 lines at a 17px row,
+  // so a flick that reached the far end of a 500-line scrollback would mean the
+  // cap is not working.
+  expect(settled, `the flick flew to line ${settled}`).toBeLessThan(300)
+})
+
+// A flick that cannot be stopped is worse than no flick: the user throws the
+// pane, sees the line they wanted go past, and has to chase it. Every touch
+// surface stops on contact, and only a browser can say whether this one does --
+// the physics class knows `stop()` works, not that a finger calls it.
+test('a touch stops a flick where it is touched', async ({ page, tmuxWeb }) => {
+  test.setTimeout(60_000)
+  await enroll(page, tmuxWeb, 'stopflick')
+  await fillScrollback(tmuxWeb)
+
+  await swipe(page, 120, 420, 4)
+  await expect.poll(() => ask(tmuxWeb, '#{pane_mode}'), { timeout: 15_000 }).toBe('copy-mode')
+
+  // Mid-flight, a tap. MEASURED: the same flick left alone settles at line
+  // 110, so a position well short of that is proof this landed while the pane
+  // was still moving rather than after it had stopped on its own.
+  await tap(page, 195, 400)
+  const atTouch = Number(ask(tmuxWeb, '#{scroll_position}'))
+  expect(
+    atTouch,
+    `the pane was already at line ${atTouch} when it was touched, so the flick had finished and this proves nothing`,
+  ).toBeLessThan(90)
+
+  await page.waitForTimeout(1200)
+  expect(
+    Number(ask(tmuxWeb, '#{scroll_position}')),
+    'the pane kept gliding after it was touched',
+  ).toBe(atTouch)
 })

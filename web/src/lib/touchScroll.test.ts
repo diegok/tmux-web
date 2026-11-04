@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest'
 
 import {
   FALLBACK_ROW_HEIGHT_PX,
+  GLIDE_TRAVEL_CEILING_PX,
+  Glide,
+  MAX_FLICK_PX_PER_MS,
+  MIN_FLICK_PX_PER_MS,
   SWIPE_THRESHOLD_PX,
   SwipeScroller,
   TMUX_LINES_PER_NOTCH,
@@ -19,6 +23,14 @@ function drag(positions: number[], x = 100, notch = NOTCH): number {
   for (const y of positions.slice(1)) total += s.move(x, y)
   s.end()
   return total
+}
+
+/** Run a glide to a standstill and return the pixels it covered. */
+function total(g: Glide, dtMs = 16): number {
+  let sum = 0
+  let frames = 0
+  while (g.moving && frames++ < 10_000) sum += g.step(dtMs)
+  return sum
 }
 
 describe('pxPerNotch', () => {
@@ -156,6 +168,105 @@ describe('a vertical swipe', () => {
     // The drift test: a longer round trip leaves the SAME single notch behind,
     // never a growing one.
     expect(drag([400, 400 + 6 * NOTCH, 400])).toBe(-1)
+  })
+})
+
+// --- the flick ---------------------------------------------------------------
+//
+// WHY. A gesture that stops dead when the finger lifts means one screenful per
+// swipe: measured, a 700px drag is 30 lines. Reading back through what an agent
+// printed takes a dozen swipes, which is the other half of "the scroll feels
+// unresponsive". Every touch surface answers a flick by carrying on.
+
+describe('a flick', () => {
+  it('does not start from a slow drag', () => {
+    const g = new Glide()
+    // Half the threshold: a finger being dragged deliberately, not thrown.
+    expect(g.start(MIN_FLICK_PX_PER_MS / 2)).toBe(false)
+    expect(g.moving).toBe(false)
+    expect(g.step(16)).toBe(0)
+  })
+
+  it('starts from a throw, in the direction of the throw', () => {
+    const g = new Glide()
+    expect(g.start(2)).toBe(true)
+    expect(g.moving).toBe(true)
+    expect(g.step(16)).toBeGreaterThan(0)
+
+    const up = new Glide()
+    up.start(-2)
+    expect(up.step(16)).toBeLessThan(0)
+  })
+
+  it('slows down and stops by itself', () => {
+    const g = new Glide()
+    g.start(2)
+    let last = Infinity
+    let frames = 0
+    while (g.moving && frames < 10_000) {
+      const px = Math.abs(g.step(16))
+      // Monotonically decaying, never a step bigger than the one before.
+      expect(px).toBeLessThanOrEqual(last + 1e-9)
+      last = px
+      frames++
+    }
+    expect(g.moving).toBe(false)
+    // A flick lasts a moment, not a minute: bounds measured from FRICTION.
+    expect(frames).toBeGreaterThan(5)
+    expect(frames).toBeLessThan(200)
+  })
+
+  it('carries a throw further than a slow drag', () => {
+    const slow = new Glide()
+    slow.start(MIN_FLICK_PX_PER_MS * 1.1)
+    const fast = new Glide()
+    fast.start(4)
+    expect(Math.abs(total(fast))).toBeGreaterThan(Math.abs(total(slow)) * 2)
+  })
+
+  // Frame rate must not change where the content ends up. A phone that drops
+  // frames would otherwise scroll a different distance from one that does not.
+  it('travels about the same distance however coarse the frames are', () => {
+    const fine = new Glide()
+    fine.start(2)
+    const coarse = new Glide()
+    coarse.start(2)
+    const a = total(fine, 8)
+    const b = total(coarse, 32)
+    expect(Math.abs(a - b) / Math.abs(a)).toBeLessThan(0.25)
+  })
+
+  // However hard it is thrown, it must not fly to the far end of a 100k-line
+  // scrollback: that is a lost place, not a scroll. The bound is not a cap but
+  // the sum of the series -- speed clamp times frame over one minus friction --
+  // so this fails if either of those is loosened.
+  it('never travels further than the speed clamp and the friction allow', () => {
+    const g = new Glide()
+    g.start(500)
+    expect(Math.abs(total(g))).toBeLessThanOrEqual(GLIDE_TRAVEL_CEILING_PX + 1)
+    // And the ceiling is a real limit, not a number so large it cannot bite:
+    // 1600px is about 94 lines of a 17px row.
+    expect(GLIDE_TRAVEL_CEILING_PX).toBeLessThan(2000)
+  })
+
+  // Velocity is a division, and a coalesced pointermove with a 1ms stamp would
+  // otherwise read as hundreds of px/ms and spend the whole travel cap in a
+  // single frame -- a jump, not a scroll.
+  it('does not believe an impossible speed', () => {
+    const sane = new Glide()
+    sane.start(MAX_FLICK_PX_PER_MS)
+    const absurd = new Glide()
+    absurd.start(MAX_FLICK_PX_PER_MS * 1000)
+    expect(absurd.step(16)).toBeCloseTo(sane.step(16), 6)
+  })
+
+  it('can be stopped in its tracks, which is what a finger coming down does', () => {
+    const g = new Glide()
+    g.start(3)
+    g.step(16)
+    g.stop()
+    expect(g.moving).toBe(false)
+    expect(g.step(16)).toBe(0)
   })
 })
 

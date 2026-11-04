@@ -90,6 +90,100 @@ export function pxPerNotch(rowHeight: number): number {
 }
 
 /**
+ * How fast a finger must be leaving the glass for the gesture to carry on
+ * without it, in CSS pixels per millisecond. 0.3 is 300px a second: below that
+ * the finger is being dragged deliberately and should stop where it is put.
+ */
+export const MIN_FLICK_PX_PER_MS = 0.3
+
+/**
+ * The fastest a flick is believed to be, in px/ms. 6 is 6000px a second, past
+ * anything a thumb does on a 400px-wide screen, and it exists because velocity
+ * is a division: one coalesced pointermove with a 1ms stamp would otherwise
+ * read as hundreds of px/ms and spend the whole travel cap in one frame.
+ */
+export const MAX_FLICK_PX_PER_MS = 6
+
+/** Below this speed a glide has arrived. */
+export const GLIDE_STOP_PX_PER_MS = 0.02
+
+/** The frame the friction is quoted for. */
+const GLIDE_FRAME_MS = 16
+
+/**
+ * What is left of the speed after each 16ms of gliding. 0.94 per frame decays a
+ * flick to a tenth in about 600ms, which is roughly how long a thrown list
+ * takes to settle on a phone and short enough that a second swipe is never
+ * fighting the first.
+ */
+export const GLIDE_FRICTION_PER_FRAME = 0.94
+
+/**
+ * The furthest a single flick can carry, in CSS pixels.
+ *
+ * DERIVED, not chosen, and that is the point: a geometric series of
+ * `v * dt * friction^n` sums to `v * dt / (1 - friction)`, so the speed clamp
+ * and the friction already bound the travel and a separate cap would be a
+ * number that never fires. There WAS one, at 4000px, and mutation testing
+ * found it: removing it changed nothing any test could see, because the real
+ * ceiling is 1600px -- about 94 lines at a 17px row. MEASURED end to end: a
+ * 300px flick settles 110 lines back, which is 1870px of travel counting the
+ * finger's own 300px.
+ */
+export const GLIDE_TRAVEL_CEILING_PX =
+  (MAX_FLICK_PX_PER_MS * GLIDE_FRAME_MS) / (1 - GLIDE_FRICTION_PER_FRAME)
+
+/**
+ * What is left of a flick once the finger is gone.
+ *
+ * Pure arithmetic, stepped by the caller, so the frame loop lives with the DOM
+ * and the physics can be tested without one. Positive is the direction a finger
+ * moving down was going.
+ */
+export class Glide {
+  #velocity = 0
+
+  /**
+   * Begin gliding at this speed, in px/ms. Returns whether it took: a gesture
+   * slower than MIN_FLICK_PX_PER_MS was a drag and ends where it was left.
+   */
+  start(velocity: number): boolean {
+    if (!Number.isFinite(velocity) || Math.abs(velocity) < MIN_FLICK_PX_PER_MS) {
+      this.#velocity = 0
+      return false
+    }
+    this.#velocity =
+      Math.sign(velocity) * Math.min(Math.abs(velocity), MAX_FLICK_PX_PER_MS)
+    return true
+  }
+
+  get moving(): boolean {
+    return this.#velocity !== 0
+  }
+
+  /** Give up on the rest of the glide. A finger coming down does this. */
+  stop(): void {
+    this.#velocity = 0
+  }
+
+  /**
+   * Advance by one frame of dtMs and return the pixels covered.
+   *
+   * The distance is taken at the speed held BEFORE the friction is applied, and
+   * the friction is raised to dt/16 rather than applied once per call, so a
+   * 30fps frame covers what two 60fps frames would. A phone that drops frames
+   * must not scroll a different distance from one that does not.
+   */
+  step(dtMs: number): number {
+    if (!this.moving || dtMs <= 0) return 0
+    const px = this.#velocity * dtMs
+    this.#velocity *= GLIDE_FRICTION_PER_FRAME ** (dtMs / GLIDE_FRAME_MS)
+    if (Math.abs(this.#velocity) < GLIDE_STOP_PX_PER_MS) this.#velocity = 0
+    return px
+  }
+}
+
+/**
  * One finger's worth of gesture, from touchstart to touchend.
  *
  * A class rather than a reducer because the caller is a DOM listener with
@@ -168,8 +262,23 @@ export class SwipeScroller {
       priming = dy > 0 ? -1 : 1
     }
     this.#lastY = y
+    return priming + this.#drain()
+  }
 
-    let notches = priming
+  /**
+   * Feed pixels straight into the accumulator, bypassing the threshold and the
+   * priming notch: the gesture has already been recognised, and a glide is its
+   * continuation rather than a new gesture.
+   */
+  glide(px: number): number {
+    if (this.#rejected) return 0
+    this.#pending += px
+    return this.#drain()
+  }
+
+  /** Turn accumulated travel into whole notches, keeping the remainder. */
+  #drain(): number {
+    let notches = 0
     while (Math.abs(this.#pending) >= this.#pxPerNotch) {
       if (this.#pending > 0) {
         // The finger moved down, so older content comes down from above, which
@@ -245,6 +354,18 @@ export function installSwipeScroll(host: HTMLElement): () => void {
   let lastY = 0
   let active = -1
 
+  // The last two samples of the gesture, for the speed it is leaving at. Two
+  // rather than a smoothed window: what matters is how fast the finger was
+  // going as it left, and the velocity clamp in `Glide.start` is what absorbs
+  // a single freak sample.
+  let lastT = 0
+  let prevY = 0
+  let prevT = 0
+
+  const glide = new Glide()
+  let glideFrame = 0
+  let glideAt = 0
+
   const flush = (): void => {
     frame = 0
     const notches = owed
@@ -272,9 +393,40 @@ export function installSwipeScroll(host: HTMLElement): () => void {
     if (frame === 0) frame = requestAnimationFrame(flush)
   }
 
+  /** One frame of the flick that outlived the finger. */
+  const stepGlide = (now: number): void => {
+    glideFrame = 0
+    const dt = glideAt === 0 ? GLIDE_FRAME_MS : now - glideAt
+    glideAt = now
+    const px = glide.step(dt)
+    if (px !== 0) {
+      owed += scroller.glide(px)
+      flush()
+    }
+    if (glide.moving) glideFrame = requestAnimationFrame(stepGlide)
+  }
+
+  const stopGlide = (): void => {
+    glide.stop()
+    if (glideFrame !== 0) {
+      cancelAnimationFrame(glideFrame)
+      glideFrame = 0
+    }
+  }
+
   const release = (): void => {
     if (active !== -1 && host.hasPointerCapture(active)) host.releasePointerCapture(active)
     active = -1
+    // Before `scroller.end()`, which clears the accumulator the glide feeds.
+    if (scroller.engaged && prevT !== lastT) {
+      const velocity = (lastY - prevY) / (lastT - prevT)
+      if (glide.start(velocity)) {
+        glideAt = 0
+        glideFrame = requestAnimationFrame(stepGlide)
+        schedule()
+        return
+      }
+    }
     scroller.end()
     schedule()
   }
@@ -283,6 +435,10 @@ export function installSwipeScroll(host: HTMLElement): () => void {
     // Only fingers. A mouse keeps every behaviour it has today, drag-selection
     // included, and a stylus is close enough to a mouse to leave alone.
     if (event.pointerType !== 'touch') return
+    // A finger on the glass stops the glide, always, before anything else is
+    // decided about this gesture -- including a second finger's, and including
+    // a tap, which is how a user stops a long flick to read something.
+    stopGlide()
     if (active !== -1) {
       // A second finger: this is a pinch, not a scroll, and it stays that way
       // for the rest of the gesture.
@@ -292,6 +448,10 @@ export function installSwipeScroll(host: HTMLElement): () => void {
     active = event.pointerId
     host.setPointerCapture(event.pointerId)
     scroller.start(event.clientX, event.clientY, pxPerNotch(rowHeight()))
+    lastY = event.clientY
+    prevY = event.clientY
+    lastT = event.timeStamp
+    prevT = event.timeStamp
   }
 
   const onMove = (event: PointerEvent): void => {
@@ -302,10 +462,16 @@ export function installSwipeScroll(host: HTMLElement): () => void {
     // from this touch, which tmux would read as a drag-selection. Without it a
     // swipe would scroll AND select.
     event.preventDefault()
-    if (notches === 0) return
-    owed += notches
+    // Sampled on every move, not only the ones that produced a notch: the
+    // speed the finger left at is a property of the finger, not of where the
+    // notch boundaries happened to fall.
+    prevY = lastY
+    prevT = lastT
     lastX = event.clientX
     lastY = event.clientY
+    lastT = event.timeStamp
+    if (notches === 0) return
+    owed += notches
     schedule()
   }
 
@@ -328,6 +494,7 @@ export function installSwipeScroll(host: HTMLElement): () => void {
   host.addEventListener('pointerup', onUp)
   host.addEventListener('pointercancel', onUp)
   return () => {
+    stopGlide()
     host.style.touchAction = previousTouchAction
     host.removeEventListener('pointerdown', onDown)
     host.removeEventListener('pointermove', onMove)

@@ -52,9 +52,17 @@ func TestATerminalConnectionIsLoggedWhenItOpensAndWhenItEnds(t *testing.T) {
 		}
 	}
 
+	// This connection's id, so the disconnect below is this connection's
+	// disconnect and not one still arriving from a connection another test
+	// opened before this capture began.
+	conn := field(open, "conn")
+	if conn == "" {
+		t.Fatalf("the connected line carries no conn id:\n%s", open)
+	}
+
 	_ = c.Close(websocket.StatusNormalClosure, "test done")
 
-	closed := waitForLine(t, logs, "terminal: disconnected")
+	closed := waitForLine(t, logs, "terminal: disconnected", "conn="+conn)
 	// Every field a person would need to tell "the network went away" from
 	// "the session ended" from "this handler gave up".
 	for _, key := range []string{
@@ -92,11 +100,17 @@ func TestAnAbandonedTerminalConnectionIsStillLogged(t *testing.T) {
 
 	c := f.dial(t, wsCanonical, "?session=work")
 	f.tabSession(t)
+	// Pinned to this connection for the same reason as the test above: another
+	// test's teardown can log a disconnect into this buffer.
+	conn := field(waitForLine(t, logs, "terminal: connected"), "conn")
+	if conn == "" {
+		t.Fatal("no connected line to take an id from")
+	}
 	// CloseNow drops the TCP connection without a close frame, which is what a
 	// phone leaving the network looks like from here.
 	_ = c.CloseNow()
 
-	closed := waitForLine(t, logs, "terminal: disconnected")
+	closed := waitForLine(t, logs, "terminal: disconnected", "conn="+conn)
 	if got := field(closed, "graceful"); got != "false" {
 		t.Errorf("graceful = %q, want false: nobody was left to send a status to:\n%s", got, closed)
 	}
@@ -140,18 +154,35 @@ func captureLogs(t *testing.T) func() string {
 // waitForLine returns the first logged line containing want, waiting for it:
 // the close line is written by the handler's own goroutine after the client has
 // already moved on.
-func waitForLine(t *testing.T, logs func() string, want string) string {
+// All of want, not any: a disconnect has to be matched on its connection id as
+// well as its message.
+//
+// WHY THAT MATTERS, measured the hard way: `wsConnSeq` numbers connections for
+// the whole package, and a connection another test opened before this capture
+// started can still be tearing down once it has. Its "connected" line went to
+// the previous writer and its "disconnected" line lands in this buffer, so
+// taking the first disconnect gave conn=52 against this test's own conn=53 and
+// the pairing assertion failed for a reason that had nothing to do with the
+// code under test.
+func waitForLine(t *testing.T, logs func() string, want ...string) string {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, line := range bytes.Split([]byte(logs()), []byte("\n")) {
-			if bytes.Contains(line, []byte(want)) {
+			matched := true
+			for _, w := range want {
+				if !bytes.Contains(line, []byte(w)) {
+					matched = false
+					break
+				}
+			}
+			if matched {
 				return string(line)
 			}
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("no log line containing %q within 10s; the log held:\n%s", want, logs())
+	t.Fatalf("no log line containing all of %q within 10s; the log held:\n%s", want, logs())
 	return ""
 }
 

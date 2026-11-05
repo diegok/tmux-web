@@ -1128,22 +1128,39 @@ func TestTypeRefusesTheCallersOwnPane(t *testing.T) {
 // This verb refuses rather than cancelling first, as the browser does: the
 // browser owns the pane's attach, and a cancel here would change what the
 // owner is looking at.
+// BOTH WAYS IN, because the refusal is a property of the pane and not of the
+// payload. --key is the half that looks harmless and is not: `q` is cancel in
+// both copy-mode key tables, so `--key q` would pop the mode the owner is
+// reading in -- the exact thing this verb refuses to decide for him, and the
+// thing its own message tells the caller to ask HIM to do. The guard holds
+// today only by sitting above the --key branch, and a refactor that moved it
+// into the text path would leave that open with nothing going red.
 func TestTypeRefusesAPaneInCopyMode(t *testing.T) {
-	stub := &controlStub{rows: copyModeRows()}
-	code, out, errs := typeRun(stub, "--text", "quit now", "--enter", "%2")
-	if code != 1 {
-		t.Errorf("exit %d, want 1: the verb could not do its job", code)
-	}
-	if out != "" {
-		t.Errorf("stdout = %q, want nothing", out)
-	}
-	if len(stub.runs) != 0 {
-		t.Errorf("runs = %v, want NONE: a send-keys against a pane in copy mode can hang, so this must be refused before it goes out, not reported after", stub.runs)
-	}
-	for _, want := range []string{"copy mode", "%2"} {
-		if !strings.Contains(errs, want) {
-			t.Errorf("stderr = %q, want %q in it", errs, want)
-		}
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"text", []string{"--text", "quit now", "--enter", "%2"}},
+		{"key", []string{"--key", "q", "%2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &controlStub{rows: copyModeRows()}
+			code, out, errs := typeRun(stub, tc.args...)
+			if code != 1 {
+				t.Errorf("exit %d, want 1: the verb could not do its job", code)
+			}
+			if out != "" {
+				t.Errorf("stdout = %q, want nothing", out)
+			}
+			if len(stub.runs) != 0 {
+				t.Errorf("runs = %v, want NONE: a send-keys against a pane in copy mode can hang, so this must be refused before it goes out, not reported after", stub.runs)
+			}
+			for _, want := range []string{"copy mode", "%2"} {
+				if !strings.Contains(errs, want) {
+					t.Errorf("stderr = %q, want %q in it", errs, want)
+				}
+			}
+		})
 	}
 }
 

@@ -260,6 +260,7 @@ func TestEveryVerbSaysSoWhenItIsNotRunningInsideTmux(t *testing.T) {
 		{"state", []string{"%2"}, runState},
 		{"peek", []string{"%2"}, runPeek},
 		{"open", []string{"--split"}, runOpen},
+		{"type", []string{"--text", "hi", "%2"}, runType},
 	} {
 		t.Run(v.name, func(t *testing.T) {
 			dialled := 0
@@ -1008,5 +1009,344 @@ func TestOpenRefusesAMalformedCommandLine(t *testing.T) {
 				t.Errorf("calls = %v and %d snapshots; nothing may be touched", stub.calls, stub.snapshots)
 			}
 		})
+	}
+}
+
+// -- type -------------------------------------------------------------------
+
+// typeRun runs `type` as the caller %1 and returns its exit code and streams.
+func typeRun(stub *controlStub, args ...string) (int, string, string) {
+	var out, errb bytes.Buffer
+	code := runType(args, &out, &errb, callerEnv("%1"), stubDial(stub))
+	return code, out.String(), errb.String()
+}
+
+// copyModeRows is twoSessions with %2 -- the pane every test here types into --
+// sitting in copy mode, which is the one pane state `send-keys` cannot type
+// into at all.
+func copyModeRows() []tmux.Row {
+	rows := twoSessions()
+	rows[1].PaneMode = "copy-mode"
+	return rows
+}
+
+// The Return is a KEY of its own and not a byte inside the text.
+//
+// Measured on 3.7b: `send-keys -l -- "... Enter"` puts the five characters
+// "Enter" on the pane's screen, and `send-keys -t %2 Enter` submits. So the
+// two go out as two commands -- one literal, one a key lookup -- and a
+// "\n" appended to the text would be 0x0a, which is C-j and not the Return an
+// agent's prompt answers to.
+func TestTypeSendsTheTextAndThenEnter(t *testing.T) {
+	stub := &controlStub{rows: twoSessions()}
+	code, out, errs := typeRun(stub, "--text", "make test", "--enter", "%2")
+	if code != 0 || errs != "" {
+		t.Fatalf("exit %d, stderr %q", code, errs)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want nothing: the answer is in the pane", out)
+	}
+	if len(stub.runs) != 2 {
+		t.Fatalf("runs = %v, want two: the literal text, then the Return", stub.runs)
+	}
+	wantText := []string{"send-keys", "-l", "-t", "%2", "--", "make test"}
+	if !slices.Equal(stub.runs[0], wantText) {
+		t.Errorf("text argv = %v, want %v", stub.runs[0], wantText)
+	}
+	wantEnter := []string{"send-keys", "-t", "%2", "Enter"}
+	if !slices.Equal(stub.runs[1], wantEnter) {
+		t.Errorf("Return argv = %v, want %v -- a key lookup, since -l would type the word \"Enter\"", stub.runs[1], wantEnter)
+	}
+	// The text itself carries no line ending: a "\n" in it is 0x0a (C-j), and a
+	// "\r" would submit from inside the text, where nothing bounds what was
+	// submitted.
+	if last := stub.runs[0][len(stub.runs[0])-1]; strings.ContainsAny(last, "\r\n") {
+		t.Errorf("the text sent was %q, want no line ending in it", last)
+	}
+}
+
+// Review Focus 4. The text is characters, whatever it looks like: tmux's own
+// `send-keys` reads a bare "-l" as its flag and a bare "Enter" as a key name,
+// so -l and -- are what stand between the caller's text and tmux's parser.
+func TestTypeSendsTextAsTextEvenWhenItLooksLikeOptions(t *testing.T) {
+	for _, text := range []string{"--help", "-l", "-t %9 rm -rf /"} {
+		t.Run(text, func(t *testing.T) {
+			stub := &controlStub{rows: twoSessions()}
+			code, _, errs := typeRun(stub, "--text", text, "%2")
+			if code != 0 || errs != "" {
+				t.Fatalf("exit %d, stderr %q", code, errs)
+			}
+			if len(stub.runs) != 1 {
+				t.Fatalf("runs = %v, want one", stub.runs)
+			}
+			argv := stub.runs[0]
+			if last := argv[len(argv)-1]; last != text {
+				t.Errorf("last argument = %q, want the text %q unchanged", last, text)
+			}
+			dashL := slices.Index(argv, "-l")
+			term := slices.Index(argv, "--")
+			if dashL < 0 || term != len(argv)-2 {
+				t.Errorf("argv = %v, want -l present and -- immediately before the text", argv)
+			}
+			if dashL > term {
+				t.Errorf("argv = %v, want -l before the -- terminator", argv)
+			}
+		})
+	}
+}
+
+// An agent typing into its own pane is a loop, and no agent means it: the keys
+// land in the agent's own prompt, which is the one place its author cannot
+// have intended to reach by asking tmux.
+func TestTypeRefusesTheCallersOwnPane(t *testing.T) {
+	stub := &controlStub{rows: twoSessions()}
+	code, out, errs := typeRun(stub, "--text", "hello", "%1")
+	if code != 2 {
+		t.Errorf("exit %d, want 2: the command line names the caller itself", code)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want nothing", out)
+	}
+	if !strings.Contains(errs, "%1") {
+		t.Errorf("stderr = %q, want the caller's own pane named in it", errs)
+	}
+	// Decided from $TMUX_PANE alone, so the server is never asked anything.
+	if len(stub.runs) != 0 || stub.snapshots != 0 {
+		t.Errorf("runs = %v and %d snapshots, want none of either", stub.runs, stub.snapshots)
+	}
+}
+
+// THE GUARD WITH THE WORST FAILURE BEHIND IT. `send-keys` against a pane in
+// copy mode does not type: it dispatches copy-mode commands, and on 3.7b
+// against such a pane with a client attached the command DID NOT RETURN. `q`
+// is cancel in both copy-mode key tables, so what a pane in copy mode does to
+// prose is worse than swallowing it -- everything after the first `q` leaves
+// copy mode and reaches the shell as a command.
+//
+// ZERO RUNS is the assertion that matters. An exit of 1 after a send that
+// already went out is not a refusal, and the send is the thing that hangs.
+// This verb refuses rather than cancelling first, as the browser does: the
+// browser owns the pane's attach, and a cancel here would change what the
+// owner is looking at.
+func TestTypeRefusesAPaneInCopyMode(t *testing.T) {
+	stub := &controlStub{rows: copyModeRows()}
+	code, out, errs := typeRun(stub, "--text", "quit now", "--enter", "%2")
+	if code != 1 {
+		t.Errorf("exit %d, want 1: the verb could not do its job", code)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want nothing", out)
+	}
+	if len(stub.runs) != 0 {
+		t.Errorf("runs = %v, want NONE: a send-keys against a pane in copy mode can hang, so this must be refused before it goes out, not reported after", stub.runs)
+	}
+	for _, want := range []string{"copy mode", "%2"} {
+		if !strings.Contains(errs, want) {
+			t.Errorf("stderr = %q, want %q in it", errs, want)
+		}
+	}
+}
+
+// Multi-line text goes out BRACKETED and unsubmitted.
+//
+// `ESC[200~` ... `ESC[201~` is what tells the receiving agent a paste
+// happened; all three agents set DECSET 2004 at their prompt and honour the
+// wrappers, so the lines land as one draft. Without them each newline is a
+// submit, and "twelve submitted turns is not an acceptable failure".
+func TestTypeBracketsMultiLineTextAndSendsNoReturn(t *testing.T) {
+	stub := &controlStub{rows: twoSessions()}
+	code, out, errs := typeRun(stub, "--text", "first line\nsecond line", "%2")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want nothing", out)
+	}
+	if len(stub.runs) != 1 {
+		t.Fatalf("runs = %v, want exactly one: no Return may follow a paste", stub.runs)
+	}
+	argv := stub.runs[0]
+	want := "\x1b[200~first line\nsecond line\x1b[201~"
+	if last := argv[len(argv)-1]; last != want {
+		t.Errorf("sent %q, want it wrapped: %q", last, want)
+	}
+	if slices.Contains(argv, "Enter") {
+		t.Errorf("argv = %v, want no Return: the wrappers end the paste and the owner submits it", argv)
+	}
+	// Said out loud, because a caller that thinks it submitted twelve lines
+	// will sit waiting for an answer that nobody asked the agent for. On
+	// stderr with exit 0: the verb did what it was asked.
+	if !strings.Contains(errs, "submit") {
+		t.Errorf("stderr = %q, want it to say the text was not submitted and has to be submitted in the pane", errs)
+	}
+}
+
+func TestTypeRefusesEnterWithMultiLineText(t *testing.T) {
+	stub := &controlStub{rows: twoSessions()}
+	code, out, errs := typeRun(stub, "--text", "first\nsecond", "--enter", "%2")
+	if code != 2 {
+		t.Errorf("exit %d, want 2: --enter and multi-line text are a contradiction in the command line", code)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want nothing", out)
+	}
+	if len(stub.runs) != 0 || stub.snapshots != 0 {
+		t.Errorf("runs = %v and %d snapshots, want none of either", stub.runs, stub.snapshots)
+	}
+	for _, want := range []string{"--enter", "submit"} {
+		if !strings.Contains(errs, want) {
+			t.Errorf("stderr = %q, want %q in it -- the caller has to be told where the submit happens instead", errs, want)
+		}
+	}
+}
+
+// The cap is a refusal that names the file route, and deliberately not
+// chunking: see maxTypeText.
+func TestTypeRefusesTextOverTheCapAndNamesTheFileRoute(t *testing.T) {
+	t.Run("over", func(t *testing.T) {
+		stub := &controlStub{rows: twoSessions()}
+		code, out, errs := typeRun(stub, "--text", strings.Repeat("x", maxTypeText+1), "%2")
+		if code != 2 {
+			t.Errorf("exit %d, want 2", code)
+		}
+		if out != "" {
+			t.Errorf("stdout = %q, want nothing", out)
+		}
+		if len(stub.runs) != 0 || stub.snapshots != 0 {
+			t.Errorf("runs = %v and %d snapshots, want none of either", stub.runs, stub.snapshots)
+		}
+		// The way out has to be in the message: an agent told only "too long"
+		// will split the text and send it in pieces, which is the second
+		// transport this design refused to invent.
+		for _, want := range []string{"file", strconv.Itoa(maxTypeText)} {
+			if !strings.Contains(errs, want) {
+				t.Errorf("stderr = %q, want %q in it", errs, want)
+			}
+		}
+	})
+	// The boundary is a cap and not an approximation: exactly the cap goes.
+	t.Run("exactly the cap", func(t *testing.T) {
+		stub := &controlStub{rows: twoSessions()}
+		code, _, errs := typeRun(stub, "--text", strings.Repeat("x", maxTypeText), "%2")
+		if code != 0 || errs != "" {
+			t.Errorf("exit %d, stderr %q; %d bytes is within the cap", code, errs, maxTypeText)
+		}
+	})
+}
+
+// --key is the other half of the verb: one tmux key name, looked up by tmux,
+// and therefore without -l. It is how a pane gets a C-c or an Escape, neither
+// of which is a character anyone can type as text.
+func TestTypeWithAKeySendsOneKey(t *testing.T) {
+	stub := &controlStub{rows: twoSessions()}
+	code, out, errs := typeRun(stub, "--key", "C-c", "%2")
+	if code != 0 || errs != "" {
+		t.Fatalf("exit %d, stderr %q", code, errs)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want nothing", out)
+	}
+	want := []string{"send-keys", "-t", "%2", "C-c"}
+	if len(stub.runs) != 1 || !slices.Equal(stub.runs[0], want) {
+		t.Errorf("runs = %v, want exactly one %v -- no -l, or tmux would type the three characters", stub.runs, want)
+	}
+}
+
+// deadPane is a pane that is in the snapshot and gone by the time the keys go
+// out, which `err` alone cannot express: that would fail the snapshot too, and
+// the question here is what happens to a send that tmux refuses.
+type deadPane struct{ *controlStub }
+
+func (d *deadPane) Run(ctx context.Context, args ...string) (string, error) {
+	// Recorded through the stub, so the assertions below can still see every
+	// argv this verb put on the wire.
+	_, _ = d.controlStub.Run(ctx, args...)
+	return "", errors.New("can't find pane: %2")
+}
+
+// Review Focus 2. A pane can be killed between the snapshot and the send --
+// the owner closes it, the command in it exits -- and tmux answers that with
+// "can't find pane". What must not happen is a confident exit 0, and what must
+// not happen is the Return going out anyway.
+func TestTypeSaysSoWhenThePaneDiedUnderIt(t *testing.T) {
+	stub := &controlStub{rows: twoSessions()}
+	var out, errb bytes.Buffer
+	code := runType([]string{"--text", "make test", "--enter", "%2"}, &out, &errb,
+		callerEnv("%1"), func(string) controlClient { return &deadPane{stub} })
+	if code != 1 {
+		t.Errorf("exit %d, want 1: the keys did not land", code)
+	}
+	if out.String() != "" {
+		t.Errorf("stdout = %q, want nothing", out.String())
+	}
+	if !strings.Contains(errb.String(), "%2") {
+		t.Errorf("stderr = %q, want the pane named", errb.String())
+	}
+	if len(stub.runs) != 1 {
+		t.Errorf("runs = %v, want exactly one: a Return sent after the text failed would submit whatever was already in that pane's prompt", stub.runs)
+	}
+	// And nothing was written to any other pane: a failed target must never
+	// become tmux's default one, which is whatever pane is current.
+	for _, r := range stub.runs {
+		if argAfter(r, "-t") != "%2" {
+			t.Errorf("argv %v targets %q, want only the pane asked for", r, argAfter(r, "-t"))
+		}
+	}
+}
+
+func TestTypeRefusesAMalformedCommandLine(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"nothing to send", []string{"%2"}},
+		{"both text and key", []string{"--text", "hi", "--key", "C-c", "%2"}},
+		{"empty text", []string{"--text", "", "%2"}},
+		{"no pane", []string{"--text", "hi"}},
+		{"two panes", []string{"--text", "hi", "%2", "%3"}},
+		// The %N and nothing else, for the reason `state` refuses one: tmux
+		// resolves a malformed -t to whatever is current and exits 0.
+		{"an address instead of a pane id", []string{"--text", "hi", "work:1.0"}},
+		// --enter is about submitting text; --key presses exactly one key, and
+		// the key that submits is --key Enter.
+		{"enter with a key", []string{"--key", "C-c", "--enter", "%2"}},
+		// Two key names in one --key would be two keys, silently.
+		{"two keys", []string{"--key", "C-x C-c", "%2"}},
+		// tmux would read this one as a flag of its own.
+		{"a key that starts with a dash", []string{"--key", "-X", "%2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &controlStub{rows: twoSessions()}
+			code, out, _ := typeRun(stub, tc.args...)
+			if code != 2 {
+				t.Errorf("exit %d, want 2: a malformed command line", code)
+			}
+			if out != "" {
+				t.Errorf("stdout = %q, want nothing", out)
+			}
+			if len(stub.runs) != 0 || stub.snapshots != 0 {
+				t.Errorf("runs = %v and %d snapshots; nothing may be touched", stub.runs, stub.snapshots)
+			}
+		})
+	}
+}
+
+// A pane that is not on the server gets a sentence naming it, as `state` and
+// `peek` do, rather than tmux's own stderr in an agent's transcript -- and
+// nothing is sent.
+func TestTypeRefusesAPaneThatIsNotOnTheServer(t *testing.T) {
+	stub := &controlStub{rows: twoSessions()}
+	code, out, errs := typeRun(stub, "--text", "hi", "%99")
+	if code != 1 {
+		t.Errorf("exit %d, want 1", code)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want nothing", out)
+	}
+	if !strings.Contains(errs, "%99") {
+		t.Errorf("stderr = %q, want the pane named", errs)
+	}
+	if len(stub.runs) != 0 {
+		t.Errorf("runs = %v, want none", stub.runs)
 	}
 }

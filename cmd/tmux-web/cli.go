@@ -70,6 +70,7 @@ Usage:
   tmux-web state   <pane-id>
   tmux-web peek    [--lines N] <pane-id>
   tmux-web open    (--split | --window [name]) [--label TEXT]
+  tmux-web type    (--text TEXT | --key KEY) [--enter] <pane-id>
   tmux-web install-integration --agent claude|opencode|pi [dir] [--global] [--yes] [--remove]
 
 serve runs the daemon. enroll, devices and revoke talk to its admin socket,
@@ -105,6 +106,15 @@ calling pane; --window puts it in a new window of the session this pane is in.
 Nothing is run in it: both forms open a shell. Neither moves the owner's view
 -- the pane is created detached, so his terminal stays on whatever he was
 reading until he goes to look.
+
+type puts keystrokes into another pane: --text TEXT types characters, which are
+never read as flags or key names, and --key KEY presses exactly one tmux key
+(C-c, Escape, Up, Enter). --enter adds the Return that submits the text. Three
+things it refuses rather than guessing at: a pane in copy mode, where tmux
+dispatches copy-mode commands instead of typing; --enter together with
+multi-line text, which is sent as one unsubmitted paste for you to submit in the
+pane; and text over 4096 bytes, which belongs in a file the pane is told to
+read. It will not type into the calling pane.
 
 install-integration writes the integration that calls report into a project, and
 it is a command rather than a button in the web UI on purpose: writing
@@ -148,6 +158,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdPeek(rest, stdout, stderr)
 	case "open":
 		return cmdOpen(rest, stdout, stderr)
+	case "type":
+		return cmdType(rest, stdout, stderr)
 	case "install-integration":
 		return cmdInstall(rest, stdout, stderr)
 	case "help", "-h", "-help", "--help":

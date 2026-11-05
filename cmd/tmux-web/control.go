@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/diegok/tmux-web/internal/tmux"
 )
@@ -504,6 +505,237 @@ func appSessionName(rows []tmux.Row, sessionID string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func cmdType(args []string, stdout, stderr io.Writer) int {
+	return runType(args, stdout, stderr, os.Getenv, dialControl)
+}
+
+// maxTypeText caps the text one call may type, and the cap is a REFUSAL THAT
+// NAMES A FILE rather than a chunker.
+//
+// It is far below what tmux would take: `send-keys -H` was measured on 3.7b at
+// 16 331 bytes succeeding and 16 355 failing with `command too long`, and the
+// limit is on the command line rather than on the pane. 4096 is here anyway,
+// because the question the ceiling raises is what to do with text that does not
+// fit, and chunking is the answer this design refuses. A chunker is a second
+// transport with its own failure modes -- a pane that redraws between chunks, a
+// bracketed paste split across two command lines, a half-delivered message
+// nobody can tell from a whole one -- and the owner's own rule already answers
+// it: long text goes to a file ("siempre puedes pedirle al agente que te lo
+// escriba en /tmp/xxx.md"), and the pane is told to read it. So the refusal
+// below names that route, and an agent that reads only the message still knows
+// what to do next.
+const maxTypeText = 4096
+
+// The bracketed-paste wrappers. ESC[200~ before the text and ESC[201~ after it
+// is what tells the program in the pane that a paste happened rather than a
+// burst of typing.
+//
+// Measured through a real PTY on tmux 3.7b against Claude Code 2.1.267,
+// opencode 1.18.30 and pi: all three set DECSET 2004 at their prompt
+// (#{bracket_paste_flag} is 1) and all three honour the wrappers -- three lines
+// land as ONE unsubmitted draft, and opencode collapses them into its own
+// "[Pasted ~3 lines]" chip, which it can only do because the wrappers said so.
+// Without them every newline is a submit, which is one turn per line.
+//
+// They are spelled out here rather than imported: the browser's copy is
+// TypeScript (web/src/components/ReplyBox.tsx, PASTE_START/PASTE_END), and this
+// file deliberately imports neither internal/front nor anything web-facing.
+// `send-keys -l --` was measured to round-trip both wrappers and the newlines
+// between them byte for byte.
+const (
+	pasteStart = "\x1b[200~"
+	pasteEnd   = "\x1b[201~"
+)
+
+// runType puts keystrokes into another pane: characters with --text, one tmux
+// key with --key, and the Return that submits them with --enter.
+//
+// THIS IS `send-keys`, THE TRANSPORT THIS REPO HAS TWICE REFUSED, and it is
+// used here knowingly because a one-shot CLI has no other. The browser types
+// through a real PTY -- "nothing the user types is ever an argv element" -- and
+// that is not available to a process tmux did not attach. What the two refusals
+// measured is therefore not avoided here, it is guarded: the copy-mode refusal
+// below, the bracketing, and the cap.
+//
+// WHICH REFUSALS EXIT 2 AND WHICH EXIT 1, since this verb has more of them than
+// any other here. Everything decided WITHOUT ASKING THE SERVER -- the cap,
+// --enter against multi-line text, the caller's own pane, a malformed key -- is
+// a malformed command line and exits 2: nothing was attempted, and the fix is
+// to type the command differently. Everything that needed the snapshot -- a
+// pane that is not there, a pane in a mode, a send tmux refused -- is a failed
+// operation and exits 1.
+//
+// Nothing goes to stdout. The answer is in the pane, and `peek` is how it is
+// read back.
+func runType(args []string, stdout, stderr io.Writer, getenv func(string) string, dial func(socket string) controlClient) int {
+	fset := newFlagSet("type", stderr, "tmux-web type (--text TEXT | --key KEY) [--enter] <pane-id>")
+	// --text rather than a second positional argument, and that is a guard
+	// rather than a style: this CLI's own parser re-parses after every operand
+	// (parseInterspersed), so a text of "--help" passed positionally would be
+	// read as a flag and the verb would print its usage and type nothing. The
+	// stdlib takes a flag's value verbatim, whatever it looks like.
+	text := fset.String("text", "", "characters to type into the pane; nothing in it is read as a flag or a key name")
+	key := fset.String("key", "", "one tmux key to press instead of typing text: C-c, Escape, Up, Enter")
+	enter := fset.Bool("enter", false, "press Return after the text, submitting it (refused for multi-line text)")
+	operands, code, ok := parseFlags(fset, args)
+	if !ok {
+		return code
+	}
+	// Which of the two was GIVEN, not which is non-empty: an explicit
+	// --text "" is a caller that thinks it is sending something.
+	given := map[string]bool{}
+	fset.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	if given["text"] == given["key"] {
+		return usageError(stderr, fset, "choose exactly one of --text (characters to type) or --key (one tmux key to press, such as C-c)")
+	}
+	if given["key"] && *enter {
+		return usageError(stderr, fset, "--enter belongs to --text: --key presses exactly one key, and the key that submits is --key Enter")
+	}
+	if given["text"] && *text == "" {
+		return usageError(stderr, fset, "--text is empty, so there is nothing to type")
+	}
+	if len(operands) != 1 {
+		return usageError(stderr, fset, "type takes exactly one pane id (see tmux-web panes), got %d arguments", len(operands))
+	}
+	target := operands[0]
+	// Before the environment and before any fork, as `state` does it: tmux
+	// resolves a malformed -t to whatever pane is current and exits 0, and for
+	// this verb that means a typo types into somebody else's pane.
+	if err := tmux.ValidatePaneID(target); err != nil {
+		return usageError(stderr, fset, "%v -- pass the %%N from tmux-web panes, not a session:window.pane", err)
+	}
+	if given["key"] {
+		if err := validateKeyName(*key); err != nil {
+			return usageError(stderr, fset, "%v", err)
+		}
+	}
+	if n := len(*text); n > maxTypeText {
+		return usageError(stderr, fset, "the text is %d bytes and the cap is %d: write it to a file and have the pane read it -- `tmux-web type --text 'cat /tmp/note.md' --enter %s` -- rather than typing it, since this verb will not split text across several sends", n, maxTypeText, target)
+	}
+	// A "\r" counts as a line break too, and not pedantically: 0x0d IS the
+	// Return key, so a text carrying one would submit itself halfway through
+	// and leave the rest of it typed into whatever came next. Bracketing is
+	// what bounds that.
+	multiline := strings.ContainsAny(*text, "\n\r")
+	if multiline && *enter {
+		return usageError(stderr, fset, "--enter cannot be used with multi-line text: the lines are sent as one unsubmitted paste and you submit them in pane %s (tmux-web type --key Enter %s), because a Return inside multi-line text submits once per line", target, target)
+	}
+
+	socket, caller, ok := tmuxTarget(getenv)
+	if !ok {
+		return notInsideTmux(stderr, "type")
+	}
+	// An agent typing into its own pane is a loop: the keys land in its own
+	// prompt, as its own next turn, and no caller means that. Decided from
+	// $TMUX_PANE alone, so nothing is dialled and nothing is read.
+	if target == caller {
+		return usageError(stderr, fset, "pane %s is this pane -- typing into yourself would feed your own prompt; name another pane (tmux-web panes)", caller)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), controlTimeout)
+	defer cancel()
+	c := dial(socket)
+
+	// The ROW and not just the id, because the mode is on it. A missing pane is
+	// refused here with a sentence naming it, as `state` and `peek` do, rather
+	// than with tmux's own stderr in an agent's transcript.
+	rows, err := c.Snapshot(ctx)
+	if err != nil {
+		return controlFail(stderr, "type", err)
+	}
+	var row *tmux.Row
+	for i := range rows {
+		if rows[i].PaneID == target {
+			row = &rows[i]
+			break
+		}
+	}
+	if row == nil {
+		return controlFail(stderr, "type", fmt.Errorf("no pane %s on this tmux server (list them with tmux-web panes --all)", target))
+	}
+	// REFUSED, AND NOTHING IS SENT. `send-keys` against a pane in a mode does
+	// not type into it: it dispatches into the copy-mode command table, and on
+	// 3.7b against such a pane with a client attached the command DID NOT
+	// RETURN. What it does when it does return is worse than nothing arriving
+	// -- `q` is cancel in both copy-mode key tables, so a reply is truncated at
+	// its first `q` and everything after it leaves the mode and reaches the
+	// shell as a command. Prose contains a `q` early and often.
+	//
+	// NOT a cancel-first, which is what the browser does (internal/front/ws.go
+	// sends `send-keys -X cancel` before the bytes). The browser owns that
+	// pane's attach and the person is looking at it; this verb is another
+	// agent, and popping the mode would scroll the owner's screen back to the
+	// bottom while he was reading. The mode is his, so it is his to leave.
+	if row.PaneMode != "" {
+		// The mode's own name is printed rather than hardcoded: pane_mode is
+		// also "tree-mode", "clock-mode" or "options-mode", and send-keys is
+		// no more a way of typing into any of those.
+		return controlFail(stderr, "type", fmt.Errorf("pane %s is in %s, and send-keys does not type into a pane in a mode -- it dispatches into the copy mode command table instead, so nothing was sent; the mode is the owner's (he may be scrolled up reading it), so it is not cancelled from here: wait, or ask him to leave it (q)", target, row.PaneMode))
+	}
+
+	if given["key"] {
+		// NO -l: this one argument is a key NAME, and tmux's own table is what
+		// turns "C-c" into one byte. With -l it would be three characters.
+		if _, err := c.Run(ctx, "send-keys", "-t", target, *key); err != nil {
+			return controlFail(stderr, "type", fmt.Errorf("pane %s was not sent %s: %w", target, *key, err))
+		}
+		return 0
+	}
+	body := *text
+	if multiline {
+		body = pasteStart + body + pasteEnd
+	}
+	// -l AND --, both load-bearing. -l says every argument after it is
+	// characters rather than key names, so a text of "Enter" types the word;
+	// -- ends tmux's own option parsing, so a text of "-l" or "--help" reaches
+	// the pane instead of being read as a flag of send-keys.
+	if _, err := c.Run(ctx, "send-keys", "-l", "-t", target, "--", body); err != nil {
+		return controlFail(stderr, "type", fmt.Errorf("pane %s was not sent the text: %w", target, err))
+	}
+	if multiline {
+		// On stderr with exit 0: the verb did exactly what it was asked, and a
+		// note on stdout would land in a file the caller redirected it to. It
+		// has to be said at all because a caller that believes it submitted
+		// twelve lines will sit waiting for an answer nobody asked the agent
+		// for.
+		fmt.Fprintf(stderr, "tmux-web type: pane %s was given %d lines as one unsubmitted paste and nothing was submitted -- submit it in the pane, or with `tmux-web type --key Enter %s` once you have read it back (tmux-web peek %s)\n",
+			target, strings.Count(*text, "\n")+1, target, target)
+		return 0
+	}
+	if *enter {
+		// A SECOND COMMAND, and a key rather than a byte in the text: 0x0d is
+		// Return and a "\n" would be 0x0a, which is C-j -- a different key, and
+		// one an agent's prompt does not answer to. The two cannot be one
+		// `send-keys`, because -l makes every argument literal. If this half
+		// fails the text is already in the pane, which is what the message says.
+		if _, err := c.Run(ctx, "send-keys", "-t", target, "Enter"); err != nil {
+			return controlFail(stderr, "type", fmt.Errorf("pane %s was given the text but not the Return that submits it, so it is sitting at the prompt unsent: %w", target, err))
+		}
+	}
+	return 0
+}
+
+// validateKeyName refuses what tmux would take as something other than one key.
+//
+// --key goes WITHOUT -l, so tmux looks its argument up in its key table, and
+// two things it accepts there are not what a caller meant: a value with a space
+// in it is two keys sent silently in sequence, and a value starting with "-" is
+// read as a flag of send-keys -- "-X" would turn the call into a copy-mode
+// command. A key name tmux does not know is left to tmux, which refuses it by
+// name and is clearer about its own table than anything here could be.
+func validateKeyName(key string) error {
+	const maxKeyName = 32
+	if len(key) > maxKeyName {
+		return fmt.Errorf("--key %q is %d bytes: it takes one tmux key name, such as C-c or Escape, not text (that is --text)", key, len(key))
+	}
+	if strings.HasPrefix(key, "-") {
+		return fmt.Errorf("--key %q starts with a dash, which tmux reads as a flag of its own rather than as a key", key)
+	}
+	if strings.ContainsFunc(key, func(r rune) bool { return unicode.IsSpace(r) || !unicode.IsPrint(r) }) {
+		return fmt.Errorf("--key %q is not one key name: it takes exactly one, and a value with whitespace in it would be sent as several keys in a row", key)
+	}
+	return nil
 }
 
 func cmdPanes(args []string, stdout, stderr io.Writer) int {

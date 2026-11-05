@@ -166,3 +166,50 @@ func waitForScreen(t *testing.T, srv *testutil.Server, paneID, want string) stri
 	t.Fatalf("pane %s never showed %q. Its screen:\n%s", paneID, want, screen)
 	return ""
 }
+
+// TestTypeRunsACommandInARealShell is the end-to-end proof that `open` and
+// `type` together are what a person does: a pane appears, a command is typed
+// into it, and its output is on the pane's screen.
+//
+// It can only be established here. The stub seam records the argv and nothing
+// more, so every way of getting this wrong -- "Enter" typed as five characters
+// rather than looked up as a key, a "\n" in the text where tmux wants 0x0d, a
+// -l that lost its text to tmux's own parser -- records an argv that looks
+// plausible and types nothing a shell would run. Task 9's `run` is this verb
+// after `open`, so it rests on this being true.
+func TestTypeRunsACommandInARealShell(t *testing.T) {
+	srv := testutil.NewServer(t)
+	// /bin/sh on both panes, for the reason the test above names: testutil
+	// keeps the developer's tmux.conf out of the server, and nothing keeps a
+	// shell's rc files out of a pane.
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24", "/bin/sh")
+	srv.Run(t, "set-option", "-g", "default-shell", "/bin/sh")
+	caller := srv.Run(t, "display-message", "-p", "-t", "work:0", "#{pane_id}")
+
+	var out, errb bytes.Buffer
+	if code := runOpen([]string{"--split"}, &out, &errb, paneEnv(srv, caller), dialControl); code != 0 {
+		t.Fatalf("open exited %d: %s", code, errb.String())
+	}
+	pane := strings.TrimSuffix(out.String(), "\n")
+
+	// The marker is split across printf's arguments so that finding it in the
+	// capture is the command's OUTPUT and not tmux's echo of the typed line --
+	// which is the one way this test could pass with nothing having run.
+	out.Reset()
+	errb.Reset()
+	code := runType([]string{"--text", `printf "TYPED%s\n" THIS`, "--enter", pane}, &out, &errb, paneEnv(srv, caller), dialControl)
+	if code != 0 {
+		t.Fatalf("type exited %d: %s", code, errb.String())
+	}
+	if out.String() != "" || errb.String() != "" {
+		t.Errorf("stdout %q, stderr %q; a submitted single line says nothing", out.String(), errb.String())
+	}
+	waitForScreen(t, srv, pane, "TYPEDTHIS")
+
+	// The caller's own pane was not typed into. tmux's default target is
+	// whatever pane is current, and the caller is it, so a send that lost its
+	// -t would have landed here -- and this is the pane holding the agent.
+	if screen := srv.Run(t, "capture-pane", "-p", "-t", caller); strings.Contains(screen, "TYPED") {
+		t.Errorf("the caller's own pane shows the text:\n%s", screen)
+	}
+}

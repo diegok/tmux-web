@@ -71,6 +71,7 @@ Usage:
   tmux-web peek    [--lines N] <pane-id>
   tmux-web open    (--split | --window [name]) [--label TEXT]
   tmux-web type    (--text TEXT | --key KEY) [--enter] <pane-id>
+  tmux-web close   <pane-id>
   tmux-web install-integration --agent claude|opencode|pi [dir] [--global] [--yes] [--remove]
 
 serve runs the daemon. enroll, devices and revoke talk to its admin socket,
@@ -116,6 +117,10 @@ multi-line text, which is sent as one unsubmitted paste for you to submit in the
 pane; and text over 4096 bytes, which belongs in a file the pane is told to
 read. It will not type into the calling pane.
 
+close closes a pane, any pane on the server, whether or not you opened it: the
+point is that you can clear up after yourself the way its owner does. It will
+not close the calling pane, and it will not close one in a browser tab's session.
+
 install-integration writes the integration that calls report into a project, and
 it is a command rather than a button in the web UI on purpose: writing
 executable code into a repository is not a thing a network request should be
@@ -160,6 +165,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdOpen(rest, stdout, stderr)
 	case "type":
 		return cmdType(rest, stdout, stderr)
+	case "close":
+		return cmdClose(rest, stdout, stderr)
 	case "install-integration":
 		return cmdInstall(rest, stdout, stderr)
 	case "help", "-h", "-help", "--help":

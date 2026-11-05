@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -261,6 +262,7 @@ func TestEveryVerbSaysSoWhenItIsNotRunningInsideTmux(t *testing.T) {
 		{"peek", []string{"%2"}, runPeek},
 		{"open", []string{"--split"}, runOpen},
 		{"type", []string{"--text", "hi", "%2"}, runType},
+		{"close", []string{"%2"}, runClose},
 	} {
 		t.Run(v.name, func(t *testing.T) {
 			dialled := 0
@@ -1365,5 +1367,80 @@ func TestTypeRefusesAPaneThatIsNotOnTheServer(t *testing.T) {
 	}
 	if len(stub.runs) != 0 {
 		t.Errorf("runs = %v, want none", stub.runs)
+	}
+}
+
+func closeRun(stub *controlStub, args ...string) (int, string, string) {
+	var out, errb bytes.Buffer
+	code := runClose(args, &out, &errb, callerEnv("%1"), stubDial(stub))
+	return code, out.String(), errb.String()
+}
+
+func TestCloseClosesANamedPane(t *testing.T) {
+	stub := &controlStub{rows: twoSessions()}
+	code, out, errs := closeRun(stub, "%2")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q, want 0", code, errs)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want nothing: the caller named the pane, so an echo tells it nothing", out)
+	}
+	if !reflect.DeepEqual(stub.calls, [][]string{{"kill-pane", "%2"}}) {
+		t.Errorf("calls = %v, want exactly one kill-pane of %%2", stub.calls)
+	}
+}
+
+func TestCloseRefusesTheCallersOwnPane(t *testing.T) {
+	stub := &controlStub{rows: twoSessions()}
+	code, out, errs := closeRun(stub, "%1")
+	if code != 2 {
+		t.Errorf("exit %d, want 2: the command line names the caller itself", code)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want nothing", out)
+	}
+	if !strings.Contains(errs, "%1") {
+		t.Errorf("stderr = %q, want the caller's own pane named in it", errs)
+	}
+	// Decided from $TMUX_PANE alone: nothing dialled, read or killed.
+	if len(stub.runs) != 0 || stub.snapshots != 0 || len(stub.calls) != 0 {
+		t.Errorf("runs = %v, %d snapshots, calls = %v, want none of any", stub.runs, stub.snapshots, stub.calls)
+	}
+}
+
+func TestCloseRefusesAnAppOwnedSession(t *testing.T) {
+	rows := twoSessions()
+	rows[1].AppOwned = true
+	stub := &controlStub{rows: rows}
+	code, out, errs := closeRun(stub, "%2")
+	if code != 1 {
+		t.Errorf("exit %d, want 1: the verb could not do its job", code)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want nothing", out)
+	}
+	if !strings.Contains(errs, "%2") {
+		t.Errorf("stderr = %q, want the pane named", errs)
+	}
+	if len(stub.runs) != 0 || len(stub.calls) != 0 {
+		t.Errorf("runs = %v, calls = %v, want NONE: nothing may be killed in a browser tab's session", stub.runs, stub.calls)
+	}
+}
+
+// The owner's decision, pinned. An earlier design closed only panes the agent
+// had opened itself, and he reversed it: "the idea is that the agent can do what
+// I do. I open a pane/window, use it, and close it when I want." %7 is in
+// another session and has no connection to the caller -- it was not opened by
+// it, is not in its window, is not even in its session -- and it must close.
+// If this test goes red because a restriction was added, the restriction is the
+// bug, not the test.
+func TestCloseIsNotLimitedToPanesTheAgentCreated(t *testing.T) {
+	stub := &controlStub{rows: twoSessions()}
+	code, _, errs := closeRun(stub, "%7")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q, want 0", code, errs)
+	}
+	if !reflect.DeepEqual(stub.calls, [][]string{{"kill-pane", "%7"}}) {
+		t.Errorf("calls = %v, want kill-pane of %%7", stub.calls)
 	}
 }

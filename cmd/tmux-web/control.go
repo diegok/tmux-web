@@ -507,6 +507,76 @@ func appSessionName(rows []tmux.Row, sessionID string) (string, bool) {
 	return "", false
 }
 
+func cmdClose(args []string, stdout, stderr io.Writer) int {
+	return runClose(args, stdout, stderr, os.Getenv, dialControl)
+}
+
+// runClose closes one pane, and it is deliberately NOT limited to panes this
+// agent opened.
+//
+// An earlier revision of the design left close out as the most destructive verb
+// in the set. The owner reversed that himself: the idea is that the agent can do
+// what he does -- he opens a pane or window, uses it, and closes it when he
+// wants. Without close, `open` leaves panes that only his own hands can clear.
+// So there is no ownership ledger and no "created by" check; a later reader who
+// tightens this to the agent's own panes is undoing his decision. Two guards,
+// and only two: the caller's own pane, and the app's own sessions.
+//
+// It prints nothing on success, as `type` does. The caller named the pane, so
+// echoing the id would tell it only what it just typed; a wrong id is caught by
+// the refusals above, and a right-shaped wrong one is not something output can
+// reveal.
+func runClose(args []string, stdout, stderr io.Writer, getenv func(string) string, dial func(socket string) controlClient) int {
+	fset := newFlagSet("close", stderr, "tmux-web close <pane-id>")
+	operands, code, ok := parseFlags(fset, args)
+	if !ok {
+		return code
+	}
+	if len(operands) != 1 {
+		return usageError(stderr, fset, "close takes exactly one pane id (see tmux-web panes), got %d arguments", len(operands))
+	}
+	target := operands[0]
+	// A malformed -t resolves to whatever pane is current and exits 0: for a
+	// kill that is somebody else's pane, so the form is checked before anything.
+	if err := tmux.ValidatePaneID(target); err != nil {
+		return usageError(stderr, fset, "%v -- pass the %%N from tmux-web panes, not a session:window.pane", err)
+	}
+	socket, caller, ok := tmuxTarget(getenv)
+	if !ok {
+		return notInsideTmux(stderr, "close")
+	}
+	// Closing itself kills the agent mid-turn, and no agent means that. Decided
+	// from $TMUX_PANE alone, so nothing is dialled.
+	if target == caller {
+		return usageError(stderr, fset, "pane %s is this pane -- closing it would end you mid-turn; name another pane (tmux-web panes)", caller)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), controlTimeout)
+	defer cancel()
+	c := dial(socket)
+
+	rows, err := c.Snapshot(ctx)
+	if err != nil {
+		return controlFail(stderr, "close", err)
+	}
+	var row *tmux.Row
+	for i := range rows {
+		if rows[i].PaneID == target {
+			row = &rows[i]
+			break
+		}
+	}
+	if row == nil {
+		return controlFail(stderr, "close", fmt.Errorf("no pane %s on this tmux server (list them with tmux-web panes --all)", target))
+	}
+	if app, owned := appSessionName(rows, row.SessionID); owned {
+		return controlFail(stderr, "close", fmt.Errorf("pane %s is in session %s (%s), which belongs to a browser tab and is torn down when that tab closes; it is not closed from here", target, row.SessionID, app))
+	}
+	if err := c.KillPane(ctx, target); err != nil {
+		return controlFail(stderr, "close", fmt.Errorf("pane %s was not closed: %w", target, err))
+	}
+	return 0
+}
+
 func cmdType(args []string, stdout, stderr io.Writer) int {
 	return runType(args, stdout, stderr, os.Getenv, dialControl)
 }

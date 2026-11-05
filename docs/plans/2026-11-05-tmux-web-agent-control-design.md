@@ -1,7 +1,18 @@
 # tmux-web — agents driving tmux with the verbs the browser already has
 
 Date: 2026-11-05
-Status: design, not agreed. Revision 5 — decision 4 narrowed during implementation (see its own note); revisions 1-4 below.
+Status: design, not agreed. Revision 6 — decision 6 corrected after implementation, and decision 1's verb table brought to the shipped spellings (see their own notes); revisions 1-5 below.
+
+**Revision 6 corrects a guard this design asked for and should not have.**
+Revision 5's decision 6 said `type` and `run` *"refuse the app's own `_web-*`
+sessions"*, and justified it with *"for `type` it is meaningless"*. That
+justification is false, so the requirement built on it was wrong: after
+`Dedupe` an app-owned row survives only when the app's session is the sole link
+to that window, and in exactly that case the pane is **live and typeable**.
+Refusing it would have closed the one coordination path into a working pane and
+bought nothing. The shipped code does not refuse it, and decision 6 below now
+says so with the reason. Nothing in the code changed for this revision; the
+document was the thing that was wrong.
 
 **Revision 4 answers one question from the owner**, and it is the best thing
 that has happened to this design: *"hay forma de abrir un nuevo pane o window
@@ -238,10 +249,17 @@ running.
 | `tmux-web panes [--all]` | one line per pane: pane id, `session:window.pane`, command, agent name, the free state, label, title |
 | `tmux-web state <pane>` | one word, plus the question when there is one |
 | `tmux-web peek <pane> [--lines N]` | the current screen, or N lines of scrollback |
-| `tmux-web type <pane> <text> [--enter]` | types text as a person would |
-| `tmux-web type <pane> --key <key>` | one tmux key name, e.g. `C-c` |
-| `tmux-web open [--window NAME \| --split] [--label TEXT]` | a **new window or split with its shell**, empty, and prints the pane id |
-| `tmux-web run <command> [--window NAME \| --split] [--label TEXT]` | `open`, then `type --enter`. A convenience, not a second mechanism |
+| `tmux-web type --text <text> [--enter] <pane>` | types text as a person would |
+| `tmux-web type --key <key> <pane>` | one tmux key name, e.g. `C-c` |
+| `tmux-web open (--split \| --window [NAME]) [--label TEXT]` | a **new window or split with its shell**, empty, and prints the pane id |
+| `tmux-web run (--split \| --window) [--label TEXT] <command>` | `open`, then `type --enter`. A convenience, not a second mechanism |
+
+*Revision 6 brought these spellings to the shipped CLI's.* Three of them had
+drifted: `type`'s text became `--text` rather than a second positional, because
+this CLI re-parses after every operand and a text of `--help` passed
+positionally would be read as a flag (`runType`'s own header); `--window` lost
+its `NAME` in `run`, where the positional slot is the command itself; and the
+mode is one of two required alternatives rather than an optional pair.
 | `tmux-web close <pane>` | closes a pane the way the owner closes one |
 
 **`open` and `type` are the pair; `run` is sugar over them.** This is the
@@ -407,9 +425,27 @@ browser tab, and the `_web-*` answer is the wrong one — those sessions carry
   that is: one submitted turn per newline. Multi-line text without `--enter` is
   bracketed, exactly as `ReplyBox` brackets it, and the agent is told it must
   submit it in the pane.
-- **`type` and `run` refuse the app's own `_web-*` sessions.** For `type` it is
-  meaningless; for `run` it is worse, because the window would be destroyed with
-  the tab. `refuseAppSession` is the existing precedent.
+- **`open --window` and `close` refuse the app's own `_web-*` sessions, and
+  `type` and `run --split` do not.** `refuseAppSession` is the existing
+  precedent for the two that do.
+
+  **Revision 5 said `type` and `run` must refuse them too, and that was wrong.**
+  Its reason for `type` was that the refusal is *"meaningless"* — i.e. harmless —
+  and that is false. After `Dedupe` an app-owned row survives only when the
+  app's session is the **sole link** to that window, and in exactly that case
+  the pane is live and typeable: the guard would have blocked the one
+  coordination path into a working pane in exchange for nothing at all.
+
+  What actually divides the two halves is **fate-sharing**, the argument now
+  written into `openPane`. A split lands in the **caller's own window**, so if a
+  closing tab takes that window it takes the agent that asked for the pane with
+  it, and there is nobody left to have been misled. A new window is somewhere
+  else: it dies while the agent lives on, holding an id for a pane that no
+  longer exists. `close` asks because it is the destructive verb. `type` writes
+  into a pane that already exists and that the caller named, so there is no
+  tear-down for it to be surprised by.
+
+  The saved fork is a consequence of this, not the reason for it.
 - **No `remain-on-exit`, and this is revision 4's deletion.** The owner chose
   "always on" in revision 3, and he was answering a problem that only existed
   because `run` made the command the pane's process. With `open` + `type` the
@@ -436,7 +472,8 @@ browser tab, and the `_web-*` answer is the wrong one — those sessions carry
 
   Its guards, which are mine: `close` refuses the **caller's own pane**, because
   an agent closing it kills itself mid-turn and no agent means that; it refuses
-  the app's `_web-*` sessions, as everything else here does; and it takes the
+  the app's `_web-*` sessions, as `open --window` does and for the sharper
+  reason that this verb is the destructive one; and it takes the
   same explicit-naming rule outside the caller's session. It is not restricted
   to panes the agent created — the owner's principle is that the agent does what
   he does, and he closes any pane he likes.

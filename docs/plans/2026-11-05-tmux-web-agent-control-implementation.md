@@ -21,7 +21,7 @@
 - **The browser's behaviour does not change.** No snapshot field, no new state dot, no route. A reviewer's test for this whole plan is `git diff --stat internal/front web/` being empty.
 - **Scope default:** the caller's session. A pane outside it must be named explicitly.
 - **Exit codes:** `2` for usage, as `cli.go` does for an unknown command. `1` for a verb that could not do its job. `0` on success. `report`'s exit-code exception does not apply here.
-- **Writers refuse app-owned sessions**, via the existing `Row.AppOwned` (`@tmux_web_owned`).
+- **The writers that put something somewhere else refuse app-owned sessions** — `open --window` and `close` — via the existing `Row.AppOwned` (`@tmux_web_owned`). `type` and `run --split` do **not**, and must not: their pane is in the caller's own window, so it shares the caller's fate and there is nobody left to mislead, while an app-owned row survives `Dedupe` only when that session is the sole link to the window, which is precisely the case where the pane is live and typeable. An earlier wording of this line said "writers refuse app-owned sessions" flatly; the design's decision 6 (revision 6) records why that was wrong.
 
 ## Review Focus
 

@@ -675,8 +675,16 @@ func TestStateRefusesAPaneThatDoesNotExist(t *testing.T) {
 	if code != 1 {
 		t.Errorf("exited %d, want 1", code)
 	}
-	if out != "" {
-		t.Errorf("stdout = %q, want nothing: there is no answer", out)
+	// "unknown", NOT nothing. This assertion was the other way round and the
+	// contract it pinned changed on purpose: the first line of `state` is one
+	// word on every path out of the verb, failures included, because a caller
+	// reading `tmux-web state %7 | head -1` has no exit code left to consult
+	// and a pane vanishing between a `panes` and a `state` is the ordinary
+	// race in a feature whose own verbs create and destroy panes. "unknown"
+	// means the read failed, which is the truth about a pane that is not on
+	// the server, and it is never mistaken for quiet.
+	if out != "unknown\n" {
+		t.Errorf("stdout = %q, want \"unknown\\n\": the first line is one word on every path", out)
 	}
 	if !strings.Contains(errs, "%999") {
 		t.Errorf("stderr = %q, want the pane named", errs)
@@ -729,6 +737,26 @@ func TestStateSaysUnknownWhenTheScreenCannotBeRead(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "capture exploded") {
 		t.Errorf("stderr = %q, want the cause", errb.String())
+	}
+}
+
+// The third of the three failure paths, and the first of them a caller meets:
+// the snapshot read itself fails, so there is not even a row to ask about.
+//
+// Together with the two tests above this is the whole of `state`'s contract
+// that the first line is one word -- a snapshot that failed, a pane that is
+// not there, and a screen that could not be read all print "unknown".
+func TestStateSaysUnknownWhenTheSnapshotCannotBeRead(t *testing.T) {
+	stub := &controlStub{rows: twoSessions(), err: errors.New("snapshot exploded")}
+	code, out, errs := stateRun(stub, "%1")
+	if code != 1 {
+		t.Errorf("exited %d, want 1", code)
+	}
+	if out != "unknown\n" {
+		t.Errorf("stdout = %q, want \"unknown\\n\"", out)
+	}
+	if !strings.Contains(errs, "snapshot exploded") {
+		t.Errorf("stderr = %q, want the cause", errs)
 	}
 }
 

@@ -149,6 +149,14 @@ func cmdState(args []string, stdout, stderr io.Writer) int {
 // runState answers what one pane is doing now: one word on the first line, and
 // for a blocked pane the question after it.
 //
+// THE FIRST LINE IS ONE WORD ON EVERY PATH OUT OF HERE, the failures included,
+// and that is a contract the skill, the README and `tmux-web help` all state in
+// those words. A caller reading `tmux-web state %7 | head -1` has no exit code
+// left to consult -- the pipeline swallowed it -- so a failure that printed
+// nothing would hand it an empty string exactly where it was promised a word.
+// The word for every failure is `unknown`, which means the read failed and is
+// never mistaken for quiet.
+//
 // The pane is an operand and is named, so the caller's-session default that
 // scopes `panes` does not apply: %7 in another session is as explicit a
 // target as %1, and refusing it would stop the one thing this verb is for,
@@ -179,6 +187,7 @@ func runState(args []string, stdout, stderr io.Writer, getenv func(string) strin
 
 	rows, err := c.Snapshot(ctx)
 	if err != nil {
+		fmt.Fprintln(stdout, tmux.LiveUnknown)
 		return controlFail(stderr, "state", err)
 	}
 	// The row, and not just the id, because LiveState decides by the pane's
@@ -193,13 +202,22 @@ func runState(args []string, stdout, stderr io.Writer, getenv func(string) strin
 		}
 	}
 	if row == nil {
+		// `unknown` HERE TOO, and it is the honest answer rather than a
+		// convenience: a pane that is not on the server is a pane about which
+		// nothing can be said, which is exactly what the word means -- "the
+		// read failed", not "quiet". And this is the path a caller is most
+		// likely to meet, because a pane vanishing between a `panes` and a
+		// `state` is the ordinary race in a feature whose own verbs create and
+		// destroy panes. The sentence naming the pane still goes to stderr.
+		fmt.Fprintln(stdout, tmux.LiveUnknown)
 		return controlFail(stderr, "state", fmt.Errorf("no pane %s on this tmux server (list them with tmux-web panes --all)", target))
 	}
 
 	v, err := tmux.LiveState(ctx, c, *row, time.Now(), stateSettle)
 	if err != nil {
-		// The word still goes to stdout: a reader that takes the first line
-		// gets "unknown", the one thing that must never be mistaken for quiet.
+		// The word still goes to stdout, as it does on the two failures above:
+		// a reader that takes the first line gets "unknown", the one thing
+		// that must never be mistaken for quiet.
 		fmt.Fprintln(stdout, v.State)
 		return controlFail(stderr, "state", err)
 	}

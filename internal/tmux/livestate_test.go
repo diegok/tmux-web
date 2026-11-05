@@ -19,13 +19,14 @@ import (
 // fork the row exists to refuse. Nothing here talks to tmux, so counting is the
 // only way those rows get tested.
 type liveStub struct {
-	report   string     // what show-options returns; "" means the option is unset
-	screens  []string   // one per capture, in call order
-	errs     []error    // errs[i], when non-nil, is capture i's failure instead
-	reads    int        // show-options calls
-	captures int        // Capture calls
-	ran      [][]string // every Run argv, so a test can check the target
-	shot     []string   // every Capture's pane id, for the same reason
+	report   string      // what show-options returns; "" means the option is unset
+	screens  []string    // one per capture, in call order
+	errs     []error     // errs[i], when non-nil, is capture i's failure instead
+	reads    int         // show-options calls
+	captures int         // Capture calls
+	ran      [][]string  // every Run argv, so a test can check the target
+	shot     []string    // every Capture's pane id, for the same reason
+	at       []time.Time // when each capture happened, so a test can measure the gap
 }
 
 func (s *liveStub) Run(ctx context.Context, args ...string) (string, error) {
@@ -48,6 +49,7 @@ func (s *liveStub) Capture(ctx context.Context, paneID string) (string, error) {
 	i := s.captures
 	s.captures++
 	s.shot = append(s.shot, paneID)
+	s.at = append(s.at, time.Now())
 	if i < len(s.errs) && s.errs[i] != nil {
 		return "", s.errs[i]
 	}
@@ -182,6 +184,32 @@ func TestAnUncorroboratedBlockedReportIsDroppedAndReadsIdle(t *testing.T) {
 	}
 }
 
+// A state-only blocked report -- the integration said it is waiting and did not
+// say what for. The design has `state` print the question when there is one, and
+// the capture that corroborated the report has one on it, so the grammar reads
+// it off the screen already in hand. The report still decided the state, so From
+// does not move.
+func TestACorroboratedBlockedReportWithNoTextTakesItsQuestionFromTheScreen(t *testing.T) {
+	now := liveNow()
+	s := &liveStub{
+		report:  FormatReport(StateBlocked, now.Add(-3*time.Minute).UnixMilli(), ""),
+		screens: []string{readFixture(t, "claude-blocked.txt")},
+	}
+	v, err := LiveState(context.Background(), s, claudeRow(), now, 0)
+	if err != nil {
+		t.Fatalf("LiveState: %v", err)
+	}
+	if v.State != StateBlocked || v.From != VerdictReport {
+		t.Errorf("State/From = %q/%q, want %q/%q", v.State, v.From, StateBlocked, VerdictReport)
+	}
+	if want := "Do you want to create fixture.txt?"; v.Question == nil || v.Question.Text != want {
+		t.Errorf("Question = %+v, want the screen's own question %q", v.Question, want)
+	}
+	if s.captures != 1 {
+		t.Errorf("captures = %d, want 1: the grammar reads the capture the corroboration already took", s.captures)
+	}
+}
+
 func TestAKnownAgentWithNoReportReachesBlockedFromItsScreen(t *testing.T) {
 	s := &liveStub{screens: []string{readFixture(t, "claude-blocked.txt")}}
 	v, err := LiveState(context.Background(), s, claudeRow(), liveNow(), 0)
@@ -211,12 +239,28 @@ func TestAnIdleReportIsOverruledByAScreenThatIsStillMoving(t *testing.T) {
 		report:  FormatReport(StateIdle, now.Add(-30*time.Second).UnixMilli(), ""),
 		screens: []string{readFixture(t, "claude-working.txt"), readFixture(t, "claude-idle.txt")},
 	}
-	v, err := LiveState(context.Background(), s, claudeRow(), now, time.Millisecond)
+	// Small but real: the gap is the only part of this row that cannot be
+	// asserted from the verdict, and a multi-second wait in a unit suite buys
+	// nothing a millisecond does not.
+	const settle = 5 * time.Millisecond
+	v, err := LiveState(context.Background(), s, claudeRow(), now, settle)
 	if err != nil {
 		t.Fatalf("LiveState: %v", err)
 	}
 	if v.State != StateWorking || v.From != VerdictScreen {
 		t.Errorf("State/From = %q/%q, want %q/%q", v.State, v.From, StateWorking, VerdictScreen)
+	}
+	// "settle apart" is the MECHANISM of this row, not a detail of it. Two
+	// captures taken back to back are identical for almost any pane, however
+	// hard it is working, so a verdict built on them reads idle or quiet
+	// everywhere -- and nothing about the State of this test, or of any other
+	// in this file, would change if the wait were deleted. So the gap is
+	// measured.
+	if len(s.at) != 2 {
+		t.Fatalf("captures = %d, want 2", len(s.at))
+	}
+	if gap := s.at[1].Sub(s.at[0]); gap < settle {
+		t.Errorf("captures %v apart, want at least the caller's settle of %v", gap, settle)
 	}
 }
 

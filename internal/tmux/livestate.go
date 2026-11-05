@@ -135,20 +135,37 @@ func corroborateBlocked(ctx context.Context, c LiveReader, agent, paneID string,
 		// stance is that an agent whose waiting screen nobody has captured can
 		// never report blocked, and guessing from a report alone is the badge
 		// failure that stance exists to prevent.
+		//
+		// No churn follows, and that is NOT the contradiction with
+		// CorroborateBlocked's "a dropped report hands the pane back to the
+		// grammars on this same capture" that it looks like: the hand-back
+		// already happened one line up -- the grammar was asked about this very
+		// capture and said no. What is skipped is only the second capture and
+		// the settle wait, because the table asks for one capture here, and
+		// Dropped is what tells the caller this idle rests on it. The poller
+		// can afford the pair; it is already capturing every 1.5s. A single
+		// call would be buying a working/idle distinction nobody asked for with
+		// a fork and a wait, when the question put to it was whether anything
+		// is waiting on the owner.
 		return Verdict{State: StateIdle, From: VerdictScreen, Dropped: true}, nil
 	}
 	v := Verdict{State: StateBlocked, From: VerdictReport}
 	if rep.Activity != "" {
-		// The report's own words, not ExtractQuestion's reading of the screen:
-		// the report is the authority that answered, and the capture was spent
-		// confirming that something is waiting, not on what it is waiting for.
+		// The report's own words win over the grammar's reading of the same
+		// screen: the integration named what it is waiting on, where a grammar
+		// can only recover an approximation of it from the pixels.
 		v.Question = &Question{Text: rep.Activity}
+	} else {
+		// A state-only report still has a question on screen -- `state` prints
+		// the question when there is one, and on this path there is one -- and
+		// the capture that corroborated the report is already in hand, so
+		// asking the grammar costs no fork. ExtractQuestion fails closed, so
+		// the field stays nil when it cannot read the dialog with confidence.
+		v.Question = ExtractQuestion(agent, screen)
 	}
-	// A state-only report leaves Question nil rather than reaching for the
-	// grammar. The text is a convenience (blocked.go) and here it is barely
-	// even that: the owner's loop reads the pane's screen as its next step
-	// after hearing blocked, so a missing quote costs nothing it was not about
-	// to fetch anyway.
+	// From is VerdictReport either way. It names what decided the STATE, and on
+	// this branch that is the report; the grammar only supplied text the report
+	// left out.
 	return v, nil
 }
 

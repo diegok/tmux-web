@@ -124,6 +124,9 @@ Return. The command is one quoted shell string, so pipes and && work, and it is
 run by the pane's shell exactly as if typed -- the pane and its output stay when
 it ends. If the pane opens but the typing fails the pane is left in place, its
 id is still printed, and the message says which half failed.
+run --window does not name the window, because the positional slot is the command:
+tmux's automatic-rename shows the running command and --label is the stable
+name; to pin a window name, open --window NAME and then type into the pane.
 
 close closes a pane, any pane on the server, whether or not you opened it: the
 point is that you can clear up after yourself the way its owner does. It will

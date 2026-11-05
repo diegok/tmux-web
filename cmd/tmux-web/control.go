@@ -839,8 +839,19 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 //
 // ONE SHELL-COMMAND STRING, the owner's decision: the pane's shell parses it,
 // so `run 'make test 2>&1 | tee /tmp/out'` works. An argv after -- was the
-// alternative and was declined. A command of several lines is refused for the
-// reason type --enter refuses it: a Return inside it submits once per line.
+// alternative and was declined. A command of several lines is refused because
+// type would bracket it as one unsubmitted paste and send no Return, which
+// contradicts this verb's whole contract of running the command; the cap is
+// refused for the reason type's is.
+//
+// --window DOES NOT NAME THE WINDOW, unlike `open --window NAME`: there the
+// name is the positional argument, and here that slot is the command, so a
+// string-valued --window would make `run --window 'make test'` name a window
+// and leave nothing to run. It needs no name: automatic-rename is on by
+// default, so the window shows the running command in the owner's status bar
+// (he sees `make` while `make test` runs), and --label is the stable
+// human-facing name that panes and the sidebar show. An agent that wants a
+// pinned window name does `open --window NAME` and then `type` into the pane.
 //
 // IF THE OPEN WORKED AND THE TYPE DID NOT, THE PANE STAYS, ITS ID IS PRINTED
 // AND THE MESSAGE SAYS WHICH HALF FAILED. Closing it would be a third

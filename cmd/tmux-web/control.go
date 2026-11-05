@@ -149,13 +149,19 @@ func cmdState(args []string, stdout, stderr io.Writer) int {
 // runState answers what one pane is doing now: one word on the first line, and
 // for a blocked pane the question after it.
 //
-// THE FIRST LINE IS ONE WORD ON EVERY PATH OUT OF HERE, the failures included,
-// and that is a contract the skill, the README and `tmux-web help` all state in
-// those words. A caller reading `tmux-web state %7 | head -1` has no exit code
-// left to consult -- the pipeline swallowed it -- so a failure that printed
-// nothing would hand it an empty string exactly where it was promised a word.
-// The word for every failure is `unknown`, which means the read failed and is
+// THE FIRST LINE IS ONE WORD ON EVERY PATH THAT READ THE PANE, every FAILED
+// read included, and that is a contract the skill, the README and `tmux-web
+// help` all state. A caller reading `tmux-web state %7 | head -1` has no exit
+// code left to consult -- the pipeline swallowed it -- so a read that failed
+// and printed nothing would hand it an empty string exactly where it was
+// promised a word. The word is `unknown`, which means the read failed and is
 // never mistaken for quiet.
+//
+// THE TWO PATHS THAT DO PRINT NOTHING are the ones that never got as far as a
+// read: a malformed command line (checkPaneTarget, exit 2) and a caller that is
+// not inside tmux (notInsideTmux, exit 1). Neither is an answer about a pane,
+// and neither is a thing a `| head -1` is waiting on -- the caller typed the
+// command wrong or is not in a pane, and both say so on stderr.
 //
 // The pane is an operand and is named, so the caller's-session default that
 // scopes `panes` does not apply: %7 in another session is as explicit a
@@ -360,7 +366,7 @@ func runOpen(args []string, stdout, stderr io.Writer, getenv func(string) string
 	fset := newFlagSet("open", stderr, "tmux-web open (--split | --window [name]) [--label TEXT]")
 	split := fset.Bool("split", false, "put the new pane beside the calling pane, in the same window")
 	window := fset.Bool("window", false, "put the new pane in a new window of the session this pane is in")
-	label := fset.String("label", "", "a label for the new pane, shown by tmux-web panes and in the sidebar")
+	label := fset.String("label", "", "a label for the new pane, shown by tmux-web panes and in the sidebar; a label of nothing but spaces is accepted and clears it instead of setting one")
 	operands, code, ok := parseFlags(fset, args)
 	if !ok {
 		return code
@@ -870,7 +876,7 @@ func runRun(args []string, stdout, stderr io.Writer, getenv func(string) string,
 	fset := newFlagSet("run", stderr, "tmux-web run (--split | --window) [--label TEXT] <command>")
 	split := fset.Bool("split", false, "put the new pane beside the calling pane, in the same window")
 	window := fset.Bool("window", false, "put the new pane in a new window of the session this pane is in")
-	label := fset.String("label", "", "a label for the new pane, shown by tmux-web panes and in the sidebar")
+	label := fset.String("label", "", "a label for the new pane, shown by tmux-web panes and in the sidebar; a label of nothing but spaces is accepted and clears it instead of setting one")
 	operands, code, ok := parseFlags(fset, args)
 	if !ok {
 		return code

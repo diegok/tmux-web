@@ -10,8 +10,9 @@ justification is false, so the requirement built on it was wrong: after
 `Dedupe` an app-owned row survives only when the app's session is the sole link
 to that window, and in exactly that case the pane is **live and typeable**.
 Refusing it would have closed the one coordination path into a working pane and
-bought nothing. The shipped code does not refuse it, and decision 6 below now
-says so with the reason. Nothing in the code changed for this revision; the
+bought nothing. The shipped code does not refuse it in `type` or in `run
+--split`, and decision 6 below now says so with the reason -- along with the
+`--window` modes, which do refuse and should. Nothing in the code changed for this revision; the
 document was the thing that was wrong.
 
 **Revision 4 answers one question from the owner**, and it is the best thing
@@ -253,6 +254,7 @@ running.
 | `tmux-web type --key <key> <pane>` | one tmux key name, e.g. `C-c` |
 | `tmux-web open (--split \| --window [NAME]) [--label TEXT]` | a **new window or split with its shell**, empty, and prints the pane id |
 | `tmux-web run (--split \| --window) [--label TEXT] <command>` | `open`, then `type --enter`. A convenience, not a second mechanism |
+| `tmux-web close <pane>` | closes a pane the way the owner closes one |
 
 *Revision 6 brought these spellings to the shipped CLI's.* Three of them had
 drifted: `type`'s text became `--text` rather than a second positional, because
@@ -260,7 +262,6 @@ this CLI re-parses after every operand and a text of `--help` passed
 positionally would be read as a flag (`runType`'s own header); `--window` lost
 its `NAME` in `run`, where the positional slot is the command itself; and the
 mode is one of two required alternatives rather than an optional pair.
-| `tmux-web close <pane>` | closes a pane the way the owner closes one |
 
 **`open` and `type` are the pair; `run` is sugar over them.** This is the
 correction revision 4 exists for. `new-window <command>` makes the command the
@@ -425,11 +426,15 @@ browser tab, and the `_web-*` answer is the wrong one — those sessions carry
   that is: one submitted turn per newline. Multi-line text without `--enter` is
   bracketed, exactly as `ReplyBox` brackets it, and the agent is told it must
   submit it in the pane.
-- **`open --window` and `close` refuse the app's own `_web-*` sessions, and
-  `type` and `run --split` do not.** `refuseAppSession` is the existing
-  precedent for the two that do.
+- **`open --window`, `run --window` and `close` refuse the app's own `_web-*`
+  sessions, and `type` and `run --split` do not.** The division is by MODE
+  rather than by verb: `run --window` reaches the same `openPane` window branch
+  that `open --window` does, so it refuses on the same line of code.
+  `refuseAppSession` is the existing precedent for the three that do.
 
-  **Revision 5 said `type` and `run` must refuse them too, and that was wrong.**
+  **Revision 5 said `type` and `run` must refuse them too, flatly, and that was
+  wrong for `type` and for `run --split`** — it happened to be right about
+  `run --window`, by naming the verb where the mode was what mattered.
   Its reason for `type` was that the refusal is *"meaningless"* — i.e. harmless —
   and that is false. After `Dedupe` an app-owned row survives only when the
   app's session is the **sole link** to that window, and in exactly that case
@@ -441,7 +446,8 @@ browser tab, and the `_web-*` answer is the wrong one — those sessions carry
   closing tab takes that window it takes the agent that asked for the pane with
   it, and there is nobody left to have been misled. A new window is somewhere
   else: it dies while the agent lives on, holding an id for a pane that no
-  longer exists. `close` asks because it is the destructive verb. `type` writes
+  longer exists -- which is why both `--window` modes ask and neither `--split`
+  one needs to. `close` asks because it is the destructive verb. `type` writes
   into a pane that already exists and that the caller named, so there is no
   tear-down for it to be surprised by.
 

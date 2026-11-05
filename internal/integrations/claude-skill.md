@@ -108,8 +108,7 @@ picks the second one.
 An `idle` can carry one extra line of its own:
 
 ```
-note: a blocked report was standing and no dialog is on screen, so it was
-dropped; this idle rests on one capture
+note: a blocked report was standing and no dialog is on screen, so it was dropped; this idle rests on one capture
 ```
 
 That means the pane's own integration still claims it is blocked and the

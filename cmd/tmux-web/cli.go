@@ -93,9 +93,10 @@ screen -- an agent's own unexpired "working" report, and nothing else -- so a
 
 state answers what one pane is doing now, from the pane itself: "working",
 "idle" or "blocked" for a known agent, "changing" or "quiet" for anything else,
-on the first line. There is always a word there: a read that failed prints
-"unknown" on stdout and exits 1, so taking the first line never gives you an
-empty string. A blocked pane's question follows, under a line saying whether
+on the first line. A read that failed still prints a word there -- "unknown",
+on stdout, exit 1 -- so taking the first line of an answer about a pane never
+gives you an empty string. (A malformed command line prints no word: it is not
+an answer about a pane, and it exits 2.) A blocked pane's question follows, under a line saying whether
 the agent's own report or the screen supplied it. An "idle" that says a blocked
 report was dropped means the report stood but no dialog was on screen.
 

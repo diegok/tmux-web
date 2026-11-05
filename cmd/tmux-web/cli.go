@@ -71,6 +71,7 @@ Usage:
   tmux-web peek    [--lines N] <pane-id>
   tmux-web open    (--split | --window [name]) [--label TEXT]
   tmux-web type    (--text TEXT | --key KEY) [--enter] <pane-id>
+  tmux-web run     (--split | --window) [--label TEXT] <command>
   tmux-web close   <pane-id>
   tmux-web install-integration --agent claude|opencode|pi [dir] [--global] [--yes] [--remove]
 
@@ -116,6 +117,13 @@ dispatches copy-mode commands instead of typing; --enter together with
 multi-line text, which is sent as one unsubmitted paste for you to submit in the
 pane; and text over 4096 bytes, which belongs in a file the pane is told to
 read. It will not type into the calling pane.
+
+run is open and then type --enter in one call: it opens a pane (--split or
+--window), prints its id, and types the command into the shell there and presses
+Return. The command is one quoted shell string, so pipes and && work, and it is
+run by the pane's shell exactly as if typed -- the pane and its output stay when
+it ends. If the pane opens but the typing fails the pane is left in place, its
+id is still printed, and the message says which half failed.
 
 close closes a pane, any pane on the server, whether or not you opened it: the
 point is that you can clear up after yourself the way its owner does. It will
@@ -165,6 +173,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdOpen(rest, stdout, stderr)
 	case "type":
 		return cmdType(rest, stdout, stderr)
+	case "run":
+		return cmdRun(rest, stdout, stderr)
 	case "close":
 		return cmdClose(rest, stdout, stderr)
 	case "install-integration":

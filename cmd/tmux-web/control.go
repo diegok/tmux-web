@@ -393,21 +393,36 @@ func runOpen(args []string, stdout, stderr io.Writer, getenv func(string) string
 	defer cancel()
 	c := dial(socket)
 
-	pane, err := openPane(ctx, c, *split, caller, name)
-	if err != nil {
+	if _, err := openLabelled(ctx, c, stdout, *split, caller, name, *label); err != nil {
 		return controlFail(stderr, "open", err)
+	}
+	return 0
+}
+
+// openLabelled is the whole of `open` after its command line is parsed, and
+// `run` calls it too: one implementation, so the two cannot disagree about
+// which pane is made, in what order the id and the label happen, or what is
+// printed when the label fails.
+//
+// The pane id is returned even with an error, whenever there is one: an empty
+// id means nothing was opened, a non-empty id with an error means the pane
+// exists and only the label did not take.
+func openLabelled(ctx context.Context, c controlClient, stdout io.Writer, split bool, caller, name, label string) (string, error) {
+	pane, err := openPane(ctx, c, split, caller, name)
+	if err != nil {
+		return "", err
 	}
 	// The id goes out before the label is set, and it goes out even if that
 	// fails below. The pane exists by now, and a caller that was not given its
 	// id has leaked a pane it cannot name -- the same rule `state` follows when
 	// it prints its word before reporting a read it could not finish.
 	fmt.Fprintln(stdout, pane)
-	if *label != "" {
-		if err := c.SetLabel(ctx, pane, *label); err != nil {
-			return controlFail(stderr, "open", fmt.Errorf("pane %s was opened but its label was not set: %w", pane, err))
+	if label != "" {
+		if err := c.SetLabel(ctx, pane, label); err != nil {
+			return pane, fmt.Errorf("pane %s was opened but its label was not set: %w", pane, err)
 		}
 	}
-	return 0
+	return pane, nil
 }
 
 // openPane creates the pane and returns its id: a split of the caller's own
@@ -756,12 +771,8 @@ func runType(args []string, stdout, stderr io.Writer, getenv func(string) string
 	if multiline {
 		body = pasteStart + body + pasteEnd
 	}
-	// -l AND --, both load-bearing. -l says every argument after it is
-	// characters rather than key names, so a text of "Enter" types the word;
-	// -- ends tmux's own option parsing, so a text of "-l" or "--help" reaches
-	// the pane instead of being read as a flag of send-keys.
-	if _, err := c.Run(ctx, "send-keys", "-l", "-t", target, "--", body); err != nil {
-		return controlFail(stderr, "type", fmt.Errorf("pane %s was not sent the text: %w", target, err))
+	if err := sendText(ctx, c, target, body, *enter); err != nil {
+		return controlFail(stderr, "type", err)
 	}
 	if multiline {
 		// On stderr with exit 0: the verb did exactly what it was asked, and a
@@ -771,17 +782,113 @@ func runType(args []string, stdout, stderr io.Writer, getenv func(string) string
 		// for.
 		fmt.Fprintf(stderr, "tmux-web type: pane %s was given %d lines as one unsubmitted paste and nothing was submitted -- submit it in the pane, or with `tmux-web type --key Enter %s` once you have read it back (tmux-web peek %s)\n",
 			target, strings.Count(*text, "\n")+1, target, target)
-		return 0
 	}
-	if *enter {
+	return 0
+}
+
+// sendText is the two tmux commands that deliver text to a pane, and `run`
+// uses it as well as `type`: the one place that knows -l and -- are both
+// needed, and that the Return is a key rather than a byte. A copy in `run`
+// would be a second place to forget either.
+func sendText(ctx context.Context, c controlClient, target, body string, enter bool) error {
+	// -l AND --, both load-bearing. -l says every argument after it is
+	// characters rather than key names, so a text of "Enter" types the word;
+	// -- ends tmux's own option parsing, so a text of "-l" or "--help" reaches
+	// the pane instead of being read as a flag of send-keys.
+	if _, err := c.Run(ctx, "send-keys", "-l", "-t", target, "--", body); err != nil {
+		return fmt.Errorf("pane %s was not sent the text: %w", target, err)
+	}
+	if enter {
 		// A SECOND COMMAND, and a key rather than a byte in the text: 0x0d is
 		// Return and a "\n" would be 0x0a, which is C-j -- a different key, and
 		// one an agent's prompt does not answer to. The two cannot be one
 		// `send-keys`, because -l makes every argument literal. If this half
 		// fails the text is already in the pane, which is what the message says.
 		if _, err := c.Run(ctx, "send-keys", "-t", target, "Enter"); err != nil {
-			return controlFail(stderr, "type", fmt.Errorf("pane %s was given the text but not the Return that submits it, so it is sitting at the prompt unsent: %w", target, err))
+			return fmt.Errorf("pane %s was given the text but not the Return that submits it, so it is sitting at the prompt unsent: %w", target, err)
 		}
+	}
+	return nil
+}
+
+func cmdRun(args []string, stdout, stderr io.Writer) int {
+	return runRun(args, stdout, stderr, os.Getenv, dialControl)
+}
+
+// runRun is `open` followed by `type --enter`: a pane is made, its id is
+// printed, and the command is typed into the shell in it and submitted.
+//
+// SUGAR, NOT A SECOND MECHANISM. Nothing here hands a command to new-window or
+// split-window -- internal/tmux/manage.go forbids it, and ResumeAgent's lookup
+// table is the whole security story of the browser's route. The command arrives
+// as keystrokes, as the owner's own fingers would deliver it, in a shell that
+// survives it: measured on 3.7b, a command exiting 7 leaves the pane, its
+// output and a working prompt behind, so no remain-on-exit decision exists.
+// The pane is made by openLabelled and the typing is sendText -- the code
+// `open` and `type` run -- so this verb adds only the order and the failure
+// message.
+//
+// THE COMMAND IS A POSITIONAL ARGUMENT WHERE `type` TAKES --text, AND THE
+// ASYMMETRY IS DELIBERATE. type's payload is arbitrary text that may look like
+// a flag -- an agent typing `--help` into a pane for the owner to read is a
+// real case, and a flag's value is the only form Go's flag package passes
+// through intact. This payload is a shell command, where a leading "-" is
+// nearly always a mistake, and `tmux-web run --help` SHOULD print usage rather
+// than run `--help` in a pane. Each verb gets the behaviour its payload
+// deserves.
+//
+// ONE SHELL-COMMAND STRING, the owner's decision: the pane's shell parses it,
+// so `run 'make test 2>&1 | tee /tmp/out'` works. An argv after -- was the
+// alternative and was declined. A command of several lines is refused for the
+// reason type --enter refuses it: a Return inside it submits once per line.
+//
+// IF THE OPEN WORKED AND THE TYPE DID NOT, THE PANE STAYS, ITS ID IS PRINTED
+// AND THE MESSAGE SAYS WHICH HALF FAILED. Closing it would be a third
+// operation that can itself fail; saying nothing would leave an agent
+// believing nothing happened beside a pane that exists. With the id it can
+// peek and decide.
+func runRun(args []string, stdout, stderr io.Writer, getenv func(string) string, dial func(socket string) controlClient) int {
+	fset := newFlagSet("run", stderr, "tmux-web run (--split | --window) [--label TEXT] <command>")
+	split := fset.Bool("split", false, "put the new pane beside the calling pane, in the same window")
+	window := fset.Bool("window", false, "put the new pane in a new window of the session this pane is in")
+	label := fset.String("label", "", "a label for the new pane, shown by tmux-web panes and in the sidebar")
+	operands, code, ok := parseFlags(fset, args)
+	if !ok {
+		return code
+	}
+	if *split == *window {
+		return usageError(stderr, fset, "choose exactly one of --split (a pane beside this one) or --window (a new window in this session)")
+	}
+	if len(operands) != 1 {
+		return usageError(stderr, fset, "run takes exactly one command, as a single quoted shell string ('make test 2>&1 | tee /tmp/out'), got %d arguments", len(operands))
+	}
+	command := operands[0]
+	if command == "" {
+		return usageError(stderr, fset, "the command is empty, so there is nothing to run")
+	}
+	if n := len(command); n > maxTypeText {
+		return usageError(stderr, fset, "the command is %d bytes and the cap is %d: write it to a script file and run that -- this verb will not split text across several sends", n, maxTypeText)
+	}
+	if strings.ContainsAny(command, "\n\r") {
+		return usageError(stderr, fset, "the command has more than one line, and a Return inside it would submit once per line: join the steps with && or ;, or write a script and run that")
+	}
+	socket, caller, ok := tmuxTarget(getenv)
+	if !ok {
+		return notInsideTmux(stderr, "run")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), controlTimeout)
+	defer cancel()
+	c := dial(socket)
+
+	pane, err := openLabelled(ctx, c, stdout, *split, caller, "", *label)
+	if err != nil {
+		if pane == "" {
+			return controlFail(stderr, "run", fmt.Errorf("nothing was opened and nothing was run: %w", err))
+		}
+		return controlFail(stderr, "run", fmt.Errorf("%w; the command was NOT typed (tmux-web close %s to remove the pane)", err, pane))
+	}
+	if err := sendText(ctx, c, pane, command, true); err != nil {
+		return controlFail(stderr, "run", fmt.Errorf("the pane was opened (%s, left in place) but the command was not typed: %w -- see it with tmux-web peek %s", pane, err, pane))
 	}
 	return 0
 }

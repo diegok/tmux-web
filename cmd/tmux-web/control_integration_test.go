@@ -213,3 +213,34 @@ func TestTypeRunsACommandInARealShell(t *testing.T) {
 		t.Errorf("the caller's own pane shows the text:\n%s", screen)
 	}
 }
+
+// TestRunStartsSomethingThePanesListingThenShows pins the observation `run`
+// rests on: pane_current_command reports the CHILD the shell started, so after
+// a run the `panes` listing names the program and not the shell. That is what
+// makes panes useful afterwards.
+func TestRunStartsSomethingThePanesListingThenShows(t *testing.T) {
+	srv := testutil.NewServer(t)
+	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24", "/bin/sh")
+	srv.Run(t, "set-option", "-g", "default-shell", "/bin/sh")
+	caller := srv.Run(t, "display-message", "-p", "-t", "work:0", "#{pane_id}")
+
+	var out, errb bytes.Buffer
+	if code := runRun([]string{"--split", "sleep 30"}, &out, &errb, paneEnv(srv, caller), dialControl); code != 0 {
+		t.Fatalf("run exited %d: %s", code, errb.String())
+	}
+	pane := strings.TrimSuffix(out.String(), "\n")
+
+	var listing string
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(25 * time.Millisecond) {
+		out.Reset()
+		errb.Reset()
+		if code := runPanes(nil, &out, &errb, paneEnv(srv, caller), dialControl); code != 0 {
+			t.Fatalf("panes exited %d: %s", code, errb.String())
+		}
+		listing = out.String()
+		if strings.Contains(paneLineFor(t, listing, pane), "sleep") {
+			return
+		}
+	}
+	t.Fatalf("panes never showed %s running sleep:\n%s", pane, listing)
+}

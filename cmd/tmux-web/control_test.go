@@ -263,6 +263,7 @@ func TestEveryVerbSaysSoWhenItIsNotRunningInsideTmux(t *testing.T) {
 		{"open", []string{"--split"}, runOpen},
 		{"type", []string{"--text", "hi", "%2"}, runType},
 		{"close", []string{"%2"}, runClose},
+		{"run", []string{"--split", "make test"}, runRun},
 	} {
 		t.Run(v.name, func(t *testing.T) {
 			dialled := 0
@@ -1442,5 +1443,153 @@ func TestCloseIsNotLimitedToPanesTheAgentCreated(t *testing.T) {
 	}
 	if !reflect.DeepEqual(stub.calls, [][]string{{"kill-pane", "%7"}}) {
 		t.Errorf("calls = %v, want kill-pane of %%7", stub.calls)
+	}
+}
+
+// -- run --------------------------------------------------------------------
+
+// runRun_ runs `run` as the caller %1 and returns its exit code and streams.
+func runRun_(stub *controlStub, args ...string) (int, string, string) {
+	var out, errb bytes.Buffer
+	code := runRun(args, &out, &errb, callerEnv("%1"), stubDial(stub))
+	return code, out.String(), errb.String()
+}
+
+// The composition: the pane is made first, then the command goes into THAT
+// pane as keystrokes. The assertion that matters most is what is absent from
+// the creating call -- a command in new-window or split-window's argv would
+// make it the pane's process, with no shell to type into afterwards and a pane
+// that dies with it.
+func TestRunOpensAPaneAndTypesTheCommandIntoIt(t *testing.T) {
+	for _, mode := range []string{"--split", "--window"} {
+		t.Run(mode, func(t *testing.T) {
+			stub := windowStub(callerWithABrowserTab())
+			stub.newPane = "%42"
+			code, _, errs := runRun_(stub, mode, "make test")
+			if code != 0 || errs != "" {
+				t.Fatalf("exit %d, stderr %q", code, errs)
+			}
+			// The creating call is the first, and carries no command: the exact
+			// argv `open` makes, nothing more.
+			var want []string
+			if mode == "--split" {
+				want = []string{"split-pane", "%1", tmux.SplitRight}
+			} else {
+				want = []string{"new-window", "$0", "", "%1"}
+			}
+			if len(stub.calls) == 0 || !slices.Equal(stub.calls[0], want) {
+				t.Errorf("calls = %v, want the first to be %v, with no command in it", stub.calls, want)
+			}
+			for _, call := range stub.calls {
+				for _, a := range call {
+					if strings.Contains(a, "make test") {
+						t.Errorf("%v hands the command to a pane-creating call", call)
+					}
+				}
+			}
+			// Then typed, into the new pane and not the caller's, and submitted.
+			var sends [][]string
+			for _, r := range stub.runs {
+				if r[0] == "send-keys" {
+					sends = append(sends, r)
+				}
+			}
+			wantSends := [][]string{
+				{"send-keys", "-l", "-t", "%42", "--", "make test"},
+				{"send-keys", "-t", "%42", "Enter"},
+			}
+			if len(sends) != 2 || !slices.Equal(sends[0], wantSends[0]) || !slices.Equal(sends[1], wantSends[1]) {
+				t.Errorf("send-keys = %v, want %v", sends, wantSends)
+			}
+		})
+	}
+}
+
+func TestRunPrintsThePaneIDSoTheAgentCanWatchIt(t *testing.T) {
+	stub := &controlStub{rows: twoSessions(), newPane: "%42"}
+	code, out, _ := runRun_(stub, "--split", "make test")
+	if code != 0 || out != "%42\n" {
+		t.Errorf("exit %d, stdout %q, want 0 and the pane id alone", code, out)
+	}
+}
+
+// A type that fails leaves the pane in place: closing it would be a third
+// operation that can itself fail, and the agent can peek the pane and decide.
+// The id is printed regardless, and the message says which half it was.
+func TestRunKeepsThePaneAndSaysWhichHalfFailedWhenTypeFails(t *testing.T) {
+	stub := &controlStub{rows: twoSessions(), newPane: "%42"}
+	var out, errb bytes.Buffer
+	code := runRun([]string{"--split", "make test"}, &out, &errb,
+		callerEnv("%1"), func(string) controlClient { return &deadPane{stub} })
+	if code != 1 {
+		t.Errorf("exit %d, want 1", code)
+	}
+	if out.String() != "%42\n" {
+		t.Errorf("stdout = %q, want the pane id even though the type failed", out.String())
+	}
+	for _, want := range []string{"%42", "was opened", "not typed", "peek"} {
+		if !strings.Contains(errb.String(), want) {
+			t.Errorf("stderr = %q, want %q in it", errb.String(), want)
+		}
+	}
+	for _, c := range stub.calls {
+		if c[0] == "kill-pane" {
+			t.Errorf("run closed the pane it opened: %v", c)
+		}
+	}
+}
+
+func TestRunSaysNothingWasRunWhenTheOpenFails(t *testing.T) {
+	stub := &controlStub{rows: twoSessions(), err: errors.New("no server")}
+	code, out, errs := runRun_(stub, "--split", "make test")
+	if code != 1 || out != "" || !strings.Contains(errs, "nothing was opened") {
+		t.Errorf("exit %d, stdout %q, stderr %q", code, out, errs)
+	}
+	for _, r := range stub.runs {
+		if r[0] == "send-keys" {
+			t.Errorf("typed %v although nothing was opened", r)
+		}
+	}
+}
+
+func TestRunTakesTheCommandAsOneShellString(t *testing.T) {
+	cmd := "make test 2>&1 | tee /tmp/out && printf a && printf b"
+	stub := &controlStub{rows: twoSessions(), newPane: "%42"}
+	code, _, errs := runRun_(stub, "--split", cmd)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+	var text []string
+	for _, r := range stub.runs {
+		if r[0] == "send-keys" && r[1] == "-l" {
+			text = r
+		}
+	}
+	if len(text) == 0 || text[len(text)-1] != cmd {
+		t.Errorf("typed %v, want the whole string as the single final argument", text)
+	}
+}
+
+func TestRunRefusesAMalformedCommandLine(t *testing.T) {
+	for name, args := range map[string][]string{
+		"no mode":       {"make test"},
+		"both modes":    {"--split", "--window", "make test"},
+		"no command":    {"--split"},
+		"empty command": {"--split", ""},
+		"two arguments": {"--split", "make", "test"},
+		"multi-line":    {"--split", "a\nb"},
+		"over the cap":  {"--split", strings.Repeat("x", maxTypeText+1)},
+		"help":          {"--split", "--help"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := &controlStub{rows: twoSessions(), newPane: "%42"}
+			code, out, _ := runRun_(stub, args...)
+			if code != 2 && !(name == "help" && code == 0) {
+				t.Errorf("exit %d, want 2", code)
+			}
+			if out != "" || len(stub.calls) != 0 || len(stub.runs) != 0 {
+				t.Errorf("stdout %q, calls %v, runs %v: nothing may happen", out, stub.calls, stub.runs)
+			}
+		})
 	}
 }

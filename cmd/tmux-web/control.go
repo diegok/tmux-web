@@ -849,7 +849,11 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 // string-valued --window would make `run --window 'make test'` name a window
 // and leave nothing to run. It needs no name: automatic-rename is on by
 // default, so the window shows the running command in the owner's status bar
-// (he sees `make` while `make test` runs), and --label is the stable
+// (he sees `make` while `make test` runs). MEASURED on tmux 3.7b started with
+// -f /dev/null (defaults, no user config): automatic-rename was on; with
+// `sleep 4` running, window_name and pane_current_command were both `sleep`,
+// and both were back to `zsh` when it ended. --label is the stable
+// human-facing name for the rest, and --label is the stable
 // human-facing name that panes and the sidebar show. An agent that wants a
 // pinned window name does `open --window NAME` and then `type` into the pane.
 //

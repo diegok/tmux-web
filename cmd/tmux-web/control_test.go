@@ -2001,3 +2001,72 @@ func skillCommands(t *testing.T, skill string) map[string]bool {
 	}
 	return found
 }
+
+// The nine verbs never reach the daemon, and this pins it from both ends.
+//
+// IMPORTS, PARSED. There is no HTTP client in these verbs to inject, so a
+// "fails if called" stub would assert nothing. What can be said is that the
+// file has no way to build one: it imports neither net/http, nor internal/auth
+// (the daemon's credentials), nor internal/front (its routes and the poll loop
+// the browser rides). Parsed with go/parser and not grepped, so a comment or a
+// string that mentions them cannot satisfy or break it.
+func TestControlImportsNothingThatReachesTheDaemon(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "control.go", nil, parser.ImportsOnly)
+	if err != nil {
+		t.Fatalf("parsing control.go: %v", err)
+	}
+	forbidden := []string{
+		"net/http",
+		"github.com/diegok/tmux-web/internal/auth",
+		"github.com/diegok/tmux-web/internal/front",
+	}
+	if len(f.Imports) == 0 {
+		t.Fatal("control.go parsed with no imports; this test would pass on nothing")
+	}
+	for _, imp := range f.Imports {
+		path, err := strconv.Unquote(imp.Path.Value)
+		if err != nil {
+			t.Fatalf("unquoting import %s: %v", imp.Path.Value, err)
+		}
+		if slices.Contains(forbidden, path) {
+			t.Errorf("control.go imports %s: these verbs fork tmux and never talk to the daemon, so they work with none running", path)
+		}
+	}
+}
+
+// ... and the other end: every verb, driven, dials the socket from $TMUX and
+// nothing else. The daemon's address, a different socket, an empty one -- any
+// of them fails the test.
+func TestNoVerbDialsAnythingButTheCallersSocket(t *testing.T) {
+	const want = "/tmp/sock" // callerEnv's $TMUX is "/tmp/sock,7,0"
+	for _, v := range []struct {
+		name string
+		args []string
+		run  controlVerb
+	}{
+		{"panes", nil, runPanes},
+		{"state", []string{"%2"}, runState},
+		{"peek", []string{"%2"}, runPeek},
+		{"open", []string{"--split"}, runOpen},
+		{"type", []string{"--text", "hi", "%2"}, runType},
+		{"close", []string{"%2"}, runClose},
+		{"run", []string{"--split", "make test"}, runRun},
+	} {
+		t.Run(v.name, func(t *testing.T) {
+			dialled := 0
+			stub := &controlStub{rows: twoSessions()}
+			var out, errb bytes.Buffer
+			v.run(v.args, &out, &errb, callerEnv("%1"), func(socket string) controlClient {
+				dialled++
+				if socket != want {
+					t.Errorf("dialled %q, want only the socket from $TMUX (%q)", socket, want)
+				}
+				return stub
+			})
+			if dialled == 0 {
+				t.Error("never dialled; the test is not exercising the verb")
+			}
+		})
+	}
+}

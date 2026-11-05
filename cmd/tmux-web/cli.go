@@ -25,19 +25,21 @@ import (
 )
 
 // The CLI is the half of the auth chain that runs as a person. Everything but
-// `serve` and `report` is a client of the admin socket, and the socket is the
-// whole authorization argument: a remote browser carries no OS identity, a
-// local unix socket does, and SO_PEERCRED turns "can you run this command as me
-// on this box" into the proof that mints a credential. So these subcommands
-// take no password, no key, and no --user: being able to open the socket *is*
-// the credential.
+// `serve`, `report` and the verbs an agent calls from inside its own pane is a
+// client of the admin socket, and the socket is the whole authorization
+// argument: a remote browser carries no OS identity, a local unix socket does,
+// and SO_PEERCRED turns "can you run this command as me on this box" into the
+// proof that mints a credential. So these subcommands take no password, no key,
+// and no --user: being able to open the socket *is* the credential.
 //
-// `report` is the exception, and deliberately so. It talks to tmux and never to
-// the daemon: the state it writes lives in a pane option, which is why it
-// survives a daemon restart and why an agent reporting into a machine with no
-// tmux-web running costs nothing. Its authorization is the same one tmux itself
-// uses -- whoever can drive the tmux socket can already set the option by hand.
-// It also breaks the exit-code convention below; see cmdReport for why.
+// `report` was the first exception, and deliberately so; `panes` and the agent
+// verbs beside it in control.go are more of the same one. They talk to tmux and
+// never to the daemon: the state report writes lives in a pane option, which is
+// why it survives a daemon restart and why an agent reporting into a machine
+// with no tmux-web running costs nothing. Their authorization is the same one
+// tmux itself uses -- whoever can drive the tmux socket can already set the
+// option, or list the panes, by hand. `report` alone also breaks the exit-code
+// convention below (see cmdReport for why); the agent verbs keep it.
 //
 // Stream discipline, uniform across subcommands: stdout carries the answer and
 // nothing else, stderr carries commentary. `enroll` therefore prints the bare
@@ -64,6 +66,7 @@ Usage:
   tmux-web devices
   tmux-web revoke  <device-id>
   tmux-web report  --state working|blocked|idle [--text TEXT]
+  tmux-web panes   [--all]
   tmux-web install-integration --agent claude|opencode|pi [dir] [--global] [--yes] [--remove]
 
 serve runs the daemon. enroll, devices and revoke talk to its admin socket,
@@ -73,6 +76,14 @@ authorization.
 report is different: an agent's integration runs it inside its own tmux pane to
 say what it is doing, and it writes one tmux pane option. It needs no daemon,
 and it always exits 0 so that a reporting failure can never stop an agent.
+
+panes is for an agent working inside a pane: it lists the panes of the session
+it is called from, or every session with --all, one record per line and fields
+separated by two spaces -- pane id, session:window.pane, command, agent, state,
+label, title. A verb takes the pane id; the session:window.pane is for a human
+to read. The state column is only the one a pane's own report gives away for
+free, so a "-" there means "ask tmux-web state <pane>", not "nothing is
+happening".
 
 install-integration writes the integration that calls report into a project, and
 it is a command rather than a button in the web UI on purpose: writing
@@ -108,6 +119,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdRevoke(rest, stdout, stderr)
 	case "report":
 		return cmdReport(rest, stdout, stderr)
+	case "panes":
+		return cmdPanes(rest, stdout, stderr)
 	case "install-integration":
 		return cmdInstall(rest, stdout, stderr)
 	case "help", "-h", "-help", "--help":

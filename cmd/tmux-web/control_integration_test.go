@@ -28,11 +28,19 @@ import (
 //     scroll back through, and that rests on tmux's remain-on-exit default
 //     rather than on anything this code does. A stub cannot run a command.
 
-// TestOpenLeavesTheOwnersViewWhereItWas is the -d assertion.
+// TestOpenLeavesTheOwnersViewWhereItWas is the -d assertion, for BOTH modes.
 //
-// A session's current window is server state, so it moves whether or not a
-// client is attached -- which is why this works on a headless test server and
-// why dropping the flag would be felt immediately by an owner who is attached.
+// A session's current window and a window's active pane are both server state,
+// so they move whether or not a client is attached -- which is why this works
+// on a headless test server and why dropping the flag would be felt
+// immediately by an owner who is attached.
+//
+// Both modes, because the flag is passed twice and nothing else pins either
+// argv: internal/tmux has no test naming the Detached verbs, and the stub seam
+// cannot see a flag at all. A test for the window mode alone leaves a
+// SplitPaneDetached that quietly stopped passing -d green everywhere -- and
+// --split is the mode in the `$(tmux-web open --split)` contract and the one
+// `run` is built on.
 func TestOpenLeavesTheOwnersViewWhereItWas(t *testing.T) {
 	srv := testutil.NewServer(t)
 	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24")
@@ -44,9 +52,10 @@ func TestOpenLeavesTheOwnersViewWhereItWas(t *testing.T) {
 		t.Fatalf("setup: the session's current window is %q, want 0", before)
 	}
 
+	// The window mode: the session's current window must not move.
 	var out, errb bytes.Buffer
 	if code := runOpen([]string{"--window", "api"}, &out, &errb, paneEnv(srv, caller), dialControl); code != 0 {
-		t.Fatalf("open exited %d: %s", code, errb.String())
+		t.Fatalf("open --window exited %d: %s", code, errb.String())
 	}
 	pane := strings.TrimSuffix(out.String(), "\n")
 
@@ -57,7 +66,34 @@ func TestOpenLeavesTheOwnersViewWhereItWas(t *testing.T) {
 		t.Fatalf("pane %q is in window %q, want the new window \"api\"", pane, got)
 	}
 	if got := srv.Run(t, "display-message", "-p", "-t", "work", "#{window_index}"); got != "0" {
-		t.Errorf("the session's current window moved from 0 to %s: `open` must pass -d, or every pane an agent opens yanks the owner's terminal off whatever he was reading", got)
+		t.Errorf("the session's current window moved from 0 to %s: `open --window` must pass -d, or every window an agent opens yanks the owner's terminal off whatever he was reading", got)
+	}
+
+	// The split mode: the ACTIVE PANE must not move either. Same flag, a
+	// different tmux command, and this is the finer-grained half of the
+	// assertion -- a split cannot change which window is current, so the window
+	// index above would stay 0 for a split that stole the owner's cursor.
+	//
+	// The caller's pane is the session's active one, which is both what a real
+	// caller's pane usually is and what makes the assertion mean anything:
+	// splitting a pane that was not active could not take the cursor from it.
+	if active := srv.Run(t, "display-message", "-p", "-t", "work", "#{pane_id}"); active != caller {
+		t.Fatalf("setup: the session's active pane is %q, want the caller %q", active, caller)
+	}
+	out.Reset()
+	errb.Reset()
+	if code := runOpen([]string{"--split"}, &out, &errb, paneEnv(srv, caller), dialControl); code != 0 {
+		t.Fatalf("open --split exited %d: %s", code, errb.String())
+	}
+	split := strings.TrimSuffix(out.String(), "\n")
+
+	// The pane was really created, and in the caller's own window -- the same
+	// did-anything-happen half the window mode gets above.
+	if got := srv.Run(t, "display-message", "-p", "-t", split, "#{window_index}"); got != "0" {
+		t.Fatalf("the new pane %q is in window %q, want the caller's window 0", split, got)
+	}
+	if got := srv.Run(t, "display-message", "-p", "-t", "work", "#{pane_id}"); got != caller {
+		t.Errorf("the session's active pane moved from the caller %s to %s: `open --split` must pass -d, or a pane opened beside the owner's work steals his cursor into it", caller, got)
 	}
 }
 

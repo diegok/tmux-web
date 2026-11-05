@@ -443,12 +443,21 @@ func openPane(ctx context.Context, c controlClient, split bool, caller, name str
 	// holding the pane -- it says deciding whether that is good enough is the
 	// caller's job, and this is that decision.
 	//
-	// Only the window mode asks. A split adds a pane to the window the caller
-	// is already in, which a grouped session shares with the owner's own, so
-	// there is nothing there to outlive the tab -- and the question costs a
-	// fork that the split mode does not otherwise make.
+	// ONLY THE WINDOW MODE ASKS, and not because a split is safe from the tab.
+	// It is not: in exactly the case refused here -- an app-owned session as
+	// the last member of its group -- that session is the only one linking the
+	// caller's own window, so destroy-unattached takes the window and every
+	// pane in it, a new split included.
+	//
+	// What makes the question pointless for a split is that the new pane SHARES
+	// THE CALLER'S OWN FATE. It lands in the caller's window, so if that window
+	// goes, the agent that asked for the pane goes with it and there is nobody
+	// left to have been misled. A window is somewhere else: it dies while the
+	// agent lives on, holding an id for a pane that no longer exists. That
+	// asymmetry is the whole of why one mode checks and the other cannot need
+	// to -- the saved fork is a consequence, not the reason.
 	if app, owned := appSessionName(rows, session); owned {
-		return "", fmt.Errorf("pane %s is only in session %s (%s), which belongs to a browser tab: it is torn down when that tab closes and a window opened in it would die with it -- use --split, which makes a pane in the window this one is already in",
+		return "", fmt.Errorf("pane %s is only in session %s (%s), which belongs to a browser tab: it is torn down when that tab closes and a window opened in it would die with it while this pane carried on -- use --split, which puts the pane in this pane's own window, where it lives and dies with the pane asking for it",
 			caller, session, app)
 	}
 	// fromPane is the caller's pane, which is what gives the new window the

@@ -23,6 +23,13 @@ import (
 //   - Every name the browser supplies is validated. That is four verbs, not
 //     one: NewSession, NewWindow, RenameSession and RenameWindow.
 //
+// Two of them have a DETACHED sibling -- NewWindowDetached, SplitPaneDetached
+// -- which no browser request reaches. They exist for `tmux-web open`, where
+// the caller is an agent making a pane for the owner to look at when he chooses
+// to, and tmux's default of making the new thing current is the wrong one. Each
+// pair shares one argv builder, so the -d flag is the only difference there can
+// be between a browser's verb and the CLI's.
+//
 // Working directories are resolved here, from the pane tmux already knows
 // about, and never taken from the browser. The one path that does come from the
 // browser -- NewSession's optional path, typed by the owner -- is stat'd first,
@@ -86,7 +93,37 @@ func (c *Client) NewSession(ctx context.Context, name, path string) (string, err
 // command argument here would put "run this string for me" on the verb they
 // use. Running something in a new window is ResumeAgent below, which takes a
 // lookup key rather than a command precisely so the two cannot be confused.
+//
+// The new window becomes the session's current one, which is tmux's own
+// default and what the browser's dialog means by opening a window. The verb
+// that does not move anyone's view is NewWindowDetached.
 func (c *Client) NewWindow(ctx context.Context, sessionID, name, fromPane string) (string, error) {
+	return c.newWindow(ctx, sessionID, name, fromPane, false)
+}
+
+// NewWindowDetached is NewWindow with -d: the window is created and the
+// session's current window does not change.
+//
+// A SIBLING RATHER THAN A PARAMETER ON NewWindow. internal/front declares a
+// Manager interface holding NewWindow's exact signature and calls it "the
+// complete list of what a browser request can make this daemon do to the tmux
+// server"; in Go a variadic option is part of a signature, so giving NewWindow
+// one would change the browser's surface in order to serve a CLI verb. The two
+// share newWindow below, so the flag is the only difference there can be
+// between them, and the CLI-only verb being visibly CLI-only is the point.
+//
+// WHY THE FLAG IS NOT OPTIONAL FOR ITS CALLER. `tmux-web open` is an agent
+// creating a window for the owner to look at WHEN HE CHOOSES TO. Without -d
+// tmux makes the new window current, so an agent opening a pane would pull the
+// owner's terminal off whatever he was reading -- reached by a default, which
+// is why the flag is in a method name rather than left to a caller to remember.
+func (c *Client) NewWindowDetached(ctx context.Context, sessionID, name, fromPane string) (string, error) {
+	return c.newWindow(ctx, sessionID, name, fromPane, true)
+}
+
+// newWindow is the one argv both window verbs build. detached is the only
+// difference between them, so neither can drift from the other.
+func (c *Client) newWindow(ctx context.Context, sessionID, name, fromPane string, detached bool) (string, error) {
 	if err := ValidateSessionID(sessionID); err != nil {
 		return "", fmt.Errorf("new window: %w", err)
 	}
@@ -95,7 +132,11 @@ func (c *Client) NewWindow(ctx context.Context, sessionID, name, fromPane string
 			return "", fmt.Errorf("new window: %w", err)
 		}
 	}
-	args := []string{"new-window", "-t", sessionID, "-P", "-F", "#{window_id}"}
+	args := []string{"new-window"}
+	if detached {
+		args = append(args, "-d")
+	}
+	args = append(args, "-t", sessionID, "-P", "-F", "#{window_id}")
 	if fromPane != "" {
 		dir, err := c.panePath(ctx, fromPane)
 		if err != nil {
@@ -153,8 +194,20 @@ func (c *Client) ResumeAgent(ctx context.Context, sessionID, fromPane, agent str
 }
 
 // SplitPane splits a pane and returns the new pane's id. The new pane opens in
-// the source pane's working directory.
+// the source pane's working directory, and becomes the active one.
 func (c *Client) SplitPane(ctx context.Context, paneID, direction string) (string, error) {
+	return c.splitPane(ctx, paneID, direction, false)
+}
+
+// SplitPaneDetached is SplitPane with -d: the pane is created and the active
+// pane does not change. A sibling for the same reason NewWindowDetached is one
+// -- see there.
+func (c *Client) SplitPaneDetached(ctx context.Context, paneID, direction string) (string, error) {
+	return c.splitPane(ctx, paneID, direction, true)
+}
+
+// splitPane is the one argv both split verbs build.
+func (c *Client) splitPane(ctx context.Context, paneID, direction string, detached bool) (string, error) {
 	if err := ValidatePaneID(paneID); err != nil {
 		return "", fmt.Errorf("split pane: %w", err)
 	}
@@ -172,7 +225,12 @@ func (c *Client) SplitPane(ctx context.Context, paneID, direction string) (strin
 	if err != nil {
 		return "", fmt.Errorf("split pane: %w", err)
 	}
-	return c.Run(ctx, "split-window", flag, "-t", paneID, "-c", dir, "-P", "-F", "#{pane_id}")
+	args := []string{"split-window", flag}
+	if detached {
+		args = append(args, "-d")
+	}
+	args = append(args, "-t", paneID, "-c", dir, "-P", "-F", "#{pane_id}")
+	return c.Run(ctx, args...)
 }
 
 // RenameSession renames the session with this id.

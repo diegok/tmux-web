@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -258,6 +259,7 @@ func TestEveryVerbSaysSoWhenItIsNotRunningInsideTmux(t *testing.T) {
 		{"panes", nil, runPanes},
 		{"state", []string{"%2"}, runState},
 		{"peek", []string{"%2"}, runPeek},
+		{"open", []string{"--split"}, runOpen},
 	} {
 		t.Run(v.name, func(t *testing.T) {
 			dialled := 0
@@ -380,9 +382,14 @@ type controlStub struct {
 	// was asked for, so a test can tell the scrollback read from the bare one.
 	truncated  bool
 	rangeLines []int
-	// newPane is what a window or a split answers with.
-	newPane string
-	err     error
+	// newPane is what a split answers with, and what a window's pane resolves
+	// to through windowPanes. newWindow is the WINDOW id a new window answers
+	// with -- a different kind of id, which is the whole reason `open --window`
+	// needs a second read before it can print anything.
+	newPane     string
+	newWindow   string
+	windowPanes map[string]string
+	err         error
 
 	snapshots int
 	runs      [][]string
@@ -407,6 +414,13 @@ func (s *controlStub) Run(_ context.Context, args ...string) (string, error) {
 	if len(args) > 0 && args[0] == "list-panes" {
 		return renderReportBlock(s.rows, s.reports), nil
 	}
+	// The window-to-pane read `open --window` makes. Answered from a map keyed
+	// by the target, so a read that lost its -t or carried the wrong id comes
+	// back empty -- which is exactly what tmux does: display-message prints an
+	// empty expansion and exits 0 for a target it cannot find.
+	if len(args) > 0 && args[0] == "display-message" {
+		return s.windowPanes[argAfter(args, "-t")], nil
+	}
 	// One pane's own option, which is what LiveState reads. An unset option is
 	// an error, as tmux makes it: exit 1, and the ordinary shape of a pane with
 	// no integration installed.
@@ -430,12 +444,15 @@ func (s *controlStub) CaptureRange(_ context.Context, paneID string, lines int) 
 	return s.screens[paneID], s.truncated, s.err
 }
 
-func (s *controlStub) NewWindow(_ context.Context, sessionID, name, fromPane string) (string, error) {
+// The two detached verbs, which are the only ones the CLI has: whether -d is on
+// the command line is invisible through this seam, and the integration test is
+// where that is established.
+func (s *controlStub) NewWindowDetached(_ context.Context, sessionID, name, fromPane string) (string, error) {
 	s.calls = append(s.calls, []string{"new-window", sessionID, name, fromPane})
-	return s.newPane, s.err
+	return s.newWindow, s.err
 }
 
-func (s *controlStub) SplitPane(_ context.Context, paneID, direction string) (string, error) {
+func (s *controlStub) SplitPaneDetached(_ context.Context, paneID, direction string) (string, error) {
 	s.calls = append(s.calls, []string{"split-pane", paneID, direction})
 	return s.newPane, s.err
 }
@@ -448,6 +465,16 @@ func (s *controlStub) SetLabel(_ context.Context, paneID, label string) error {
 func (s *controlStub) KillPane(_ context.Context, paneID string) error {
 	s.calls = append(s.calls, []string{"kill-pane", paneID})
 	return s.err
+}
+
+// argAfter returns the value following flag in an argv, or "" if it is absent.
+func argAfter(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // renderReportBlock is what tmux prints for the report read: one line per pane,
@@ -772,5 +799,214 @@ func TestPeekRefusesALinesCountThatIsNotPositive(t *testing.T) {
 		if code, _, _ := peekRun(stub, "--lines", n, "%1"); code != 2 || stub.captures != 0 {
 			t.Errorf("--lines %s: exit %d, %d captures; want 2 and none", n, code, stub.captures)
 		}
+	}
+}
+
+// -- open -------------------------------------------------------------------
+
+// openRun runs `open` as the caller %1 and returns its exit code and streams.
+func openRun(stub *controlStub, args ...string) (int, string, string) {
+	var out, errb bytes.Buffer
+	code := runOpen(args, &out, &errb, callerEnv("%1"), stubDial(stub))
+	return code, out.String(), errb.String()
+}
+
+// callerWithABrowserTab is twoSessions plus the row an open browser tab adds:
+// the caller's own pane, reported a second time in a grouped app-owned session.
+//
+// It is the fixture `open --window` has to be right about. Both rows name the
+// same physical pane and only one of them is a usable answer -- a _web-* session
+// carries destroy-unattached, so a window created there dies when the tab
+// closes. A snapshot holding only the owner's row cannot tell a resolution that
+// prefers correctly from one that returns whichever row it saw first.
+func callerWithABrowserTab() []tmux.Row {
+	tab := paneFixture("$9", "_web-ab12cd", "%1", 0, 0, "claude")
+	tab.AppOwned = true
+	return append(twoSessions(), tab)
+}
+
+// windowStub is a stub whose new window is @7 and whose @7 holds one pane, %42:
+// the shape `open --window` reads back through.
+func windowStub(rows []tmux.Row) *controlStub {
+	return &controlStub{rows: rows, newWindow: "@7", windowPanes: map[string]string{"@7": "%42"}}
+}
+
+func TestOpenWithAWindowNameUsesTheCallersSession(t *testing.T) {
+	stub := windowStub(callerWithABrowserTab())
+	code, out, errs := openRun(stub, "--window", "api")
+	if code != 0 || errs != "" {
+		t.Fatalf("exit %d, stderr %q", code, errs)
+	}
+	if out != "%42\n" {
+		t.Errorf("stdout = %q, want the new pane id", out)
+	}
+	// $0 is the session the owner keeps; $9 is the browser tab's. The name is
+	// passed through, and fromPane is the CALLER's pane -- that is what gives
+	// the new window the directory the agent is working in.
+	want := []string{"new-window", "$0", "api", "%1"}
+	if len(stub.calls) == 0 || !slices.Equal(stub.calls[0], want) {
+		t.Errorf("calls = %v, want the first to be %v", stub.calls, want)
+	}
+}
+
+func TestOpenWithSplitSplitsTheCallersOwnPane(t *testing.T) {
+	stub := &controlStub{rows: twoSessions(), newPane: "%42"}
+	code, out, errs := openRun(stub, "--split")
+	if code != 0 || errs != "" {
+		t.Fatalf("exit %d, stderr %q", code, errs)
+	}
+	if out != "%42\n" {
+		t.Errorf("stdout = %q, want the new pane id", out)
+	}
+	// %1 is $TMUX_PANE. tmux's own default target is whatever pane is current,
+	// which in a window the owner is working in is somebody else's, so the
+	// caller's id has to be passed explicitly.
+	want := []string{"split-pane", "%1", tmux.SplitRight}
+	if len(stub.calls) != 1 || !slices.Equal(stub.calls[0], want) {
+		t.Errorf("calls = %v, want exactly %v", stub.calls, want)
+	}
+	// The caller's pane comes from the environment, so a split needs nothing
+	// read off the server: no snapshot, and the session is never resolved.
+	if stub.snapshots != 0 {
+		t.Errorf("%d snapshots for a split, want none: $TMUX_PANE is the target", stub.snapshots)
+	}
+}
+
+func TestOpenPrintsNothingButThePaneID(t *testing.T) {
+	t.Run("split", func(t *testing.T) {
+		stub := &controlStub{rows: twoSessions(), newPane: "%42"}
+		code, out, errs := openRun(stub, "--split")
+		if code != 0 || out != "%42\n" || errs != "" {
+			t.Errorf("exit %d, stdout %q, stderr %q; want just the pane id on stdout", code, out, errs)
+		}
+	})
+	t.Run("window", func(t *testing.T) {
+		// A new window answers with a WINDOW id, and @7 is not a pane: a verb
+		// handed it would target the window containing some other pane, or
+		// nothing at all.
+		stub := windowStub(callerWithABrowserTab())
+		code, out, errs := openRun(stub, "--window", "api")
+		if code != 0 || errs != "" {
+			t.Fatalf("exit %d, stderr %q", code, errs)
+		}
+		if out != "%42\n" {
+			t.Errorf("stdout = %q, want %q -- the window's pane, resolved, not the window id %q",
+				out, "%42\n", stub.newWindow)
+		}
+		// Resolved by asking about the window that was just created, which is
+		// the only id that answers with a pane this verb made.
+		var reads [][]string
+		for _, r := range stub.runs {
+			if len(r) > 0 && r[0] == "display-message" {
+				reads = append(reads, r)
+			}
+		}
+		if len(reads) != 1 {
+			t.Fatalf("display-message reads = %v, want exactly one", reads)
+		}
+		if argAfter(reads[0], "-t") != "@7" {
+			t.Errorf("display-message target = %q, want the new window @7: %v", argAfter(reads[0], "-t"), reads[0])
+		}
+	})
+}
+
+func TestOpenAppliesALabel(t *testing.T) {
+	stub := &controlStub{rows: twoSessions(), newPane: "%42"}
+	code, out, errs := openRun(stub, "--split", "--label", "web server")
+	if code != 0 || errs != "" {
+		t.Fatalf("exit %d, stderr %q", code, errs)
+	}
+	if out != "%42\n" {
+		t.Errorf("stdout = %q, want the pane id and nothing else -- the label is not printed", out)
+	}
+	// On the NEW pane, never on the caller's: %1 is the agent's own pane and
+	// relabelling it would rename the row the owner uses to find the agent.
+	want := []string{"set-label", "%42", "web server"}
+	if len(stub.calls) != 2 || !slices.Equal(stub.calls[1], want) {
+		t.Errorf("calls = %v, want %v after the split", stub.calls, want)
+	}
+}
+
+// failingLabel opens panes and then cannot label them, which `err` alone
+// cannot do: it would fail the split as well, and the question here is what
+// happens to a pane that exists.
+type failingLabel struct{ *controlStub }
+
+func (f *failingLabel) SetLabel(context.Context, string, string) error {
+	return errors.New("set label: can't find pane")
+}
+
+// The pane id reaches stdout even though the verb exits 1, and that is the
+// decision being pinned: the pane is already open, and a caller that was not
+// given its id has leaked a pane it cannot name, kill or look at. `state`
+// prints its word before reporting a failed read for the same reason.
+func TestOpenPrintsThePaneIDEvenWhenTheLabelFails(t *testing.T) {
+	stub := &controlStub{rows: twoSessions(), newPane: "%42"}
+	var out, errb bytes.Buffer
+	code := runOpen([]string{"--split", "--label", "web server"}, &out, &errb,
+		callerEnv("%1"), func(string) controlClient { return &failingLabel{stub} })
+	if code != 1 {
+		t.Errorf("exit %d, want 1: the label was asked for and not set", code)
+	}
+	if out.String() != "%42\n" {
+		t.Errorf("stdout = %q, want the pane id: it exists whether or not it got its label", out.String())
+	}
+	if !strings.Contains(errb.String(), "%42") {
+		t.Errorf("stderr = %q, want the pane named so the caller knows what was left behind", errb.String())
+	}
+}
+
+func TestOpenRefusesAnAppOwnedSession(t *testing.T) {
+	// The caller's ONLY row is the browser tab's session, which is what a
+	// snapshot looks like once the owner has killed the base session with a tab
+	// still open: the group survives with app-owned members only, so
+	// CallerSession answers one -- it says deciding is the caller's job.
+	only := paneFixture("$9", "_web-ab12cd", "%1", 0, 0, "claude")
+	only.AppOwned = true
+	stub := windowStub([]tmux.Row{only})
+	code, out, errs := openRun(stub, "--window", "api")
+	if code != 1 {
+		t.Errorf("exit %d, want 1: the verb could not do its job", code)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want nothing: no pane was opened", out)
+	}
+	for _, want := range []string{"$9", "--split"} {
+		if !strings.Contains(errs, want) {
+			t.Errorf("stderr = %q, want %q in it", errs, want)
+		}
+	}
+	// Refused before the server was asked to do anything, not undone after.
+	if len(stub.calls) != 0 {
+		t.Errorf("calls = %v, want none", stub.calls)
+	}
+}
+
+func TestOpenRefusesAMalformedCommandLine(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"no mode", nil},
+		{"both modes", []string{"--split", "--window"}},
+		{"a name for a split", []string{"--split", "api"}},
+		{"two names", []string{"--window", "api", "www"}},
+		// Refused here rather than by tmux, so that a name the server would
+		// reject costs no fork and exits 2 like the command-line error it is.
+		{"an unusable window name", []string{"--window", "a:b"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := windowStub(twoSessions())
+			code, out, _ := openRun(stub, tc.args...)
+			if code != 2 {
+				t.Errorf("exit %d, want 2: a malformed command line", code)
+			}
+			if out != "" {
+				t.Errorf("stdout = %q, want nothing", out)
+			}
+			if len(stub.calls) != 0 || stub.snapshots != 0 {
+				t.Errorf("calls = %v and %d snapshots; nothing may be touched", stub.calls, stub.snapshots)
+			}
+		})
 	}
 }

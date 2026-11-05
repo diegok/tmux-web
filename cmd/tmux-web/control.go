@@ -46,8 +46,12 @@ type controlClient interface {
 	Snapshot(ctx context.Context) ([]tmux.Row, error)
 	Capture(ctx context.Context, paneID string) (string, error)
 	CaptureRange(ctx context.Context, paneID string, lines int) (string, bool, error)
-	NewWindow(ctx context.Context, sessionID, name, fromPane string) (string, error)
-	SplitPane(ctx context.Context, paneID, direction string) (string, error)
+	// The DETACHED window and split verbs, and not their siblings: every pane
+	// these subcommands create is created without moving the owner's view, so
+	// the attached pair -- which is what the browser's dialogs drive -- is not
+	// on this interface at all.
+	NewWindowDetached(ctx context.Context, sessionID, name, fromPane string) (string, error)
+	SplitPaneDetached(ctx context.Context, paneID, direction string) (string, error)
 	SetLabel(ctx context.Context, paneID, label string) error
 	KillPane(ctx context.Context, paneID string) error
 }
@@ -323,6 +327,175 @@ func runPeek(args []string, stdout, stderr io.Writer, getenv func(string) string
 // escape sequence in it from being replayed on the caller's terminal; the cap
 // is generous because a dialog's wrapped line is the width of a screen.
 const maxQuestion = 500
+
+func cmdOpen(args []string, stdout, stderr io.Writer) int {
+	return runOpen(args, stdout, stderr, os.Getenv, dialControl)
+}
+
+// runOpen makes an empty pane beside the agent's work and prints its id.
+//
+// AN EMPTY SHELL, AND NOTHING IS RUN IN IT. That is what the two tmux verbs
+// underneath are for -- "new window means an empty shell to all four of its
+// callers" (internal/tmux/manage.go) -- and it is what makes this verb worth
+// having: a command the owner can see, scroll back through and re-run is a
+// command in a pane, where a command hidden in a background task is a thing he
+// is told about afterwards. Nothing here hands tmux a command, and nothing
+// later may: `run` is this verb followed by typing the command into the shell
+// it created.
+//
+// BOTH MODES CREATE THE PANE DETACHED, which is why they call the Detached
+// siblings. tmux's default is to make the new window or pane current, so the
+// plain verbs would move the owner's terminal off whatever he was reading the
+// moment another agent opened something -- a default, not a choice, and the
+// first thing this design set out not to do. The flag is asserted in
+// control_integration_test.go, which is the only place it can be seen.
+//
+// stdout carries the new pane id and nothing else, so `$(tmux-web open
+// --split)` is a target the other verbs take.
+func runOpen(args []string, stdout, stderr io.Writer, getenv func(string) string, dial func(socket string) controlClient) int {
+	fset := newFlagSet("open", stderr, "tmux-web open (--split | --window [name]) [--label TEXT]")
+	split := fset.Bool("split", false, "put the new pane beside the calling pane, in the same window")
+	window := fset.Bool("window", false, "put the new pane in a new window of the session this pane is in")
+	label := fset.String("label", "", "a label for the new pane, shown by tmux-web panes and in the sidebar")
+	operands, code, ok := parseFlags(fset, args)
+	if !ok {
+		return code
+	}
+	// Exactly one mode, and no default: the two differ in what the owner sees
+	// -- a pane appears next to his work, a window does not -- and guessing
+	// which he wanted is not this verb's call to make.
+	if *split == *window {
+		return usageError(stderr, fset, "choose exactly one of --split (a pane beside this one) or --window (a new window in this session)")
+	}
+	name := ""
+	if len(operands) > 1 {
+		return usageError(stderr, fset, "open takes at most one positional argument, the new window's name, got %d", len(operands))
+	}
+	if len(operands) == 1 {
+		if *split {
+			return usageError(stderr, fset, "open --split takes no positional arguments, got %q: a name belongs to a window (did you mean --window %s?)", operands[0], operands[0])
+		}
+		name = operands[0]
+		// Validated here, before the environment and before any fork: a name
+		// tmux would refuse is a malformed command line, which exits 2, and
+		// finding that out from the server would cost a snapshot first and
+		// report it as a failed operation.
+		if err := tmux.ValidateWindowName(name); err != nil {
+			return usageError(stderr, fset, "%v", err)
+		}
+	}
+	socket, caller, ok := tmuxTarget(getenv)
+	if !ok {
+		return notInsideTmux(stderr, "open")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), controlTimeout)
+	defer cancel()
+	c := dial(socket)
+
+	pane, err := openPane(ctx, c, *split, caller, name)
+	if err != nil {
+		return controlFail(stderr, "open", err)
+	}
+	// The id goes out before the label is set, and it goes out even if that
+	// fails below. The pane exists by now, and a caller that was not given its
+	// id has leaked a pane it cannot name -- the same rule `state` follows when
+	// it prints its word before reporting a read it could not finish.
+	fmt.Fprintln(stdout, pane)
+	if *label != "" {
+		if err := c.SetLabel(ctx, pane, *label); err != nil {
+			return controlFail(stderr, "open", fmt.Errorf("pane %s was opened but its label was not set: %w", pane, err))
+		}
+	}
+	return 0
+}
+
+// openPane creates the pane and returns its id: a split of the caller's own
+// pane, or the single pane of a new window in the caller's session.
+func openPane(ctx context.Context, c controlClient, split bool, caller, name string) (string, error) {
+	if split {
+		// The CALLER's pane, from $TMUX_PANE, and never the window's active
+		// one: tmux's default target is whatever is current, which in a window
+		// the owner is working in is somebody else's pane.
+		//
+		// Rightwards, with no flag to choose otherwise. "A pane next to this
+		// one" is what this verb is for, and a direction no caller asks for is
+		// a flag with nobody behind it; SplitPaneDetached takes tmux.SplitDown
+		// just as well, so the day something wants it, it is a flag and not a
+		// redesign.
+		return c.SplitPaneDetached(ctx, caller, tmux.SplitRight)
+	}
+	// The session the OWNER keeps, not the _web-* session a browser tab added
+	// over the same pane. CallerSession is that preference and it is not
+	// re-derived here; it is answered from the snapshot already in hand, so the
+	// window mode costs one fork rather than two.
+	rows, err := c.Snapshot(ctx)
+	if err != nil {
+		return "", err
+	}
+	session, err := tmux.CallerSession(ctx, snapshotOf(rows), caller)
+	if err != nil {
+		return "", err
+	}
+	// Refused rather than opened, and this is not a matter of ownership
+	// etiquette: an app-owned session is a browser tab's own and carries
+	// destroy-unattached, so the window would be destroyed the moment the tab
+	// closes. CallerSession answers such a session when it is the only one
+	// holding the pane -- it says deciding whether that is good enough is the
+	// caller's job, and this is that decision.
+	//
+	// Only the window mode asks. A split adds a pane to the window the caller
+	// is already in, which a grouped session shares with the owner's own, so
+	// there is nothing there to outlive the tab -- and the question costs a
+	// fork that the split mode does not otherwise make.
+	if app, owned := appSessionName(rows, session); owned {
+		return "", fmt.Errorf("pane %s is only in session %s (%s), which belongs to a browser tab: it is torn down when that tab closes and a window opened in it would die with it -- use --split, which makes a pane in the window this one is already in",
+			caller, session, app)
+	}
+	// fromPane is the caller's pane, which is what gives the new window the
+	// directory the agent is working in -- resolved by tmux from the pane
+	// itself, so no path crosses from here.
+	windowID, err := c.NewWindowDetached(ctx, session, name, caller)
+	if err != nil {
+		return "", err
+	}
+	// A new window answers with a WINDOW id (#{window_id}) and every verb here
+	// takes a pane, so the window's own pane has to be read back. Validated
+	// before it becomes a target: an empty or malformed id is the one tmux
+	// resolves to "whatever is current", which would print a pane this verb did
+	// not create.
+	if err := tmux.ValidateWindowID(windowID); err != nil {
+		return "", fmt.Errorf("new window: %w", err)
+	}
+	pane, err := c.Run(ctx, "display-message", "-p", "-t", windowID, "#{pane_id}")
+	if err != nil {
+		return "", err
+	}
+	if err := tmux.ValidatePaneID(pane); err != nil {
+		// display-message prints an empty expansion and exits 0 for a target it
+		// cannot find, so an unusable answer has to be caught rather than
+		// printed. The window is named, because it was created and is still
+		// there for the owner to find.
+		return "", fmt.Errorf("window %s was created but its pane could not be read: %w", windowID, err)
+	}
+	return pane, nil
+}
+
+// appSessionName returns the name of this session if it belongs to the app, and
+// reports whether it does.
+//
+// By the option Row.AppOwned carries, never by the "_web-" name: that prefix is
+// a convention the app follows and not a namespace it owns, so a session the
+// owner called "_web-notes" is his and stays operable. It is the same identity
+// check internal/tmux's own refusals make (refuseAppSession), read off a
+// snapshot this verb already has instead of costing another fork.
+func appSessionName(rows []tmux.Row, sessionID string) (string, bool) {
+	for _, r := range rows {
+		if r.SessionID == sessionID && r.AppOwned {
+			return r.SessionName, true
+		}
+	}
+	return "", false
+}
 
 func cmdPanes(args []string, stdout, stderr io.Writer) int {
 	return runPanes(args, stdout, stderr, os.Getenv, dialControl)

@@ -573,6 +573,33 @@ func TestStateNamesWhichAuthorityAnswered(t *testing.T) {
 	}
 }
 
+// A state-only report: the integration said blocked and not what for, so the
+// question is a grammar's reading of the screen. Labelling it "from the report"
+// would present that reading as the integration's own statement.
+func TestStateLabelsAScreenReadQuestionAsTheScreensWhenTheReportHadNoText(t *testing.T) {
+	stub := &controlStub{
+		rows: twoSessions(),
+		reports: map[string]string{
+			"%1": tmux.FormatReport(tmux.StateBlocked, time.Now().Add(-3*time.Minute).UnixMilli(), ""),
+		},
+		screens: map[string]string{"%1": fixtureScreen(t, "claude-blocked.txt")},
+	}
+	code, out, errs := stateRun(stub, "%1")
+	if code != 0 {
+		t.Fatalf("exited %d: %s", code, errs)
+	}
+	lines := strings.Split(out, "\n")
+	if lines[0] != "blocked" {
+		t.Fatalf("first line = %q, want \"blocked\"", lines[0])
+	}
+	if want := "state from the report, question read from the screen:"; lines[1] != want {
+		t.Errorf("label = %q, want %q", lines[1], want)
+	}
+	if !strings.Contains(out, "Do you want to create fixture.txt?") {
+		t.Errorf("the question is missing from:\n%s", out)
+	}
+}
+
 func TestStateSaysAStandingReportWasDropped(t *testing.T) {
 	stub := &controlStub{
 		rows: twoSessions(),

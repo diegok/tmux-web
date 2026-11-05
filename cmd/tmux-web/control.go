@@ -114,7 +114,9 @@ const maxPaneField = tmux.MaxTitle
 
 // stateSettle is the gap `state` leaves between its two captures.
 //
-// 1.5s, which is the poller's own interval, and that is the reason rather than
+// 1.5s, which is the daemon's poll interval (front.DefaultPollInterval in
+// internal/front/server.go; not imported, to keep this file off that package),
+// and that is the reason rather than
 // a coincidence: LiveState borrows settleAfter from the classifier to decide
 // how many identical captures mean "still", and that count was chosen for
 // captures 1.5s apart. A shorter gap would let a pane that redraws once a
@@ -200,11 +202,19 @@ func runState(args []string, stdout, stderr io.Writer, getenv func(string) strin
 	case v.Dropped:
 		fmt.Fprintln(stdout, "note: a blocked report was standing and no dialog is on screen, so it was dropped; this idle rests on one capture")
 	case v.State == tmux.StateBlocked:
-		// WHO answered goes on its own line, before the text: a report's
-		// Activity is the integration's own words and a screen's question is a
-		// grammar's reading of pixels, and one unlabelled field would let an
-		// agent quote a guess as a statement.
-		fmt.Fprintf(stdout, "from the %s:\n", v.From)
+		// The label names where the TEXT came from (QuestionFrom), not what
+		// decided the state: a state-only report corroborated by a screen
+		// has a question a grammar read off the pixels, and calling that
+		// "from the report" would let an agent quote a guess as the
+		// integration's own statement. When the two differ both are said.
+		switch {
+		case v.Question == nil:
+			fmt.Fprintf(stdout, "from the %s:\n", v.From)
+		case v.QuestionFrom == v.From:
+			fmt.Fprintf(stdout, "from the %s:\n", v.From)
+		default:
+			fmt.Fprintf(stdout, "state from the %s, question read from the %s:\n", v.From, v.QuestionFrom)
+		}
 		if q := v.Question; q != nil {
 			fmt.Fprintln(stdout, display(q.Text, maxQuestion))
 			// Numbered here because the grammar hands the choices back with

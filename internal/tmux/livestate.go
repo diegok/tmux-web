@@ -35,7 +35,15 @@ const (
 type Verdict struct {
 	State    string    // StateWorking/StateIdle/StateBlocked, or LiveChanging/LiveQuiet, or LiveUnknown
 	Question *Question // nil unless State is StateBlocked, and nil-able even then
-	From     string    // VerdictReport or VerdictScreen -- which authority answered
+	// From names what decided the STATE: VerdictReport or VerdictScreen.
+	From string
+	// QuestionFrom names where the TEXT of Question came from, and is "" when
+	// Question is nil. It can differ from From, and the case where it does is
+	// the reason it exists: a state-only blocked report (no Activity) that a
+	// screen corroborated. The report decided the state; the question was read
+	// off the screen by a grammar. A caller that labelled that text with From
+	// would present a grammar's reading as the integration's own statement.
+	QuestionFrom string
 	// Dropped says a standing blocked report was read and then not believed,
 	// because no registered form was on screen to corroborate it.
 	//
@@ -155,6 +163,7 @@ func corroborateBlocked(ctx context.Context, c LiveReader, agent, paneID string,
 		// screen: the integration named what it is waiting on, where a grammar
 		// can only recover an approximation of it from the pixels.
 		v.Question = &Question{Text: rep.Activity}
+		v.QuestionFrom = VerdictReport
 	} else {
 		// A state-only report still has a question on screen -- `state` prints
 		// the question when there is one, and on this path there is one -- and
@@ -162,10 +171,12 @@ func corroborateBlocked(ctx context.Context, c LiveReader, agent, paneID string,
 		// asking the grammar costs no fork. ExtractQuestion fails closed, so
 		// the field stays nil when it cannot read the dialog with confidence.
 		v.Question = ExtractQuestion(agent, screen)
+		if v.Question != nil {
+			v.QuestionFrom = VerdictScreen
+		}
 	}
 	// From is VerdictReport either way. It names what decided the STATE, and on
-	// this branch that is the report; the grammar only supplied text the report
-	// left out.
+	// this branch that is the report; QuestionFrom says who supplied the text.
 	return v, nil
 }
 
@@ -185,7 +196,12 @@ func fromScreen(ctx context.Context, c LiveReader, agent, paneID string, settle 
 		// ExtractQuestion fails closed and may return nil: a grammar that
 		// stopped matching a restyled dialog must cost the quote, never the
 		// state.
-		return Verdict{State: StateBlocked, Question: ExtractQuestion(agent, prev), From: VerdictScreen}, nil
+		q := ExtractQuestion(agent, prev)
+		qFrom := ""
+		if q != nil {
+			qFrom = VerdictScreen
+		}
+		return Verdict{State: StateBlocked, Question: q, QuestionFrom: qFrom, From: VerdictScreen}, nil
 	}
 	// settleAfter identical captures mean still -- the same number the
 	// classifier uses for the same claim, so a pane cannot read still through

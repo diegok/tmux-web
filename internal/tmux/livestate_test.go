@@ -146,6 +146,9 @@ func TestABlockedReportIsCorroboratedBeforeItIsBelieved(t *testing.T) {
 	if v.Dropped {
 		t.Error("Dropped = true on a report the screen confirmed")
 	}
+	if v.QuestionFrom != VerdictReport {
+		t.Errorf("QuestionFrom = %q, want %q: the report supplied the text", v.QuestionFrom, VerdictReport)
+	}
 	if v.Question == nil || v.Question.Text != "Allow?" {
 		t.Errorf("Question = %+v, want the report's own Activity %q", v.Question, "Allow?")
 	}
@@ -202,6 +205,12 @@ func TestACorroboratedBlockedReportWithNoTextTakesItsQuestionFromTheScreen(t *te
 	if v.State != StateBlocked || v.From != VerdictReport {
 		t.Errorf("State/From = %q/%q, want %q/%q", v.State, v.From, StateBlocked, VerdictReport)
 	}
+	// The two fields differ here and only here: the report decided the state
+	// and the grammar supplied the text. Collapsing them into one would fail
+	// this line.
+	if v.QuestionFrom != VerdictScreen {
+		t.Errorf("QuestionFrom = %q, want %q: the text was read off the screen", v.QuestionFrom, VerdictScreen)
+	}
 	if want := "Do you want to create fixture.txt?"; v.Question == nil || v.Question.Text != want {
 		t.Errorf("Question = %+v, want the screen's own question %q", v.Question, want)
 	}
@@ -216,8 +225,8 @@ func TestAKnownAgentWithNoReportReachesBlockedFromItsScreen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LiveState: %v", err)
 	}
-	if v.State != StateBlocked || v.From != VerdictScreen {
-		t.Errorf("State/From = %q/%q, want %q/%q", v.State, v.From, StateBlocked, VerdictScreen)
+	if v.State != StateBlocked || v.From != VerdictScreen || v.QuestionFrom != VerdictScreen {
+		t.Errorf("State/From/QuestionFrom = %q/%q/%q, want %q/%q/%q", v.State, v.From, v.QuestionFrom, StateBlocked, VerdictScreen, VerdictScreen)
 	}
 	if want := "Do you want to create fixture.txt?"; v.Question == nil || v.Question.Text != want {
 		t.Errorf("Question = %+v, want %q", v.Question, want)

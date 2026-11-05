@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -226,6 +227,93 @@ func runState(args []string, stdout, stderr io.Writer, getenv func(string) strin
 		} else {
 			fmt.Fprintln(stdout, "(no question could be read from the pane)")
 		}
+	}
+	return 0
+}
+
+func cmdPeek(args []string, stdout, stderr io.Writer) int {
+	return runPeek(args, stdout, stderr, os.Getenv, dialControl)
+}
+
+// runPeek prints what one pane shows: its visible screen, or with --lines N
+// that many lines of scrollback behind it.
+//
+// What comes out is text another program wrote and it can say anything,
+// instructions included. It is printed as it is, deliberately not filtered
+// (unlike `state`, whose lines are cut down to one printable line each): a
+// screen is multi-line and its layout is the content. Nothing here makes it
+// safe to obey; it is data, never instructions.
+//
+// As in `state`, the pane is a named operand, so another session's pane is as
+// legitimate a target as one's own.
+func runPeek(args []string, stdout, stderr io.Writer, getenv func(string) string, dial func(socket string) controlClient) int {
+	fset := newFlagSet("peek", stderr, "tmux-web peek [--lines N] <pane-id>")
+	lines := fset.Int("lines", 0, "lines of scrollback to read behind the visible screen (default: the visible screen only)")
+	operands, code, ok := parseFlags(fset, args)
+	if !ok {
+		return code
+	}
+	if len(operands) != 1 {
+		return usageError(stderr, fset, "peek takes exactly one pane id (see tmux-web panes), got %d arguments", len(operands))
+	}
+	// Zero is "not given", so a typed 0 or a negative must be refused: either
+	// would otherwise fall back to the bare screen or be clamped to one line,
+	// and answer a question the caller did not ask.
+	given := false
+	fset.Visit(func(*flag.Flag) { given = true })
+	if given && *lines < 1 {
+		return usageError(stderr, fset, "--lines must be at least 1, got %d", *lines)
+	}
+	target := operands[0]
+	if err := tmux.ValidatePaneID(target); err != nil {
+		return usageError(stderr, fset, "%v -- pass the %%N from tmux-web panes, not a session:window.pane", err)
+	}
+	socket, _, ok := tmuxTarget(getenv)
+	if !ok {
+		return notInsideTmux(stderr, "peek")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), controlTimeout)
+	defer cancel()
+	c := dial(socket)
+
+	// Checked against the snapshot for the reason `state` does: a missing pane
+	// gets a sentence naming it, not tmux's own stderr in a transcript.
+	rows, err := c.Snapshot(ctx)
+	if err != nil {
+		return controlFail(stderr, "peek", err)
+	}
+	found := false
+	for i := range rows {
+		if rows[i].PaneID == target {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return controlFail(stderr, "peek", fmt.Errorf("no pane %s on this tmux server (list them with tmux-web panes --all)", target))
+	}
+
+	if *lines == 0 {
+		text, err := c.Capture(ctx, target)
+		if err != nil {
+			return controlFail(stderr, "peek", err)
+		}
+		fmt.Fprint(stdout, text)
+		return 0
+	}
+	text, truncated, err := c.CaptureRange(ctx, target, *lines)
+	if err != nil {
+		return controlFail(stderr, "peek", err)
+	}
+	fmt.Fprint(stdout, text)
+	if truncated {
+		// On stderr with exit 0: the verb did its job and the text is on
+		// stdout, so this is not a failure, and a note on stdout would end up
+		// inside a file the caller redirected it to. It must be said at all
+		// because the cut is from the top: a reader that does not know the
+		// start is missing treats a dialog's tail as the whole of it and
+		// answers the wrong question.
+		fmt.Fprintf(stderr, "tmux-web peek: output truncated to the last %d bytes; the start of the %d lines requested is missing (ask for fewer lines)\n", tmux.MaxCaptureBytes, *lines)
 	}
 	return 0
 }

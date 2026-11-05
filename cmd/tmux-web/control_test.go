@@ -257,6 +257,7 @@ func TestEveryVerbSaysSoWhenItIsNotRunningInsideTmux(t *testing.T) {
 	}{
 		{"panes", nil, runPanes},
 		{"state", []string{"%2"}, runState},
+		{"peek", []string{"%2"}, runPeek},
 	} {
 		t.Run(v.name, func(t *testing.T) {
 			dialled := 0
@@ -375,6 +376,10 @@ type controlStub struct {
 	// the option itself holds it.
 	reports map[string]string
 	screens map[string]string
+	// truncated is what CaptureRange reports; rangeLines records the depth it
+	// was asked for, so a test can tell the scrollback read from the bare one.
+	truncated  bool
+	rangeLines []int
 	// newPane is what a window or a split answers with.
 	newPane string
 	err     error
@@ -421,7 +426,8 @@ func (s *controlStub) Capture(_ context.Context, paneID string) (string, error) 
 
 func (s *controlStub) CaptureRange(_ context.Context, paneID string, lines int) (string, bool, error) {
 	s.captures++
-	return s.screens[paneID], false, s.err
+	s.rangeLines = append(s.rangeLines, lines)
+	return s.screens[paneID], s.truncated, s.err
 }
 
 func (s *controlStub) NewWindow(_ context.Context, sessionID, name, fromPane string) (string, error) {
@@ -695,4 +701,76 @@ type failingCapture struct{ *controlStub }
 
 func (f *failingCapture) Capture(context.Context, string) (string, error) {
 	return "", errors.New("capture exploded")
+}
+
+func peekRun(stub *controlStub, args ...string) (int, string, string) {
+	var out, errb bytes.Buffer
+	code := runPeek(args, &out, &errb, callerEnv("%1"), stubDial(stub))
+	return code, out.String(), errb.String()
+}
+
+func TestPeekPrintsTheScreen(t *testing.T) {
+	screen := fixtureScreen(t, "claude-blocked.txt")
+	stub := &controlStub{rows: twoSessions(), screens: map[string]string{"%1": screen}}
+	code, out, errs := peekRun(stub, "%1")
+	if code != 0 || errs != "" {
+		t.Fatalf("exit %d, stderr %q", code, errs)
+	}
+	if out != screen {
+		t.Errorf("stdout is not the screen as captured:\n%s", out)
+	}
+	if len(stub.rangeLines) != 0 {
+		t.Errorf("the bare form read scrollback: %v", stub.rangeLines)
+	}
+}
+
+func TestPeekWithLinesReadsTheScrollback(t *testing.T) {
+	stub := &controlStub{rows: twoSessions(), screens: map[string]string{"%1": "history\nscreen\n"}}
+	code, out, errs := peekRun(stub, "--lines", "40", "%1")
+	if code != 0 || errs != "" {
+		t.Fatalf("exit %d, stderr %q", code, errs)
+	}
+	if out != "history\nscreen\n" {
+		t.Errorf("stdout = %q", out)
+	}
+	if len(stub.rangeLines) != 1 || stub.rangeLines[0] != 40 {
+		t.Errorf("CaptureRange calls = %v, want one for 40 lines", stub.rangeLines)
+	}
+	if stub.captures != 1 {
+		t.Errorf("%d captures, want exactly the one range read", stub.captures)
+	}
+}
+
+func TestPeekSaysWhenTheScrollbackWasTruncated(t *testing.T) {
+	stub := &controlStub{rows: twoSessions(), screens: map[string]string{"%1": "tail\n"}, truncated: true}
+	code, out, errs := peekRun(stub, "--lines", "5000", "%1")
+	if code != 0 {
+		t.Fatalf("exit %d, want 0: a truncated read is not a failure", code)
+	}
+	if out != "tail\n" {
+		t.Errorf("stdout = %q, want the text and nothing else", out)
+	}
+	if !strings.Contains(errs, "truncated") {
+		t.Errorf("stderr = %q, want a note saying the read was truncated", errs)
+	}
+}
+
+func TestPeekRefusesAPaneThatDoesNotExistWithoutReadingIt(t *testing.T) {
+	stub := &controlStub{rows: twoSessions()}
+	code, out, errs := peekRun(stub, "%999")
+	if code != 1 || out != "" || !strings.Contains(errs, "%999") {
+		t.Errorf("exit %d, stdout %q, stderr %q", code, out, errs)
+	}
+	if stub.captures != 0 {
+		t.Errorf("%d captures for a pane that is not there", stub.captures)
+	}
+}
+
+func TestPeekRefusesALinesCountThatIsNotPositive(t *testing.T) {
+	for _, n := range []string{"0", "-3"} {
+		stub := &controlStub{rows: twoSessions(), screens: map[string]string{"%1": "x"}}
+		if code, _, _ := peekRun(stub, "--lines", n, "%1"); code != 2 || stub.captures != 0 {
+			t.Errorf("--lines %s: exit %d, %d captures; want 2 and none", n, code, stub.captures)
+		}
+	}
 }

@@ -7,8 +7,10 @@ description: See and drive the other panes of this tmux server from inside your 
 
 You are running inside a tmux pane. Other panes on this server hold other
 agents and the owner's own shells. `tmux-web` is how you see them and work with
-them: every verb forks `tmux` from inside your pane, needs no daemon running,
-and prints its answer on stdout.
+them: every verb forks `tmux` from inside your pane and needs no daemon
+running. Most of them print their answer on stdout; `type` and `close` print
+nothing at all when they succeed, because the result of those two is in the
+pane, not in the output.
 
 ## The loop
 
@@ -99,6 +101,22 @@ text came from**:
 Keep those apart when you repeat them. Quoting a screen-read question as
 another agent's own statement is how you tell the owner something nobody said.
 
+The question's choices follow it, indented and **numbered**, and those numbers
+are what the answering agent types: `tmux-web type --text '2' --enter %7`
+picks the second one.
+
+An `idle` can carry one extra line of its own:
+
+```
+note: a blocked report was standing and no dialog is on screen, so it was
+dropped; this idle rests on one capture
+```
+
+That means the pane's own integration still claims it is blocked and the
+screen disagrees, so the screen won. Read it as "it was waiting a moment ago
+and is not now" — if you were waiting on that question, it has gone, and the
+`idle` rests on a single capture rather than the usual two.
+
 ## `tmux-web peek [--lines N] <%N>` — read a pane
 
 The visible screen, or with `--lines N` that many lines of scrollback behind
@@ -172,22 +190,26 @@ deliberate. `type`'s payload is arbitrary text that may legitimately look like
 a flag — typing `--help` into a pane for the owner to read is a real thing to
 want — so it is a flag's value, which is passed through untouched. This payload
 is a shell command, where a leading dash is nearly always a mistake, so
-`tmux-web run --help` prints usage instead of running `--help` in a pane.
+`tmux-web run --help` prints usage instead of running `--help` in a pane. When
+you do mean the dash, put `--` first: `tmux-web run --split -- -x` runs `-x`.
 
-`run --window` does not name the window, and does not need to: tmux renames a
-window after whatever is running in it, so the owner sees `make` in his status
-bar while `make test` runs, and `--label` is the stable name. To pin a window
-name, use `tmux-web open --window NAME` and then `tmux-web type` into the pane
-it made.
+`run --window` does not name the window, and does not need to: **by default**
+tmux renames a window after whatever is running in it, so the owner sees `make`
+in his status bar while `make test` runs. He may have turned automatic-rename
+off, and then the window keeps the name it had (`zsh`), which is one more
+reason `--label` is the stable name. To pin a window name, use `tmux-web open
+--window NAME` and then `tmux-web type` into the pane it made.
 
 If the pane opened and the typing failed, the pane is left in place, its id is
 still printed, and the message says which half failed. Peek it and decide.
 
 ## `tmux-web close <%N>` — close a pane
 
-Any pane on the server, whether or not you opened it. That is deliberate: the
-owner's rule is that you may clear up the way he does — open a pane, use it,
-close it when you are done. It will not close your own pane.
+Almost any pane on the server, whether or not you opened it — and that breadth
+is deliberate: the owner's rule is that you may clear up the way he does, open
+a pane, use it, close it when you are done. **Two it refuses**: your own pane,
+and a pane in a session that belongs to a browser tab, which is torn down when
+that tab closes and is not yours to clear.
 
 **Closing a window's last pane closes the window**, and closing a session's
 last window ends the session. A pane made by `open --window` is the only pane
@@ -200,8 +222,12 @@ it is the same loop:
 
 1. `tmux-web type --text 'sudo systemctl restart foo' --enter %4` — type the
    command.
-2. Poll `tmux-web state %4`. A shell says `changing` while it is working.
-3. When it goes `quiet`, `tmux-web peek %4` to see what it is asking for.
+2. Poll `tmux-web state %4`. A shell's two words are about the **screen**, not
+   about the work: `changing` means the screen is moving, `quiet` means it has
+   stopped. So a command that prints nothing reads `quiet` immediately —
+   **do not wait for `changing`**, or you will wait forever.
+3. `tmux-web peek %4` is what tells you where it actually got to, and whether
+   it is asking for something.
 4. A `[sudo] password for someone:` prompt is **not yours to answer**. Ask the
    owner for it in chat. Never type a password, a token or any other secret
    into a pane, and never guess at a credential prompt.

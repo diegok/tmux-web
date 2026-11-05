@@ -25,8 +25,10 @@ import (
 //     drive -- the method name is the same either way.
 //   - THE PANE MUST HOLD A SHELL. `open` creates an empty shell precisely so
 //     that a command typed into it is a command the owner can see, re-run and
-//     scroll back through, and that rests on tmux's remain-on-exit default
-//     rather than on anything this code does. A stub cannot run a command.
+//     scroll back through, and that rests on the pane's own process being a
+//     SHELL that outlives the command it ran -- which is what makes
+//     remain-on-exit irrelevant here rather than what depends on it. A stub
+//     cannot run a command.
 
 // TestOpenLeavesTheOwnersViewWhereItWas is the -d assertion, for BOTH modes.
 //
@@ -100,19 +102,21 @@ func TestOpenLeavesTheOwnersViewWhereItWas(t *testing.T) {
 // TestOpenGivesAPaneAShellThatOutlivesACommand is the measurement that kept
 // remain-on-exit out of this design.
 //
-// A pane whose command exits is destroyed, and a pane holding a SHELL is one
-// whose shell outlives the command it ran -- so the output stays on screen, the
-// scrollback stays readable, and the owner can type the next thing. Setting
-// remain-on-exit would have been the other way to keep the text, and it leaves
-// a dead pane that no one can type into. This test is what says the design does
-// not need it.
+// WHAT IT RESTS ON IS THE SHELL, not remain-on-exit's default. tmux destroys a
+// pane when the pane's own PROCESS exits, and here that process is a shell that
+// outlives every command typed into it -- so the option never comes up: the
+// output stays on screen, the scrollback stays readable, and the owner can type
+// the next thing. remain-on-exit would have been the other way to keep the
+// text, for a design where the command WAS the pane's process, and it leaves a
+// dead pane nobody can type into. This test is what says this design needs
+// neither.
 func TestOpenGivesAPaneAShellThatOutlivesACommand(t *testing.T) {
 	srv := testutil.NewServer(t)
 	// /bin/sh for both panes -- named on the session's own pane, and set as the
 	// server's default-shell before the split so the pane this test types into
 	// gets it too. testutil's -f /dev/null keeps the developer's tmux.conf out
 	// of the server, but nothing keeps a shell's rc files out of a pane, and
-	// this test is about tmux's remain-on-exit default rather than about
+	// this test is about what a pane's own process is rather than about
 	// anyone's zshrc.
 	srv.Run(t, "new-session", "-d", "-s", "work", "-x", "80", "-y", "24", "/bin/sh")
 	srv.Run(t, "set-option", "-g", "default-shell", "/bin/sh")

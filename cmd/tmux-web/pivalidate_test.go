@@ -225,7 +225,7 @@ func TestPiValidationRunsOnlyWhereItIsNeeded(t *testing.T) {
 func TestARealPiLoadsTheArtifactThisInstallerWrites(t *testing.T) {
 	requirePi(t)
 
-	artifact, err := renderIntegration(agents["pi"])
+	artifact, err := renderOwned(agents["pi"].files[0].source)
 	if err != nil {
 		t.Fatalf("rendering the pi artifact: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestThePiProbeRunsNowhereNearTheUsersOwnPi(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("PI_CODING_AGENT_DIR", filepath.Join(home, "pi-agent"))
 
-	artifact, err := renderIntegration(agents["pi"])
+	artifact, err := renderOwned(agents["pi"].files[0].source)
 	if err != nil {
 		t.Fatalf("rendering the pi artifact: %v", err)
 	}

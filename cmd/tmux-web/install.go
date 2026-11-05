@@ -68,10 +68,15 @@ const (
 	piSchema       = 1
 )
 
-// managedHeader matches the first line of every file this command writes. It
-// captures the schema NUMBER rather than matching a prefix, and that difference
-// is the whole point: a prefix match cannot tell ours-and-current from
-// ours-and-stale, which is two of the three cases the header exists to
+// managedHeader matches the header line every file this command writes carries
+// near its top -- the FIRST line in the scripts and integrations, and
+// deliberately the fifth in claude's skill, below the frontmatter, because a
+// SKILL.md whose first line is not `---` has no frontmatter and would not load
+// at all. ownerOf therefore searches the first 8 KiB rather than one line.
+//
+// It captures the schema NUMBER rather than matching a prefix, and that
+// difference is the whole point: a prefix match cannot tell ours-and-current
+// from ours-and-stale, which is two of the three cases the header exists to
 // separate.
 var managedHeader = regexp.MustCompile(`managed by tmux-web \(tmux-web-schema: (\d+)\)`)
 
@@ -765,19 +770,15 @@ func nestedInstall(root string) string {
 
 // -- rendering --------------------------------------------------------------
 
-// renderIntegration turns the embedded bytes into the file that gets written.
+// renderOwned turns one owned file's embedded bytes into the file that gets
+// written, named by its source rather than by the agent that owns it -- because
+// claude owns two of them, and only the agent's spec knows which is which.
 //
-// For claude that is the wrapper with its BIN resolved; for pi and opencode it
-// is the integration with queue.ts inlined and every export but the default
-// stripped. Both transforms happen HERE, in Go, from one embedded copy --
-// there is never a second copy of the queue in the repository.
-func renderIntegration(spec agentSpec) ([]byte, error) {
-	return renderOwned(spec.files[0].source)
-}
-
-// renderOwned renders one owned file by its embedded name. renderIntegration
-// above is the single-file agents' spelling of it, kept because their tests
-// call it.
+// For claude's wrapper that is the script with its BIN resolved; for its skill
+// it is the prose unchanged; for pi and opencode it is the integration with
+// queue.ts inlined and every export but the default stripped. Every transform
+// happens HERE, in Go, from one embedded copy -- there is never a second copy
+// of the queue in the repository.
 func renderOwned(source string) ([]byte, error) {
 	switch source {
 	case "claude-report.sh":

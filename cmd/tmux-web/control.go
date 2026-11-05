@@ -171,11 +171,10 @@ func runState(args []string, stdout, stderr io.Writer, getenv func(string) strin
 		return usageError(stderr, fset, "state takes exactly one pane id (see tmux-web panes), got %d arguments", len(operands))
 	}
 	target := operands[0]
-	// Before the environment and before any fork: tmux resolves a malformed
-	// -t to whatever is current and exits 0, so a typo here would be answered
-	// confidently about some other pane.
-	if err := tmux.ValidatePaneID(target); err != nil {
-		return usageError(stderr, fset, "%v -- pass the %%N from tmux-web panes, not a session:window.pane", err)
+	// Before the environment and before any fork (see checkPaneTarget): a typo
+	// here would otherwise be answered confidently about some other pane.
+	if code, ok := checkPaneTarget(stderr, fset, target); !ok {
+		return code
 	}
 	socket, _, ok := tmuxTarget(getenv)
 	if !ok {
@@ -190,18 +189,10 @@ func runState(args []string, stdout, stderr io.Writer, getenv func(string) strin
 		fmt.Fprintln(stdout, tmux.LiveUnknown)
 		return controlFail(stderr, "state", err)
 	}
-	// The row, and not just the id, because LiveState decides by the pane's
-	// command which vocabulary it speaks. A pane absent from the snapshot is
-	// refused here with its own message: asking tmux about it would put tmux's
-	// stderr in the agent's transcript instead of a sentence naming the pane.
-	var row *tmux.Row
-	for i := range rows {
-		if rows[i].PaneID == target {
-			row = &rows[i]
-			break
-		}
-	}
-	if row == nil {
+	// The ROW and not just the id, because LiveState decides by the pane's
+	// command which vocabulary it speaks.
+	row, err := requirePane(rows, target)
+	if err != nil {
 		// `unknown` HERE TOO, and it is the honest answer rather than a
 		// convenience: a pane that is not on the server is a pane about which
 		// nothing can be said, which is exactly what the word means -- "the
@@ -210,7 +201,7 @@ func runState(args []string, stdout, stderr io.Writer, getenv func(string) strin
 		// `state` is the ordinary race in a feature whose own verbs create and
 		// destroy panes. The sentence naming the pane still goes to stderr.
 		fmt.Fprintln(stdout, tmux.LiveUnknown)
-		return controlFail(stderr, "state", fmt.Errorf("no pane %s on this tmux server (list them with tmux-web panes --all)", target))
+		return controlFail(stderr, "state", err)
 	}
 
 	v, err := tmux.LiveState(ctx, c, *row, time.Now(), stateSettle)
@@ -288,8 +279,8 @@ func runPeek(args []string, stdout, stderr io.Writer, getenv func(string) string
 		return usageError(stderr, fset, "--lines must be at least 1, got %d", *lines)
 	}
 	target := operands[0]
-	if err := tmux.ValidatePaneID(target); err != nil {
-		return usageError(stderr, fset, "%v -- pass the %%N from tmux-web panes, not a session:window.pane", err)
+	if code, ok := checkPaneTarget(stderr, fset, target); !ok {
+		return code
 	}
 	socket, _, ok := tmuxTarget(getenv)
 	if !ok {
@@ -299,21 +290,15 @@ func runPeek(args []string, stdout, stderr io.Writer, getenv func(string) string
 	defer cancel()
 	c := dial(socket)
 
-	// Checked against the snapshot for the reason `state` does: a missing pane
-	// gets a sentence naming it, not tmux's own stderr in a transcript.
+	// Checked against the snapshot for the reason requirePane gives: a missing
+	// pane gets a sentence naming it, not tmux's own stderr in a transcript.
+	// The row itself is not wanted here -- a screen is read by id alone.
 	rows, err := c.Snapshot(ctx)
 	if err != nil {
 		return controlFail(stderr, "peek", err)
 	}
-	found := false
-	for i := range rows {
-		if rows[i].PaneID == target {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return controlFail(stderr, "peek", fmt.Errorf("no pane %s on this tmux server (list them with tmux-web panes --all)", target))
+	if _, err := requirePane(rows, target); err != nil {
+		return controlFail(stderr, "peek", err)
 	}
 
 	if *lines == 0 {
@@ -561,6 +546,13 @@ func cmdClose(args []string, stdout, stderr io.Writer) int {
 // tightens this to the agent's own panes is undoing his decision. Two guards,
 // and only two: the caller's own pane, and the app's own sessions.
 //
+// CLOSING A WINDOW'S LAST PANE CLOSES THE WINDOW, and closing a session's last
+// window ends the session. That is tmux's own behaviour and nothing here softens
+// it, but it is the thing this verb can do that a caller did not ask for by
+// name: a pane made by `open --window` is the only pane in its window, so
+// closing it removes the window the owner can see in his status bar. Said in
+// `tmux-web help` and in the skill for that reason.
+//
 // It prints nothing on success, as `type` does. The caller named the pane, so
 // echoing the id would tell it only what it just typed; a wrong id is caught by
 // the refusals above, and a right-shaped wrong one is not something output can
@@ -575,10 +567,11 @@ func runClose(args []string, stdout, stderr io.Writer, getenv func(string) strin
 		return usageError(stderr, fset, "close takes exactly one pane id (see tmux-web panes), got %d arguments", len(operands))
 	}
 	target := operands[0]
-	// A malformed -t resolves to whatever pane is current and exits 0: for a
-	// kill that is somebody else's pane, so the form is checked before anything.
-	if err := tmux.ValidatePaneID(target); err != nil {
-		return usageError(stderr, fset, "%v -- pass the %%N from tmux-web panes, not a session:window.pane", err)
+	// Checked before anything (see checkPaneTarget), and here the stake is the
+	// sharpest of the four: a malformed -t resolves to whatever pane is
+	// current, and for a kill that is somebody else's pane.
+	if code, ok := checkPaneTarget(stderr, fset, target); !ok {
+		return code
 	}
 	socket, caller, ok := tmuxTarget(getenv)
 	if !ok {
@@ -597,15 +590,11 @@ func runClose(args []string, stdout, stderr io.Writer, getenv func(string) strin
 	if err != nil {
 		return controlFail(stderr, "close", err)
 	}
-	var row *tmux.Row
-	for i := range rows {
-		if rows[i].PaneID == target {
-			row = &rows[i]
-			break
-		}
-	}
-	if row == nil {
-		return controlFail(stderr, "close", fmt.Errorf("no pane %s on this tmux server (list them with tmux-web panes --all)", target))
+	// The ROW and not just the id, because the session it is in is on it and
+	// that is the second of this verb's two guards.
+	row, err := requirePane(rows, target)
+	if err != nil {
+		return controlFail(stderr, "close", err)
 	}
 	if app, owned := appSessionName(rows, row.SessionID); owned {
 		return controlFail(stderr, "close", fmt.Errorf("pane %s is in session %s (%s), which belongs to a browser tab and is torn down when that tab closes; it is not closed from here", target, row.SessionID, app))
@@ -709,25 +698,25 @@ func runType(args []string, stdout, stderr io.Writer, getenv func(string) string
 		return usageError(stderr, fset, "type takes exactly one pane id (see tmux-web panes), got %d arguments", len(operands))
 	}
 	target := operands[0]
-	// Before the environment and before any fork, as `state` does it: tmux
-	// resolves a malformed -t to whatever pane is current and exits 0, and for
-	// this verb that means a typo types into somebody else's pane.
-	if err := tmux.ValidatePaneID(target); err != nil {
-		return usageError(stderr, fset, "%v -- pass the %%N from tmux-web panes, not a session:window.pane", err)
+	// Before the environment and before any fork, as `state` does it (see
+	// checkPaneTarget): for this verb a typo types into somebody else's pane.
+	if code, ok := checkPaneTarget(stderr, fset, target); !ok {
+		return code
 	}
 	if given["key"] {
 		if err := validateKeyName(*key); err != nil {
 			return usageError(stderr, fset, "%v", err)
 		}
 	}
-	if n := len(*text); n > maxTypeText {
-		return usageError(stderr, fset, "the text is %d bytes and the cap is %d: write it to a file and have the pane read it -- `tmux-web type --text 'cat /tmp/note.md' --enter %s` -- rather than typing it, since this verb will not split text across several sends", n, maxTypeText, target)
+	// The two predicates `run` shares with this verb; the remedies in the two
+	// messages are each verb's own. See overTypeCap and hasLineBreak.
+	if overTypeCap(*text) {
+		return usageError(stderr, fset, "the text is %d bytes and the cap is %d: write it to a file and have the pane read it -- `tmux-web type --text 'cat /tmp/note.md' --enter %s` -- rather than typing it, since this verb will not split text across several sends", len(*text), maxTypeText, target)
 	}
-	// A "\r" counts as a line break too, and not pedantically: 0x0d IS the
-	// Return key, so a text carrying one would submit itself halfway through
-	// and leave the rest of it typed into whatever came next. Bracketing is
-	// what bounds that.
-	multiline := strings.ContainsAny(*text, "\n\r")
+	// Multi-line text is not refused outright here, as it is in `run`: it is
+	// bracketed below and sent as one unsubmitted paste, and only the --enter
+	// that would submit it once per line is refused.
+	multiline := hasLineBreak(*text)
 	if multiline && *enter {
 		return usageError(stderr, fset, "--enter cannot be used with multi-line text: the lines are sent as one unsubmitted paste and you submit them in pane %s (tmux-web type --key Enter %s), because a Return inside multi-line text submits once per line", target, target)
 	}
@@ -746,22 +735,14 @@ func runType(args []string, stdout, stderr io.Writer, getenv func(string) string
 	defer cancel()
 	c := dial(socket)
 
-	// The ROW and not just the id, because the mode is on it. A missing pane is
-	// refused here with a sentence naming it, as `state` and `peek` do, rather
-	// than with tmux's own stderr in an agent's transcript.
+	// The ROW and not just the id, because the mode is on it.
 	rows, err := c.Snapshot(ctx)
 	if err != nil {
 		return controlFail(stderr, "type", err)
 	}
-	var row *tmux.Row
-	for i := range rows {
-		if rows[i].PaneID == target {
-			row = &rows[i]
-			break
-		}
-	}
-	if row == nil {
-		return controlFail(stderr, "type", fmt.Errorf("no pane %s on this tmux server (list them with tmux-web panes --all)", target))
+	row, err := requirePane(rows, target)
+	if err != nil {
+		return controlFail(stderr, "type", err)
 	}
 	// REFUSED, AND NOTHING IS SENT. `send-keys` against a pane in a mode does
 	// not type into it: it dispatches into the copy-mode command table, and on
@@ -877,8 +858,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 // -f /dev/null (defaults, no user config): automatic-rename was on; with
 // `sleep 4` running, window_name and pane_current_command were both `sleep`,
 // and both were back to `zsh` when it ended. --label is the stable
-// human-facing name for the rest, and --label is the stable
-// human-facing name that panes and the sidebar show. An agent that wants a
+// human-facing name that `panes` and the sidebar show. An agent that wants a
 // pinned window name does `open --window NAME` and then `type` into the pane.
 //
 // IF THE OPEN WORKED AND THE TYPE DID NOT, THE PANE STAYS, ITS ID IS PRINTED
@@ -905,10 +885,15 @@ func runRun(args []string, stdout, stderr io.Writer, getenv func(string) string,
 	if command == "" {
 		return usageError(stderr, fset, "the command is empty, so there is nothing to run")
 	}
-	if n := len(command); n > maxTypeText {
-		return usageError(stderr, fset, "the command is %d bytes and the cap is %d: write it to a script file and run that -- this verb will not split text across several sends", n, maxTypeText)
+	// `type`'s two predicates, shared rather than re-derived (overTypeCap and
+	// hasLineBreak), with this verb's own remedies in the messages: a script
+	// file rather than a file the pane is told to read, and no line break at
+	// all rather than a bracketed paste, because a paste gets no Return and
+	// running the command is this verb's whole contract.
+	if overTypeCap(command) {
+		return usageError(stderr, fset, "the command is %d bytes and the cap is %d: write it to a script file and run that -- this verb will not split text across several sends", len(command), maxTypeText)
 	}
-	if strings.ContainsAny(command, "\n\r") {
+	if hasLineBreak(command) {
 		return usageError(stderr, fset, "the command has more than one line, and a Return inside it would submit once per line: join the steps with && or ;, or write a script and run that")
 	}
 	// The label before the open, as in `open`, and here it is not cosmetic:
@@ -939,6 +924,62 @@ func runRun(args []string, stdout, stderr io.Writer, getenv func(string) string,
 	}
 	return 0
 }
+
+// checkPaneTarget validates an operand that is a pane id, with the one sentence
+// all four verbs taking one need.
+//
+// BEFORE THE ENVIRONMENT AND BEFORE ANY FORK, at every call site. tmux resolves
+// a malformed -t to whatever pane is CURRENT and exits 0, so an unchecked typo
+// is not an error, it is a confident answer about -- or an action on -- somebody
+// else's pane. And the shape of a target is decided without asking the server,
+// which makes it a malformed command line: exit 2, nothing attempted.
+//
+// The message names the %N because the near-miss is specific: `session:window.pane`
+// is what the second column of `panes` prints and what tmux's own status line
+// shows, so it is what a caller reaches for first.
+func checkPaneTarget(stderr io.Writer, fset *flag.FlagSet, target string) (int, bool) {
+	if err := tmux.ValidatePaneID(target); err != nil {
+		return usageError(stderr, fset, "%v -- pass the %%N from tmux-web panes, not a session:window.pane", err), false
+	}
+	return 0, true
+}
+
+// requirePane finds one pane in a snapshot, or says it is not there.
+//
+// Four verbs take a pane id and all four look it up in the snapshot they
+// already hold, rather than letting tmux refuse the target: tmux's refusal
+// would put tmux's own stderr in an agent's transcript, where this puts a
+// sentence that names the pane and says how to list the real ones. One copy,
+// because it is one message as well as one loop -- the drift `sendText` and
+// `openLabelled` were factored out to avoid.
+//
+// The ROW is returned, not just a yes: `state` needs the command to pick a
+// vocabulary, `type` needs the mode, `close` needs the session. `peek` wants
+// neither and discards it.
+func requirePane(rows []tmux.Row, target string) (*tmux.Row, error) {
+	for i := range rows {
+		if rows[i].PaneID == target {
+			return &rows[i], nil
+		}
+	}
+	return nil, fmt.Errorf("no pane %s on this tmux server (list them with tmux-web panes --all)", target)
+}
+
+// overTypeCap and hasLineBreak are the two things BOTH `type` and `run` refuse
+// a payload for, and they are one pair rather than two copies because the
+// PREDICATES are the part that must not drift. The messages stay at the four
+// call sites and are deliberately different: the remedies are different, and so
+// is what each verb does about a line break -- `type` brackets it and refuses
+// only the --enter, `run` refuses it outright.
+//
+// A BYTE count, which is what len gives, and that is maxTypeText's own unit:
+// the cap exists because send-keys has a command-line limit measured in bytes.
+func overTypeCap(s string) bool { return len(s) > maxTypeText }
+
+// hasLineBreak counts a "\r" as a break as well as a "\n", and not
+// pedantically: 0x0d IS the Return key, so a payload carrying one submits
+// itself halfway through and leaves the rest typed into whatever came next.
+func hasLineBreak(s string) bool { return strings.ContainsAny(s, "\n\r") }
 
 // checkLabel refuses a --label on the COMMAND LINE, which is the only place
 // either verb that takes one can refuse it in time.

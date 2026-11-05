@@ -133,6 +133,9 @@ name; to pin a window name, open --window NAME and then type into the pane.
 close closes a pane, any pane on the server, whether or not you opened it: the
 point is that you can clear up after yourself the way its owner does. It will
 not close the calling pane, and it will not close one in a browser tab's session.
+Closing a window's last pane closes the window, and closing a session's last
+window ends the session -- a pane made by open --window is the only pane in its
+window, so closing it removes that window.
 
 install-integration writes the integration that calls report into a project, and
 it is a command rather than a button in the web UI on purpose: writing

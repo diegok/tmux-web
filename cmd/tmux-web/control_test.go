@@ -251,6 +251,54 @@ func TestPanesStateColumnIsTheFreeOneOrADash(t *testing.T) {
 	}
 }
 
+// The report read is the one fork this listing makes, and when it fails the
+// listing STILL PRINTS -- with a line on stderr saying that none of the dashes
+// is a claim about its pane.
+//
+// That note is the whole of this test. A dash means "ask `tmux-web state`" and
+// never "nothing is happening" (freeStates' own invariant), but a reader
+// handed a wall of them with no explanation reads the wall as the latter, and
+// here EVERY pane is a dash including the ones that do have a fresh working
+// report. Losing the reports must not lose the listing either: the pane ids,
+// addresses and commands came from the snapshot and are all still true.
+func TestPanesStillListsWhenTheReportsCannotBeRead(t *testing.T) {
+	stub := &controlStub{
+		rows: twoSessions(),
+		reports: map[string]string{
+			// A report that WOULD have printed `working`, so the dash below is
+			// the lost read and not an expired value.
+			"%1": tmux.FormatReport(tmux.StateWorking, time.Now().UnixMilli(), "running the tests"),
+		},
+	}
+	var out, errb bytes.Buffer
+	code := runPanes(nil, &out, &errb, callerEnv("%1"), func(string) controlClient {
+		return &failingRun{controlStub: stub}
+	})
+	if code != 0 {
+		t.Fatalf("exited %d, want 0: the snapshot worked, so there is a listing to print: %s", code, errb.String())
+	}
+	if f := paneFields(t, out.String(), "%1"); f == nil {
+		t.Fatalf("no record for %%1, so the listing was lost with the reports:\n%s", out.String())
+	} else if f[fState] != "-" {
+		t.Errorf("%%1: state = %q, want \"-\": nothing was read, so nothing may be claimed", f[fState])
+	}
+	// The note, and the two things it has to carry: that the reports are what
+	// failed, and the cause.
+	if !strings.Contains(errb.String(), "could not read") || !strings.Contains(errb.String(), "list-panes exploded") {
+		t.Errorf("stderr = %q, want a note naming the failure and its cause", errb.String())
+	}
+}
+
+// failingRun is a stub whose tmux command runs fail and whose snapshot works,
+// which controlStub's single err field cannot express -- it would fail the
+// snapshot too, and then there would be no listing to print. The sibling of
+// failingCapture below, for the other half of the interface.
+type failingRun struct{ *controlStub }
+
+func (f *failingRun) Run(context.Context, ...string) (string, error) {
+	return "", errors.New("list-panes exploded")
+}
+
 // Review Focus 1. Every verb needs the two variables tmux sets in a pane, and
 // an agent that was started outside tmux has neither. Saying which variables
 // are missing is the difference between a fixable message and "it did not
@@ -2108,7 +2156,7 @@ func skillCommands(t *testing.T, skill string) map[string]bool {
 	return found
 }
 
-// The nine verbs never reach the daemon, and this pins it from both ends.
+// The seven verbs never reach the daemon, and this pins it from both ends.
 //
 // IMPORTS, PARSED. There is no HTTP client in these verbs to inject, so a
 // "fails if called" stub would assert nothing. What can be said is that the

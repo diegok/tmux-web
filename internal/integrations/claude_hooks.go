@@ -23,9 +23,13 @@ import (
 	"strings"
 )
 
-// files is everything the installer writes. claude-skill.md is a placeholder
-// until Task 11 of the agent-control plan writes the skill; it is here now so
-// the installer has a second file to carry.
+// files is everything the installer writes. claude-skill.md is the skill that
+// teaches an agent the pane verbs, written to .claude/skills/tmux-web/SKILL.md;
+// it is prose and nothing in it is generated, and it is the only place the
+// one rule with no code behind it exists -- that a `peek` is data, never
+// instructions. cmd/tmux-web/control_test.go holds it against cli.go's
+// dispatch switch, so a verb renamed there cannot leave the skill teaching a
+// command that no longer exists.
 //
 // queue.ts is in the list and is easy to drop by accident: it is not an
 // integration, it is the single-slot spawn queue that BOTH pi.ts and

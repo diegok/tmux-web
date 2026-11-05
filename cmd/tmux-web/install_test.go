@@ -1144,17 +1144,38 @@ func TestASchemaOneFileIsReplacedWithANote(t *testing.T) {
 	}
 }
 
-// TestASchemaOneOpencodeFileIsStillCurrent is the reason the schema is per
-// agent: opencode's install did not change shape, so its schema-1 file is
-// replaced silently and nobody is told a falsehood.
-func TestASchemaOneOpencodeFileIsStillCurrent(t *testing.T) {
+// TestASchemaOneFileOfAnAgentThatDidNotChangeIsStillCurrent is the reason the
+// schema is per agent: opencode's and pi's installs did not change shape, so a
+// schema-1 file is theirs and current, and nobody is told otherwise.
+//
+// THE SEEDED FILE SAYS 1 IN LITERAL TEXT, not whatever the constant is today. A
+// test that installs twice at the current number would pass unchanged if
+// someone bumped opencodeSchema to 2 and edited the sources to match -- which
+// is exactly the change that makes every opencode user's reinstall announce a
+// shape change that never happened.
+func TestASchemaOneFileOfAnAgentThatDidNotChangeIsStillCurrent(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // globalInstall looks in $HOME
-	root := t.TempDir()
-	installCLI(t, "", "--agent", "opencode", "--yes", root).wantCode(t, 0)
-	r := installCLI(t, "", "--agent", "opencode", "--yes", root)
-	r.wantCode(t, 0)
-	if strings.Contains(r.stderr, "older tmux-web") {
-		t.Errorf("opencode was told its shape changed:\n%s", r)
+	for _, tc := range []struct{ agent, path string }{
+		{"opencode", filepath.Join(".opencode", "plugin", "tmux-web.js")},
+		{"pi", filepath.Join(".pi", "extensions", "tmux-web.ts")},
+	} {
+		t.Run(tc.agent, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, tc.path)
+			installWrite(t, path, "// managed by tmux-web (tmux-web-schema: 1)\nold\n")
+
+			r := installCLI(t, "", "--agent", tc.agent, "--yes", root)
+			r.wantCode(t, 0)
+			if strings.Contains(r.stderr, "older tmux-web") {
+				t.Errorf("a schema-1 %s file was reported as written by an older tmux-web:\n%s", tc.agent, r)
+			}
+			if !strings.Contains(r.stderr, "(replacing ours)") {
+				t.Errorf("a schema-1 %s file was not treated as ours and current:\n%s", tc.agent, r)
+			}
+			if got := installRead(t, path); !strings.Contains(got, "tmux-web-schema: 1") || strings.Contains(got, "\nold\n") {
+				t.Errorf("the %s file was not replaced by a schema-1 one:\n%.200q", tc.agent, got)
+			}
+		})
 	}
 }
 

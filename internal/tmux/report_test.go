@@ -30,7 +30,7 @@ func TestSanitizeActivity(t *testing.T) {
 		{"a newline welds two words if it is dropped rather than spaced",
 			"line one\nline two", "line one line two"},
 		// C1, built from its code point rather than typed. tmux's own checks
-		// elsewhere are byte-oriented and let these through, which validateLabel
+		// elsewhere are byte-oriented and let these through, which ValidateLabel
 		// already had to learn.
 		{"c1 control", "a" + string(rune(0x9f)) + "b", "a b"},
 		{"del", "a\x7fb", "a b"},

@@ -994,6 +994,84 @@ func TestOpenPrintsThePaneIDEvenWhenTheLabelFails(t *testing.T) {
 	}
 }
 
+// A bad --label is a malformed command line, so NOTHING HAPPENS -- and for
+// `run` that is the whole of the point.
+//
+// The label was validated only by tmux.SetLabel, which runs after the pane has
+// been created, so `open` made a pane, was refused the label, exited 1 and left
+// the pane behind, while `run` did worse: openLabelled answers a label failure
+// with the new pane id, which runRun reads as "the pane is there and the
+// command was NOT typed". A cosmetic name therefore cancelled the command the
+// verb exists to run. Both contradict the doctrine in runType's header --
+// everything decided without asking the server exits 2 and nothing is
+// attempted -- so checkLabel applies tmux.ValidateLabel's three rules on the
+// command line, before the environment is even read.
+//
+// ZERO SNAPSHOTS AS WELL AS ZERO RUNS, which is the part a weaker assertion
+// would miss: a refusal that cost a fork would still be a refusal decided by
+// asking the server.
+func TestOpenAndRunRefuseABadLabelBeforeAnythingIsOpened(t *testing.T) {
+	labels := map[string]string{
+		"too long":          strings.Repeat("x", tmux.MaxLabel+1),
+		"a control rune":    "tests\nand more",
+		"invalid utf-8":     "tests\xff",
+		"a C1 control rune": "tests\u0085here",
+	}
+	verbs := map[string]func(*controlStub, ...string) (int, string, string){
+		"open": openRun,
+		"run":  runRun_,
+	}
+	for verb, drive := range verbs {
+		for name, label := range labels {
+			t.Run(verb+"/"+name, func(t *testing.T) {
+				stub := &controlStub{rows: twoSessions(), newPane: "%42"}
+				args := []string{"--split", "--label", label}
+				if verb == "run" {
+					args = append(args, "make test")
+				}
+				code, out, errs := drive(stub, args...)
+				if code != 2 {
+					t.Errorf("exit %d, want 2: a label is decided without asking the server", code)
+				}
+				if out != "" {
+					t.Errorf("stdout = %q, want nothing: no pane id, because no pane", out)
+				}
+				if errs == "" {
+					t.Error("stderr is empty: the caller is owed the reason")
+				}
+				if stub.snapshots != 0 || len(stub.calls) != 0 || len(stub.runs) != 0 {
+					t.Errorf("snapshots %d, calls %v, runs %v: nothing may be touched", stub.snapshots, stub.calls, stub.runs)
+				}
+			})
+		}
+	}
+}
+
+// The other half of the same rule: a label tmux WOULD take is not refused
+// here, so the command line cannot grow a stricter notion of a label than the
+// pane has. The whitespace-only case is SetLabel's own exception -- it clears
+// the option rather than storing one -- and it is mirrored, not tightened.
+func TestOpenAcceptsEveryLabelThePaneWouldTake(t *testing.T) {
+	for name, label := range map[string]string{
+		"at the limit":    strings.Repeat("\U0001f30d", tmux.MaxLabel),
+		"leading dash":    "-x",
+		"a colon and dot": "web:server.1",
+		"whitespace only": "   ",
+		"a newline alone": "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := &controlStub{rows: twoSessions(), newPane: "%42"}
+			code, out, errs := openRun(stub, "--split", "--label", label)
+			if code != 0 {
+				t.Errorf("exit %d, want 0: stderr %q", code, errs)
+			}
+			if out != "%42\n" {
+				t.Errorf("stdout = %q, want the pane id", out)
+			}
+		})
+	}
+}
+
 func TestOpenRefusesAnAppOwnedSession(t *testing.T) {
 	// The caller's ONLY row is the browser tab's session, which is what a
 	// snapshot looks like once the owner has killed the base session with a tab

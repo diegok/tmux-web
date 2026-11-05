@@ -400,12 +400,12 @@ func ParseRows(out string) (rows []Row, dropped int, err error) {
 // pane -- neither says anything about a C1 control, a lone 0x7f, invalid UTF-8,
 // or a label of a length that would ride the poll into the sidebar every 1.5s.
 //
-// The rules are validateLabel's, applied instead of refused: what SetLabel
+// The rules are ValidateLabel's, applied instead of refused: what SetLabel
 // rejects on the way in is what this repairs on the way out, so there is one
 // notion of a safe label rather than two.
 //
 //   - Every control rune becomes a space. unicode.IsControl, not a byte range,
-//     for the reason validateLabel gives: it is what catches the C1 controls
+//     for the reason ValidateLabel gives: it is what catches the C1 controls
 //     that tmux's own byte-oriented check lets through.
 //   - Invalid UTF-8 becomes U+FFFD. Ranging over a string yields RuneError per
 //     bad byte and WriteRune re-encodes it, so what the browser is told is what

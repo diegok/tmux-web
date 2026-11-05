@@ -294,7 +294,7 @@ func (c *Client) RenameWindow(ctx context.Context, windowID, name string) error 
 // carrying text derived from prompts and tool calls. The snapshot therefore
 // defends itself as well (snapshot.go: labelField strips the two bytes in
 // tmux's own format expansion, the label is the last field so a raw one cannot
-// shift a record, and sanitizeLabel repairs what arrives). This validator is
+// shift a record, and sanitizeLabel repairs what arrives). ValidateLabel is
 // what keeps the app's own writes honest and gives the browser an error it can
 // show instead of a label that silently changes shape on the way back.
 //
@@ -315,7 +315,7 @@ func (c *Client) SetLabel(ctx context.Context, paneID, label string) error {
 		_, err := c.Run(ctx, "set", "-p", "-u", "-t", paneID, LabelOption)
 		return err
 	}
-	if err := validateLabel(label); err != nil {
+	if err := ValidateLabel(label); err != nil {
 		return fmt.Errorf("set label on %s: %w", paneID, err)
 	}
 	// No "--". Unlike a new name, an option value is the second positional
@@ -326,8 +326,16 @@ func (c *Client) SetLabel(ctx context.Context, paneID, label string) error {
 	return err
 }
 
-// validateLabel rejects what would break the snapshot record or the row.
-func validateLabel(label string) error {
+// ValidateLabel rejects what would break the snapshot record or the row.
+//
+// EXPORTED FOR THE COMMAND LINE. SetLabel above runs it, but it runs it after
+// the pane exists, and the CLI's `open` and `run` need the same three checks
+// on a --label BEFORE anything is created: a refusal decided without asking
+// the server is a malformed command line there, and `run` must not open a pane
+// and then abandon the command it was called for because a cosmetic label did
+// not fit. One function for both so the command line cannot refuse a label the
+// pane would take, or take one the pane would refuse.
+func ValidateLabel(label string) error {
 	// encoding/json rewrites invalid UTF-8 to U+FFFD without erroring, so a
 	// label that survived this would be shown as something tmux does not hold.
 	if !utf8.ValidString(label) {

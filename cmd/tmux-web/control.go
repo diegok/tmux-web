@@ -403,6 +403,12 @@ func runOpen(args []string, stdout, stderr io.Writer, getenv func(string) string
 			return usageError(stderr, fset, "%v", err)
 		}
 	}
+	// And the label, for the same reason and in the same place. See checkLabel:
+	// validated only by SetLabel, a label tmux would refuse would create the
+	// pane first and then leave it behind unlabelled.
+	if code, ok := checkLabel(stderr, fset, *label); !ok {
+		return code
+	}
 	socket, caller, ok := tmuxTarget(getenv)
 	if !ok {
 		return notInsideTmux(stderr, "open")
@@ -905,6 +911,14 @@ func runRun(args []string, stdout, stderr io.Writer, getenv func(string) string,
 	if strings.ContainsAny(command, "\n\r") {
 		return usageError(stderr, fset, "the command has more than one line, and a Return inside it would submit once per line: join the steps with && or ;, or write a script and run that")
 	}
+	// The label before the open, as in `open`, and here it is not cosmetic:
+	// openLabelled answers a label failure with a NON-EMPTY pane id, which the
+	// branch below reads as "the pane is there and the command was not typed".
+	// So an unvalidated bad label would mean this verb opened a pane and never
+	// ran the command it exists to run. See checkLabel.
+	if code, ok := checkLabel(stderr, fset, *label); !ok {
+		return code
+	}
 	socket, caller, ok := tmuxTarget(getenv)
 	if !ok {
 		return notInsideTmux(stderr, "run")
@@ -924,6 +938,37 @@ func runRun(args []string, stdout, stderr io.Writer, getenv func(string) string,
 		return controlFail(stderr, "run", fmt.Errorf("the pane was opened (%s, left in place) but the command was not typed: %w -- see it with tmux-web peek %s", pane, err, pane))
 	}
 	return 0
+}
+
+// checkLabel refuses a --label on the COMMAND LINE, which is the only place
+// either verb that takes one can refuse it in time.
+//
+// tmux.SetLabel applies the very same rules, and that is too late: it runs
+// after the pane has been created. `open --split --label <129 runes>` would
+// make the pane, be refused the label, exit 1 and leave the pane behind; `run`
+// is worse, because openLabelled returns a label failure WITH the new pane id
+// and `run` therefore reports "the pane was opened but the command was NOT
+// typed" -- a cosmetic label cancelling the work the verb was called for. Both
+// contradict this file's own doctrine, stated in runType's header: everything
+// decided without asking the server exits 2 and nothing is attempted. Nothing
+// here forks, so this is that check.
+//
+// ONE RULE, NOT TWO: tmux.ValidateLabel is the same function SetLabel calls, so
+// the command line cannot come to refuse a label the pane would take or take
+// one the pane would refuse.
+func checkLabel(stderr io.Writer, fset *flag.FlagSet, label string) (int, bool) {
+	// SetLabel's own exception, mirrored rather than tightened: a label of
+	// nothing but whitespace CLEARS the option instead of storing it, so
+	// SetLabel never validates one, and an empty --label is never passed to it
+	// at all. Refusing either here would be a stricter rule in the one place
+	// no test of the real one covers.
+	if strings.TrimSpace(label) == "" {
+		return 0, true
+	}
+	if err := tmux.ValidateLabel(label); err != nil {
+		return usageError(stderr, fset, "%v -- the label is only a name shown by tmux-web panes and in the sidebar, so nothing was opened", err), false
+	}
+	return 0, true
 }
 
 // validateKeyName refuses what tmux would take as something other than one key.

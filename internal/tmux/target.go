@@ -85,7 +85,7 @@ func validateID(kind string, sigil byte, s string) error {
 // U+009F is accepted and stored, and would ride the poll into the DOM. A 0x1f
 // in particular is the snapshot field separator, which forges a record and
 // makes a pane vanish from the sidebar; that is the same hole @tmux_web_label is
-// validated against on write (validateLabel) and repaired against on read
+// validated against on write (ValidateLabel) and repaired against on read
 // (snapshot.go's sanitizeLabel), the two sharing one notion of a safe value.
 //
 // Deliberately allowed: inner, leading and trailing spaces (arguments reach

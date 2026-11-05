@@ -11,19 +11,48 @@ merge. What follows is only the part with a future in it.
 
 ## Teaching opencode and pi
 
-The installer carries N owned files per agent now, and claude's second is
-`.claude/skills/tmux-web/SKILL.md`. The owner uses skills in all three agents,
-so the other two are a known follow-up rather than a gap. Two catches found
-while building the slot, both from Task 10's review:
+**pi is taught.** It owns two files now, the extension and
+`skills/tmux-web/SKILL.md`, from the same embedded prose claude installs. Both
+catches this section used to list are closed:
 
-- **`where.validate` is one hook run on every owned file.** It must become
-  per-file before pi gains a skill, or the pi validator will run on Markdown.
-- **Each agent's skill path and settings handling need their own
-  investigation.** Nothing in this repo can answer where opencode and pi look
-  for a skill; the owner's own machines can.
+- `validate` is per file, and so is `schema`. The first was the prerequisite
+  (pi's pre-flight would otherwise have been handed the Markdown); the second
+  turned out to matter more, and is written up below.
+- The paths are measured, on pi 1.5.0, in a throwaway tmux with a HOME and a
+  `PI_CODING_AGENT_DIR` of its own: `<agent dir>/skills/<name>/SKILL.md` loads
+  (the startup screen lists it under `[Skills]`), and `.pi/skills/<name>/SKILL.md`
+  loads once the project is trusted — untrusted, pi asks `Trust project folder?`
+  and loads no `.pi` resources at all. `.agents/skills/` works too and is
+  deliberately not used: it is shared with other agents and searched up the
+  ancestors, so a drop there is not one agent's to own.
 
-A third agent costs one `ownedFile` entry, one embedded source, and one `case`
+**Beware a measurement that cannot have been made.** A pi reviewing this
+integration reported `pi skills list` as the deterministic way to see what the
+discovery loaded. There is no such subcommand in pi 1.5.0 — `pi skills --help`
+falls through to the general help, and the command list is
+install/remove/uninstall/update/list/config/auth/mcp. The paths above were
+measured another way. Every other finding in that review checked out; this one
+did not, and it is the reason the rest were checked at all.
+
+There is also no model-free lever for this: an unknown `--provider` makes pi
+exit before skills load, so the trick the extension pre-flight uses does not
+work for a skill. A TUI in a throwaway tmux, read with `capture-pane`, is what
+works.
+
+**opencode is the one left**, and it is blocked rather than pending: opencode
+v2 broke the plugin, and the port comes first. opencode reads
+`~/.config/opencode/skills/<name>/SKILL.md`, `.opencode/skills/`, and also
+`.claude/skills` — so a project install may already be seen through the file
+claude owns, which is worth measuring before writing a third path.
+
+A further agent costs one `ownedFile` entry, one embedded source, and one `case`
 in `renderOwned` if the file is not a plain copy.
+
+**The shared skill source is still called `claude-skill.md`**, which is now a
+lie: claude and pi install the same bytes of it. Renaming it moves the
+`//go:embed` line in `internal/integrations`, the `Files` list beside it and the
+two tests that assert that list — and that directory is where opencode's v2 port
+is working, so the rename waits for it rather than racing it.
 
 ## Two behaviours that are right but unobvious
 

@@ -45,27 +45,40 @@ import (
 //     YES. Every check that can refuse runs in the planning phase, so a refusal
 //     leaves the project exactly as it was.
 
-// THE SCHEMA IS PER AGENT (agentSpec.schema), and that is a decision about what
+// THE SCHEMA IS PER FILE (ownedFile.schema), and that is a decision about what
 // the number means. It is the version in the managed header; bump it when the
 // shape of what gets installed changes in a way a user should be told about, and
 // the only thing it controls is whether an existing file of ours is replaced
 // silently or with a note.
 //
-// claude's install grew a second owned file, so claude is at 2. opencode's and
-// pi's did not change at all. One global number would tell an opencode user
-// reinstalling that his file was replaced "because the shape changed" when
-// nothing about his install is different except a digit -- a note that is false
-// is worse than no note. So there are three numbers, and each says what is true
-// of its own agent.
+// One number for everything would tell an opencode user reinstalling that his
+// file was replaced "because the shape changed" when nothing about his install
+// differs except a digit, and a note that is false is worse than no note. That
+// is why it is not global. It is not per AGENT either, and that is the newer
+// half: pi owns two files that are versioned by two different things.
+//
+//   - opencodeSchema and piSchema are a RUN-TIME number. It is queue.ts's
+//     TMUX_WEB_SCHEMA, inlined into opencode.js and pi.ts, and two loaded
+//     copies of the integration compare it to agree which of them reports.
+//     Bumping it changes which installed copy wins.
+//   - skillSchema versions one prose file, which claude and pi install the
+//     same bytes of.
+//
+// Per AGENT, giving pi the skill forces piSchema to the skill's number, which
+// drags queue.ts's constant along -- so editing the prose of a claude skill
+// would change which copy of the OPENCODE integration claims the reporter.
+// Per file, the two move independently. Found by a pi reviewing this
+// integration; docs/plans/2026-11-05-tmux-web-agent-control-followups.md has
+// the chain written out.
 //
 // What stays shared is opencode's and pi's pair: pi.ts, opencode.js and the
-// queue.ts inlined into both must agree with each other (queue.ts's
-// TMUX_WEB_SCHEMA is compared at run time by the two scopes' copies), and
+// queue.ts inlined into both must agree with each other, and
 // pivalidate_test.go holds them there.
 const (
-	claudeSchema   = 2
-	opencodeSchema = 1
-	piSchema       = 1
+	claudeSchema   = 2 // claude's report wrapper
+	skillSchema    = 2 // the skill, which claude and pi install from the same bytes
+	opencodeSchema = 1 // opencode.js, with queue.ts inlined
+	piSchema       = 1 // pi.ts, with the same queue.ts inlined
 )
 
 // managedHeader matches the header line every file this command writes carries
@@ -121,12 +134,38 @@ const queueImport = "import { claimReporter, makeQueue, spawnReport } from './qu
 // not is one `tmux-web install` refuses by name.
 var agents = map[string]agentSpec{
 	"pi": {
-		schema: piSchema,
-		files: []ownedFile{{
-			file:       filepath.Join(".pi", "extensions", "tmux-web.ts"),
-			globalFile: filepath.Join("extensions", "tmux-web.ts"),
-			source:     "pi.ts",
-		}},
+		// The extension MUST stay first: pivalidate_test.go renders files[0]
+		// to hand a real pi the thing it ships.
+		files: []ownedFile{
+			{
+				file:           filepath.Join(".pi", "extensions", "tmux-web.ts"),
+				globalFile:     filepath.Join("extensions", "tmux-web.ts"),
+				source:         "pi.ts",
+				schema:         piSchema,
+				globalValidate: validatePiArtifact,
+			},
+			{
+				// MEASURED on pi 1.5.0, in a throwaway tmux with a HOME and a
+				// PI_CODING_AGENT_DIR of its own: a skill at
+				// <agent dir>/skills/<name>/SKILL.md loads (the startup screen
+				// listed it under [Skills]), and a project one at
+				// .pi/skills/<name>/SKILL.md loads once the project is trusted
+				// -- untrusted, pi asks "Trust project folder?" and loads no
+				// .pi resources at all. .agents/skills/ would work too and is
+				// not used: it is shared with other agents and is searched up
+				// the ancestors, so a drop there is not one agent's to own.
+				//
+				// The source is still named claude-skill.md. The bytes are the
+				// same prose for both agents and the name is now wrong, but
+				// renaming it moves the //go:embed line in
+				// internal/integrations, which is where opencode's v2 port is
+				// working; followups.md carries it.
+				file:       filepath.Join(".pi", "skills", "tmux-web", "SKILL.md"),
+				globalFile: filepath.Join("skills", "tmux-web", "SKILL.md"),
+				source:     "claude-skill.md",
+				schema:     skillSchema,
+			},
+		},
 		global: &globalSpec{
 			root: piAgentDir,
 			note: "a global pi extension is auto-loaded in every project, with no entry in any settings file " +
@@ -137,16 +176,23 @@ var agents = map[string]agentSpec{
 				"line, the trailing newline " +
 				"dropped. `pi remove` does not put it back either: it leaves its key behind as an empty " +
 				"array. That is a wholesale rewrite of a file you own, which is the one thing this command " +
-				"will not do. Uninstalling is deleting the one file above",
-			validate: validatePiArtifact,
+				"will not do. Uninstalling is deleting the files above",
 		},
+		// PROJECT SCOPE ONLY. MEASURED on pi 1.5.0: an untrusted project makes
+		// pi ask "Trust project folder? ... This allows pi to load .pi
+		// settings and resources, install missing project packages, and
+		// execute project extensions", and until that is answered neither of
+		// these files does anything. A global install has no such gate, which
+		// is the asymmetry globalSpec.note is about.
+		projectWarning: "pi loads neither of these until this project is trusted: answer pi's " +
+			"`Trust project folder?` prompt once, or start it with `--approve` for a single run",
 	},
 	"opencode": {
-		schema: opencodeSchema,
 		files: []ownedFile{{
 			file:       filepath.Join(".opencode", "plugin", "tmux-web.js"),
 			globalFile: filepath.Join("opencode", "plugin", "tmux-web.js"),
 			source:     "opencode.js",
+			schema:     opencodeSchema,
 		}},
 		global: &globalSpec{
 			root: opencodeConfigDir,
@@ -173,23 +219,25 @@ var agents = map[string]agentSpec{
 			"not control",
 	},
 	"claude": {
-		schema: claudeSchema,
 		// The wrapper MUST stay first: the settings.json merge names it.
 		//
-		// The skill is the slot the other two agents will fill when they
-		// are investigated; it is an entry in a slice and not a claude-only
-		// code path so that doing so is one more entry.
+		// The skill was the slot the other two agents would fill, and pi has
+		// filled it: the entry below and pi's second file are the same source
+		// and the same schema. It cost one entry in a slice, which is what
+		// keeping it out of a claude-only code path bought.
 		files: []ownedFile{
 			{
 				file:       filepath.Join(".claude", claudeScriptName),
 				globalFile: filepath.Join(".claude", claudeScriptName),
 				source:     "claude-report.sh",
 				mode:       0o755,
+				schema:     claudeSchema,
 			},
 			{
 				file:       filepath.Join(".claude", "skills", "tmux-web", "SKILL.md"),
 				globalFile: filepath.Join(".claude", "skills", "tmux-web", "SKILL.md"),
 				source:     "claude-skill.md",
+				schema:     skillSchema,
 			},
 		},
 		// settings.json is not in `files`: it is the user's, and it is
@@ -205,7 +253,6 @@ var agents = map[string]agentSpec{
 
 // agentSpec is one agent's installation.
 type agentSpec struct {
-	schema         int         // what this agent's managed headers say; see claudeSchema
 	files          []ownedFile // every file we own for this agent, never empty
 	settings       string      // a file the user owns that we merge into, if any
 	global         *globalSpec // where --global puts it; nil would refuse it
@@ -218,6 +265,20 @@ type ownedFile struct {
 	globalFile string      // relative to the agent's global root
 	source     string      // its name in internal/integrations' embed.FS
 	mode       fs.FileMode // 0 means 0644
+	// schema is what this file's managed header says; see claudeSchema for why
+	// the number belongs to the file and not to the agent.
+	schema int
+	// globalValidate runs BEFORE anything is written and a non-nil error is a
+	// refusal. Only pi's extension has one, and only at GLOBAL scope; see
+	// pivalidate.go for why it is pi, and globalSpec.note for why global.
+	//
+	// It belongs to the FILE. On the scope it ran once per file of the agent,
+	// which was correct only while pi owned exactly one: with two, pi's own
+	// pre-flight would be handed the Markdown skill, a real pi would refuse
+	// it, and every global pi install would refuse over a good skill. `rel` is
+	// the file's path inside the agent's own directory, so that what gets
+	// tried is tried where the agent would read it.
+	globalValidate func(dir, rel string, artifact []byte) error
 }
 
 // globalSpec is where `--global` puts one agent's integration.
@@ -231,9 +292,6 @@ type globalSpec struct {
 	root     func() (string, error) // the agent's own configuration directory
 	settings string                 // a file the user owns that we merge into, if any
 	note     string                 // what this scope is, and what it does not touch
-	// validate runs BEFORE anything is written, and a non-nil error is a
-	// refusal. Only pi has one; see pivalidate.go for why it is pi.
-	validate func(dir string, artifact []byte) error
 }
 
 // -- the agents' own configuration directories -------------------------------
@@ -366,7 +424,6 @@ type scope struct {
 	dir      string       // the directory the first file lives in, for messages
 	note     string       // what this scope is
 	warning  string       // what it costs
-	validate func(dir string, artifact []byte) error
 }
 
 // scopedFile is one ownedFile placed in a scope.
@@ -374,6 +431,22 @@ type scopedFile struct {
 	path   string
 	source string
 	mode   fs.FileMode
+	schema int
+	// validate is the file's globalValidate with its path already bound, and
+	// it is nil at project scope -- which is the gate that keeps a project
+	// install from starting a real pi.
+	validate func(dir string, artifact []byte) error
+}
+
+// bindValidate ties one file's global pre-flight to the path it will have
+// inside the agent's own directory. resolveScope is the only place that knows
+// both, so it is the only place that can.
+func bindValidate(f ownedFile) func(string, []byte) error {
+	if f.globalValidate == nil {
+		return nil
+	}
+	rel, v := f.globalFile, f.globalValidate
+	return func(dir string, artifact []byte) error { return v(dir, rel, artifact) }
 }
 
 // resolveScope works out that. Every path is made absolute, because every path
@@ -386,9 +459,15 @@ func resolveScope(spec agentSpec, global bool, operands []string) (scope, error)
 		if err != nil {
 			return scope{}, err
 		}
-		out := scope{global: true, note: g.note, validate: g.validate}
+		out := scope{global: true, note: g.note}
 		for _, f := range spec.files {
-			out.files = append(out.files, scopedFile{filepath.Join(root, f.globalFile), f.source, f.mode})
+			out.files = append(out.files, scopedFile{
+				path:     filepath.Join(root, f.globalFile),
+				source:   f.source,
+				mode:     f.mode,
+				schema:   f.schema,
+				validate: bindValidate(f),
+			})
 		}
 		if g.settings != "" {
 			out.settings = filepath.Join(root, g.settings)
@@ -412,7 +491,12 @@ func resolveScope(spec agentSpec, global bool, operands []string) (scope, error)
 	}
 	out := scope{warning: spec.projectWarning, dir: root}
 	for _, f := range spec.files {
-		out.files = append(out.files, scopedFile{filepath.Join(root, f.file), f.source, f.mode})
+		out.files = append(out.files, scopedFile{
+			path:   filepath.Join(root, f.file),
+			source: f.source,
+			mode:   f.mode,
+			schema: f.schema,
+		})
 	}
 	if spec.settings != "" {
 		out.settings = filepath.Join(root, spec.settings)
@@ -466,7 +550,7 @@ func planInstall(agent string, spec agentSpec, where scope, remove bool) (*insta
 	states := make([]found, len(where.files))
 	present := 0
 	for i, f := range where.files {
-		state, schema, err := ownerOf(f.path, spec.schema)
+		state, schema, err := ownerOf(f.path, f.schema)
 		if err != nil {
 			return nil, err
 		}
@@ -507,8 +591,8 @@ func planInstall(agent string, spec agentSpec, where scope, remove bool) (*insta
 			// else that can refuse: a refused run has written nothing. It runs
 			// on install only -- `--remove` deletes a file, and a `pi` that
 			// cannot be run is no reason to leave a broken extension in place.
-			if where.validate != nil {
-				if err := where.validate(where.dir, content); err != nil {
+			if f.validate != nil {
+				if err := f.validate(where.dir, content); err != nil {
 					return nil, err
 				}
 			}
@@ -583,7 +667,7 @@ func globalInstall(spec agentSpec) string {
 	}
 	for _, f := range spec.files {
 		path := filepath.Join(root, f.globalFile)
-		if state, _, err := ownerOf(path, spec.schema); err == nil && (state == ownCurrent || state == ownOutdated) {
+		if state, _, err := ownerOf(path, f.schema); err == nil && (state == ownCurrent || state == ownOutdated) {
 			return path
 		}
 	}
@@ -765,7 +849,7 @@ func nestedInstall(root string) string {
 		for _, spec := range agents {
 			for _, f := range spec.files {
 				candidate := filepath.Join(dir, f.file)
-				if state, _, err := ownerOf(candidate, spec.schema); err == nil && (state == ownCurrent || state == ownOutdated) {
+				if state, _, err := ownerOf(candidate, f.schema); err == nil && (state == ownCurrent || state == ownOutdated) {
 					return candidate
 				}
 			}

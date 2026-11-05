@@ -90,7 +90,7 @@ var piProbe = runPiProbe
 // fresh under the system temporary directory and removed afterwards, and the
 // environment is constructed rather than inherited so that no credential of
 // theirs can be picked up by a process this command started.
-func runPiProbe(artifact []byte) (piVerdict, string) {
+func runPiProbe(rel string, artifact []byte) (piVerdict, string) {
 	bin, err := exec.LookPath("pi")
 	if err != nil {
 		return piUnknown, "pi is not on PATH (" + err.Error() + ")"
@@ -102,7 +102,10 @@ func runPiProbe(artifact []byte) (piVerdict, string) {
 	defer os.RemoveAll(dir)
 
 	agent := filepath.Join(dir, "agent")
-	ext := filepath.Join(agent, "extensions", "tmux-web.ts")
+	// rel is the file's own path inside the agent's directory rather than a
+	// constant: the probe has to try the file where pi would read it, and pi
+	// owns more than one now.
+	ext := filepath.Join(agent, rel)
 	home := filepath.Join(dir, "home")
 	work := filepath.Join(dir, "work")
 	for _, d := range []string{filepath.Dir(ext), home, work} {
@@ -183,8 +186,8 @@ func piProbeVerdict(out []byte, ext string) (piVerdict, string) {
 // delete. The way through is named in the message instead: a project-scope
 // install, which is not gated this way because a project-local extension that
 // fails breaks that project only and pi prints the hint itself.
-func validatePiArtifact(dir string, artifact []byte) error {
-	verdict, detail := piProbe(artifact)
+func validatePiArtifact(dir, rel string, artifact []byte) error {
+	verdict, detail := piProbe(rel, artifact)
 	switch verdict {
 	case piLoads:
 		return nil

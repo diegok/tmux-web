@@ -272,8 +272,12 @@ edited:
   config alone. opencode's own bootstrap (`package.json`, `node_modules/`, a
   `.gitignore`) lands beside the plugin in opencode's config directory, **not in
   any repository**.
-- pi: `$PI_CODING_AGENT_DIR/extensions/tmux-web.ts` (`~/.pi/agent` when that is
-  unset), which pi auto-loads with no settings entry and no trust prompt.
+- pi: `$PI_CODING_AGENT_DIR/extensions/tmux-web.ts` and
+  `$PI_CODING_AGENT_DIR/skills/tmux-web/SKILL.md` (`~/.pi/agent` when that is
+  unset), which pi auto-loads with no settings entry and no trust prompt. A
+  relative `PI_CODING_AGENT_DIR` is refused rather than resolved: pi resolves
+  one against its own working directory, so there is no directory this command
+  could call global.
   `~/.pi/agent/settings.json` is not edited and `pi install` is not run:
   measured on pi 0.85.1 and again on 1.3.0, `pi install` and `pi remove` keep
   every value and the key order but **reformat the whole file** — indentation
@@ -360,10 +364,13 @@ open, no daemon — and that is why they keep working while you are away. `panes
 lists only the caller's own session; a pane in another one must be named
 explicitly. That is there so an agent does not surprise you, not as a security
 boundary, since an agent in your tmux can reach the whole `tmux` CLI anyway.
-Only `claude` is taught these verbs automatically: `install-integration` writes
-two files for it (the report wrapper and `.claude/skills/tmux-web/SKILL.md`,
-whose text is `internal/integrations/claude-skill.md`) and one each for opencode
-and pi, unchanged. Teaching those two is a known follow-up.
+`claude` and `pi` are taught these verbs automatically: `install-integration`
+writes two files for each — the report wrapper or extension, and a `SKILL.md`
+whose text is `internal/integrations/claude-skill.md`, the same prose for both —
+and one for opencode, unchanged. At project scope pi loads neither of its files
+until the project is trusted, by `--approve` for one run or its own prompt once;
+a global install has no such gate, measured on pi 1.5.0. Teaching opencode is a
+known follow-up: its v2 release broke the plugin and is being ported first.
 
 **Two things to know before one of them surprises you.** `close` is deliberately
 not limited to panes the agent created, and closing a window's last pane closes

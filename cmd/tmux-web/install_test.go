@@ -334,7 +334,7 @@ func TestGlobalInstallsIntoTheAgentsOwnDirectory(t *testing.T) {
 			if !strings.Contains(r.stdout, path) {
 				t.Errorf("the installed path was not printed on stdout:\n%s", r)
 			}
-			if got := installRead(t, path); !strings.Contains(got, "tmux-web-schema: "+strconv.Itoa(agents[tc.agent].schema)) {
+			if got := installRead(t, path); !strings.Contains(got, "tmux-web-schema: "+strconv.Itoa(agents[tc.agent].files[0].schema)) {
 				t.Errorf("what was written to %s is not ours:\n%.200q", path, got)
 			}
 		})
@@ -425,6 +425,73 @@ func TestGlobalHonoursTheAgentsOwnEnvironmentVariables(t *testing.T) {
 		assertNothingUnder(t, cwd)
 		assertNothingUnder(t, home)
 	})
+}
+
+// TestPiOwnsItsSkillAndOnlyTheExtensionIsProbed is the per-file half of this
+// installer: the pre-flight belongs to the FILE, not to the agent or the scope.
+//
+// pi owns two files, and they differ in exactly that. The extension carries
+// the pre-flight, because a global extension a real pi cannot load stops pi
+// STARTING in every project on the machine. The skill carries none -- it is
+// Markdown, and handing Markdown to that pre-flight makes pi refuse it, which
+// would turn every global pi install into a refusal over a perfectly good
+// skill.
+//
+// MEASURED on pi 1.5.0, in a throwaway tmux with a HOME and a
+// PI_CODING_AGENT_DIR of its own: a skill at .pi/skills/<name>/SKILL.md is
+// discovered (`[Skills] probe-skill` on the startup screen with --approve),
+// and without trust pi shows "Trust project folder?" and loads nothing. So the
+// project path needs the same `--approve` the project extension already needs.
+func TestPiOwnsItsSkillAndOnlyTheExtensionIsProbed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PI_CODING_AGENT_DIR", filepath.Join(home, "pi-agent"))
+
+	var probed [][]byte
+	original := piProbe
+	piProbe = func(_ string, artifact []byte) (piVerdict, string) {
+		probed = append(probed, artifact)
+		return piLoads, ""
+	}
+	t.Cleanup(func() { piProbe = original })
+
+	installCLI(t, "", "--agent", "pi", "--global", "--yes").wantCode(t, 0)
+
+	ext := filepath.Join(home, "pi-agent", "extensions", "tmux-web.ts")
+	skill := filepath.Join(home, "pi-agent", "skills", "tmux-web", "SKILL.md")
+	for _, want := range []string{ext, skill} {
+		if _, err := os.Stat(want); err != nil {
+			t.Errorf("a global pi install wrote nothing to %s: %v", want, err)
+		}
+	}
+	if len(probed) != 1 {
+		t.Fatalf("the pre-flight ran %d times, want once: only the extension carries one", len(probed))
+	}
+	if got, want := string(probed[0]), installRead(t, ext); got != want {
+		t.Errorf("the pre-flight was handed %d bytes and the extension written is %d: it is not probing the file that carries it",
+			len(got), len(want))
+	}
+}
+
+// TestEachOwnedFileIsClassifiedAgainstItsOwnSchema is the other per-file half.
+//
+// The skill pi installs is the same file claude installs, so its managed header
+// carries claude's number. The extension's carries the number queue.ts exports,
+// which is what two loaded copies of the integration compare AT RUN TIME to
+// agree on which of them reports. Those are two different numbers with two
+// different jobs, and they have to be free to move apart: with one number per
+// agent, one of pi's two files reads `ownOutdated` forever and every reinstall
+// tells the owner an older tmux-web wrote what this very command just wrote.
+func TestEachOwnedFileIsClassifiedAgainstItsOwnSchema(t *testing.T) {
+	globalHome(t)
+
+	installCLI(t, "", "--agent", "pi", "--global", "--yes").wantCode(t, 0)
+	r := installCLI(t, "", "--agent", "pi", "--global", "--yes")
+
+	r.wantCode(t, 0)
+	if strings.Contains(r.stderr, "older tmux-web") {
+		t.Errorf("reinstalling what this command just wrote claims an older tmux-web wrote it:\n%s", r)
+	}
 }
 
 // TestAGlobalInstallDoesNotWarnAboutARepositoryItIsNotIn.
@@ -883,7 +950,7 @@ func TestUnknownAgentIsRefused(t *testing.T) {
 func stubPiProbe(t *testing.T, verdict piVerdict, detail string) {
 	t.Helper()
 	original := piProbe
-	piProbe = func([]byte) (piVerdict, string) { return verdict, detail }
+	piProbe = func(string, []byte) (piVerdict, string) { return verdict, detail }
 	t.Cleanup(func() { piProbe = original })
 }
 
@@ -1112,22 +1179,30 @@ func TestAnAgentCanOwnMoreThanOneFile(t *testing.T) {
 	}
 }
 
-// TestAgentsWithOneOwnedFileAreUnchanged. Widening the spec to a slice must not
-// make opencode or pi write anything they did not before: one path printed, one
-// file on disk, at the path the integration tests already look for.
-func TestAgentsWithOneOwnedFileAreUnchanged(t *testing.T) {
+// TestAnAgentWritesExactlyTheFilesItsSpecLists. A spec that is a slice must not
+// make an agent write anything the slice does not name: the paths printed are
+// that list in that order, and the files in the project are that list and
+// nothing else.
+//
+// It was "agents with one owned file are unchanged" and counted to one, which
+// stopped being true the day pi gained a skill -- so it counts the spec
+// instead. claude is left out on purpose: it also merges a settings.json it
+// does not own, so "nothing else in the project" is not true of it and the
+// claudeOwned tests above cover its pair.
+func TestAnAgentWritesExactlyTheFilesItsSpecLists(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // globalInstall looks in $HOME
-	for _, tc := range []struct{ agent, path string }{
-		{"pi", filepath.Join(".pi", "extensions", "tmux-web.ts")},
-		{"opencode", filepath.Join(".opencode", "plugin", "tmux-web.js")},
-	} {
-		t.Run(tc.agent, func(t *testing.T) {
+	for _, agent := range []string{"pi", "opencode"} {
+		t.Run(agent, func(t *testing.T) {
 			root := t.TempDir()
-			r := installCLI(t, "", "--agent", tc.agent, "--yes", root)
+			r := installCLI(t, "", "--agent", agent, "--yes", root)
 			r.wantCode(t, 0)
 
-			if got, want := strings.TrimSpace(r.stdout), filepath.Join(root, tc.path); got != want {
-				t.Errorf("stdout = %q, want exactly %q", got, want)
+			var want []string
+			for _, f := range agents[agent].files {
+				want = append(want, filepath.Join(root, f.file))
+			}
+			if got := strings.Fields(r.stdout); strings.Join(got, "\n") != strings.Join(want, "\n") {
+				t.Errorf("stdout lists %q, want exactly the spec's %q", got, want)
 			}
 			var written []string
 			filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
@@ -1136,8 +1211,11 @@ func TestAgentsWithOneOwnedFileAreUnchanged(t *testing.T) {
 				}
 				return nil
 			})
-			if len(written) != 1 || written[0] != filepath.Join(root, tc.path) {
-				t.Errorf("wrote %v, want only %s", written, tc.path)
+			sort.Strings(written)
+			sorted := append([]string(nil), want...)
+			sort.Strings(sorted)
+			if strings.Join(written, "\n") != strings.Join(sorted, "\n") {
+				t.Errorf("wrote %v, want exactly the spec's %v", written, sorted)
 			}
 		})
 	}

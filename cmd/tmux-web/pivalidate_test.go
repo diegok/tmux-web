@@ -219,19 +219,20 @@ func TestPiValidationRunsOnlyWhereItIsNeeded(t *testing.T) {
 
 // TestARealPiLoadsTheArtifactThisInstallerWrites is the probe against the thing
 // it exists to check, and it is the only test in this package that can tell you
-// the answer is still true on whatever pi is installed -- last green on pi
-// 1.3.0. It SKIPS LOUDLY without pi: a validation gate whose only test is a
-// table of canned strings is a table of canned strings.
+// the answer is still true on whatever pi is installed -- green on pi 1.3.0
+// and again on 1.5.0. It SKIPS LOUDLY without pi: a validation gate whose only
+// test is a table of canned strings is a table of canned strings.
 func TestARealPiLoadsTheArtifactThisInstallerWrites(t *testing.T) {
 	requirePi(t)
 
-	artifact, err := renderOwned(agents["pi"].files[0].source)
+	ext := agents["pi"].files[0]
+	artifact, err := renderOwned(ext.source)
 	if err != nil {
 		t.Fatalf("rendering the pi artifact: %v", err)
 	}
 
 	t.Run("the artifact we ship", func(t *testing.T) {
-		verdict, detail := runPiProbe(artifact)
+		verdict, detail := runPiProbe(ext.globalFile, artifact)
 		if verdict != piLoads {
 			t.Fatalf("a real pi did not load the file this installer writes: verdict %v, %s", verdict, detail)
 		}
@@ -247,7 +248,7 @@ func TestARealPiLoadsTheArtifactThisInstallerWrites(t *testing.T) {
 		{"a factory that throws", "export default function () { throw new Error('boom') }\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			verdict, detail := runPiProbe([]byte(tc.body))
+			verdict, detail := runPiProbe(ext.globalFile, []byte(tc.body))
 			if verdict != piRefuses {
 				t.Fatalf("a real pi accepted %s: verdict %v, %s", tc.name, verdict, detail)
 			}
@@ -311,11 +312,12 @@ func TestThePiProbeRunsNowhereNearTheUsersOwnPi(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("PI_CODING_AGENT_DIR", filepath.Join(home, "pi-agent"))
 
-	artifact, err := renderOwned(agents["pi"].files[0].source)
+	ext := agents["pi"].files[0]
+	artifact, err := renderOwned(ext.source)
 	if err != nil {
 		t.Fatalf("rendering the pi artifact: %v", err)
 	}
-	if verdict, detail := runPiProbe(artifact); verdict != piLoads {
+	if verdict, detail := runPiProbe(ext.globalFile, artifact); verdict != piLoads {
 		t.Fatalf("verdict %v, %s", verdict, detail)
 	}
 
@@ -327,42 +329,60 @@ func TestThePiProbeRunsNowhereNearTheUsersOwnPi(t *testing.T) {
 
 // TestTheIntegrationSourcesCarryTheSchemaTheInstallerWrites.
 //
-// The schema number is written down in several places and is PER AGENT (see the
-// comment on claudeSchema): opencode's and pi's managed headers and queue.ts's
+// The schema number is written down in several places and is PER FILE (see the
+// comment on claudeSchema): every owned file's managed header, and queue.ts's
 // TMUX_WEB_SCHEMA, which is the number the two copies of the integration compare
-// at run time to decide which of them reports; and claude's two owned files.
-// Numbers that must agree and are typed out separately are numbers that drift,
-// and the drift is SILENT in the worst direction: a queue.ts left at 1 while the
-// header says 2 makes a fresh global install lose the claim to a stale project
-// one, forever, with no message anywhere.
+// at run time to decide which of them reports. Numbers that must agree and are
+// typed out separately are numbers that drift, and the drift is SILENT in the
+// worst direction: a queue.ts left at 1 while the header says 2 makes a fresh
+// global install lose the claim to a stale project one, forever, with no
+// message anywhere.
+//
+// The table is written out rather than derived from the specs, because half of
+// what it holds is WHICH sources each agent owns. Deriving it would make the
+// test agree with whatever the spec says, including the day pi quietly loses
+// its skill again.
 func TestTheIntegrationSourcesCarryTheSchemaTheInstallerWrites(t *testing.T) {
-	for agent, files := range map[string][]string{
-		"pi":       {"pi.ts"},
+	for agent, sources := range map[string][]string{
+		"pi":       {"pi.ts", "claude-skill.md"},
 		"opencode": {"opencode.js"},
 		"claude":   {"claude-report.sh", "claude-skill.md"},
 	} {
-		want := "tmux-web-schema: " + strconv.Itoa(agents[agent].schema)
-		for _, name := range files {
+		owned := agents[agent].files
+		if len(owned) != len(sources) {
+			t.Errorf("%s owns %d files and this test knows about %d", agent, len(owned), len(sources))
+			continue
+		}
+		for i, name := range sources {
+			if owned[i].source != name {
+				t.Errorf("%s's file %d is %s, not the %s this test checks", agent, i, owned[i].source, name)
+				continue
+			}
 			body, err := integrations.File(name)
 			if err != nil {
 				t.Fatalf("reading %s: %v", name, err)
 			}
+			want := "tmux-web-schema: " + strconv.Itoa(owned[i].schema)
 			if !strings.Contains(string(body), want) {
-				t.Errorf("%s's managed header does not say %q", name, want)
+				t.Errorf("%s's managed header does not say %q, which is what %s's spec claims it says",
+					name, want, agent)
 			}
 		}
 	}
 
-	// queue.ts is inlined into pi and opencode only, so it has to agree with both.
-	if agents["pi"].schema != agents["opencode"].schema {
-		t.Fatalf("pi is at schema %d and opencode at %d, and the queue they share can carry one number",
-			agents["pi"].schema, agents["opencode"].schema)
+	// queue.ts is inlined into pi's and opencode's integrations only -- not
+	// into the skill they do not version together -- so it has to agree with
+	// those two files and nothing else.
+	piExt, ocPlugin := agents["pi"].files[0], agents["opencode"].files[0]
+	if piExt.schema != ocPlugin.schema {
+		t.Fatalf("%s is at schema %d and %s at %d, and the queue inlined into both can carry one number",
+			piExt.source, piExt.schema, ocPlugin.source, ocPlugin.schema)
 	}
 	queue, err := integrations.File("queue.ts")
 	if err != nil {
 		t.Fatalf("reading queue.ts: %v", err)
 	}
-	wantConst := "export const TMUX_WEB_SCHEMA = " + strconv.Itoa(agents["pi"].schema)
+	wantConst := "export const TMUX_WEB_SCHEMA = " + strconv.Itoa(piExt.schema)
 	if !strings.Contains(string(queue), wantConst) {
 		t.Errorf("queue.ts does not declare %q, so the two scopes would compare the wrong numbers", wantConst)
 	}

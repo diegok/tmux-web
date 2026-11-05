@@ -1923,8 +1923,8 @@ func TestTheSkillIsALoadableManagedSkillFile(t *testing.T) {
 	if m == nil {
 		t.Fatal("the skill carries no managed header below its frontmatter, so install-integration would refuse the file as one tmux-web did not write")
 	}
-	if m[1] != strconv.Itoa(claudeSchema) {
-		t.Errorf("the skill's managed header says schema %s, want claude's %d", m[1], claudeSchema)
+	if m[1] != strconv.Itoa(skillSchema) {
+		t.Errorf("the skill's managed header says schema %s, want the skill's %d", m[1], skillSchema)
 	}
 	// Found by ownerOf in the first 8 KiB of the file, which is all it reads.
 	if i := strings.Index(skill, m[0]); i >= 8<<10 {

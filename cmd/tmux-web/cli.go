@@ -81,9 +81,9 @@ panes is for an agent working inside a pane: it lists the panes of the session
 it is called from, or every session with --all, one record per line and fields
 separated by two spaces -- pane id, session:window.pane, command, agent, state,
 label, title. A verb takes the pane id; the session:window.pane is for a human
-to read. The state column is only the one a pane's own report gives away for
-free, so a "-" there means "ask tmux-web state <pane>", not "nothing is
-happening".
+to read. The state column is only what state would answer without reading a
+screen -- an agent's own unexpired "working" report, and nothing else -- so a
+"-" there means "ask tmux-web state <pane>", not "nothing is happening".
 
 install-integration writes the integration that calls report into a project, and
 it is a command rather than a button in the web UI on purpose: writing

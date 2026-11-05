@@ -118,14 +118,24 @@ func TestPanesPrintsThePaneIDAVerbCanTake(t *testing.T) {
 	}
 }
 
-// The state column is the report's, or a dash, and NEVER a verdict this
-// listing computed.
+// The state column is ONLY WHAT `state` WOULD ANSWER WITHOUT A FORK -- an
+// unexpired `working` report -- and a dash for every other pane, including the
+// ones holding a resting report.
 //
-// The zero-capture assertion is the point of the test rather than a detail of
-// it: a listing that computed LiveState per pane would print the same words for
-// the fresh report below, so the output cannot tell the two apart. What tells
-// them apart is the cost -- two or three forks and a settle wait per agent pane
-// -- and a dash is this verb saying "ask `state`".
+// Four of the five rows below are dashes, and the two resting ones are the
+// point: they are not missing information, they are the design refusing to hold
+// a second opinion. `state` corroborates a standing `blocked` report with a
+// capture and answers `idle` when no dialog is on screen, and it gives an
+// `idle` report nothing at all and asks the screen, which can come back
+// `working`. A listing that printed either word would contradict `state` about
+// the same pane in the same second, which this design calls a failure even with
+// every test green.
+//
+// The zero-capture assertion is the other half of the same claim: a listing
+// that computed LiveState per pane would print the same word for %1, so the
+// output alone cannot tell the two apart. What tells them apart is the cost --
+// two or three forks and a settle wait per agent pane -- and a dash is this
+// verb saying "ask `state`".
 func TestPanesStateColumnIsTheFreeOneOrADash(t *testing.T) {
 	now := time.Now()
 	fresh := now.UnixMilli()
@@ -139,6 +149,7 @@ func TestPanesStateColumnIsTheFreeOneOrADash(t *testing.T) {
 		paneFixture("$0", "work", "%3", 1, 1, "pi"),
 		paneFixture("$0", "work", "%4", 2, 0, "zsh"),
 		paneFixture("$0", "work", "%5", 3, 0, "claude"),
+		paneFixture("$0", "work", "%6", 4, 0, "opencode"),
 	}
 	stub := &controlStub{
 		rows: rows,
@@ -151,11 +162,18 @@ func TestPanesStateColumnIsTheFreeOneOrADash(t *testing.T) {
 			// the option outlived it. The command is what says so, and it is the
 			// same rule the poller applies.
 			"%4": tmux.FormatReport(tmux.StateWorking, fresh, "a report its writer left behind"),
-			// Resting, and resting states do not expire on a clock: nothing
-			// further happens in a blocked pane until somebody acts. Printed
-			// uncorroborated on purpose -- corroborating it costs the capture
-			// this verb refuses to make, and `state` is where that is paid.
+			// A standing blocked report, in force as far as the clock is
+			// concerned -- resting states do not expire on one. It still prints
+			// "-": `state` spends a capture asking whether the dialog is
+			// actually on screen and answers `idle` when it is not, so printing
+			// `blocked` here would be the disagreement the design forbids, on
+			// the value reports.go names as the one most likely to be wrong.
 			"%5": tmux.FormatReport(tmux.StateBlocked, now.Add(-10*time.Minute).UnixMilli(), "may I run rm -rf"),
+			// An idle report, fresh, and also "-". LiveState gives an idle
+			// report nothing and asks the screen instead, whose two captures
+			// can come back `working`; this listing has taken no captures and
+			// has no business guessing which way that went.
+			"%6": tmux.FormatReport(tmux.StateIdle, fresh, ""),
 		},
 	}
 
@@ -164,11 +182,12 @@ func TestPanesStateColumnIsTheFreeOneOrADash(t *testing.T) {
 		t.Fatalf("exited %d: %s", code, errb.String())
 	}
 	for pane, want := range map[string]string{
-		"%1": tmux.StateWorking,
-		"%2": "-",
-		"%3": "-",
-		"%4": "-",
-		"%5": tmux.StateBlocked,
+		"%1": tmux.StateWorking, // fresh working report: the one state printed here
+		"%2": "-",               // no report at all
+		"%3": "-",               // a working report past workingTTL
+		"%4": "-",               // a shell holding a report its writer left behind
+		"%5": "-",               // a standing blocked report, which `state` may drop
+		"%6": "-",               // an idle report, which `state` lets the screen overrule
 	} {
 		f := paneFields(t, out.String(), pane)
 		if f == nil {

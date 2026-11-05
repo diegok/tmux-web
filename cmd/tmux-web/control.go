@@ -192,31 +192,44 @@ func paneAddress(r tmux.Row) string {
 // field makes one value safe to print and never empty. See maxPaneField.
 func field(s string) string { return display(s, maxPaneField) }
 
-// freeStates is the state this listing gets for free: what each pane's own
-// @tmux_web_agent option says, for the panes whose report is in force.
+// freeStates is the state this listing gets for free.
 //
-// ONE FORK FOR THE WHOLE LISTING, and no captures at all. The alternative was
-// LiveState per pane -- two or three forks each plus a settle wait, on a server
-// with a dozen panes -- and a verb that is multi-second is a verb an agent
-// stops running. Worse, it would be a SECOND opinion: two verbs disagreeing
-// about the same pane in the same second is an anti-goal of this design, so the
-// listing deliberately holds only the opinion that cost nothing. A pane with no
-// state here prints "-", which means "ask `state`" rather than "nothing is
-// happening".
+// THE INVARIANT, and it is the one sentence to check this function against:
+// `panes` PRINTS ONLY WHAT `state` WOULD ANSWER WITHOUT A FORK. That is row 1
+// of LiveState's own rules table and nothing else -- a parseable `working`
+// report younger than workingTTL, which LiveState trusts outright and captures
+// nothing for. Every other pane prints "-", which means "ask `state`" and never
+// "nothing is happening".
 //
-// The filter is Reports.Observe on a memory that has seen nothing, which is
+// WHY IT IS NOT "the report-derived state", which is the obvious wider reading
+// and the one a later reader will be tempted to restore. Two verbs disagreeing
+// about the same pane in the same second is an anti-goal of this design, and
+// both resting states reach it:
+//
+//   - A standing `blocked` report whose screen no longer holds a dialog.
+//     `state` corroborates such a report with one capture and answers `idle`
+//     with Dropped set; a listing that printed `blocked` would contradict it
+//     outright, on precisely the value reports.go calls out as the one most
+//     likely to be wrong ("a blocked report costs a fork per poll -- the case
+//     the app exists for is exactly the one where the report is wrong").
+//   - An `idle` report. LiveState gives it nothing and asks the screen, whose
+//     two captures can come back `working`.
+//
+// Restricted to row 1, the two verbs are not unlikely to disagree, they are
+// unable to: the one state printed here is the one state `state` reaches
+// without looking at anything this listing did not also look at.
+//
+// ONE FORK FOR THE WHOLE LISTING, and no captures at all. LiveState per pane
+// would be two or three forks each plus a settle wait, on a server with a dozen
+// panes, and a verb that is multi-second is a verb an agent stops running.
+//
+// Reports.Observe does the reading, on a memory that has seen nothing, which is
 // exactly a first sight: it drops the value on a pane whose command is no
 // longer a known agent (the agent exited and the option outlived it), it drops
-// anything it cannot parse, and it expires a `working` report at workingTTL
-// while leaving the two resting states alone. Asking THAT function rather than
-// re-implementing its three rules is what keeps this listing from disagreeing
-// with the poller about the same option, and the TTL from existing twice.
-//
-// A blocked report is therefore printed uncorroborated, where `state` would
-// spend a capture on it and may drop it as stale. That is the one place the two
-// verbs can differ, and it is the cheap direction: this listing is read as a
-// place to look next, and `state` is where the question "is anything really
-// waiting on the owner" is paid for.
+// anything it cannot parse, and it expires a `working` report at workingTTL.
+// Asking THAT function rather than re-implementing its rules is what keeps this
+// listing from disagreeing with the poller about the same option, and the TTL
+// from existing twice.
 func freeStates(ctx context.Context, c controlClient, rows []tmux.Row, now time.Time, stderr io.Writer) map[string]string {
 	states := make(map[string]string, len(rows))
 	// -a reads every pane on the server, including the ones outside the scope
@@ -234,7 +247,12 @@ func freeStates(ctx context.Context, c controlClient, rows []tmux.Row, now time.
 	raw := tmux.ParseReports(out)
 	reports := tmux.NewReports()
 	for _, r := range rows {
-		if rep, ok := reports.Observe(r.PaneID, raw[r.PaneID], r.Command, now); ok {
+		rep, ok := reports.Observe(r.PaneID, raw[r.PaneID], r.Command, now)
+		// The invariant, in one condition: in force AND working. Observe has
+		// already applied the clock, so `working` here means younger than
+		// workingTTL; the two resting states are in force and still print "-",
+		// because believing one costs the capture this verb does not make.
+		if ok && rep.State == tmux.StateWorking {
 			states[r.PaneID] = rep.State
 		}
 	}

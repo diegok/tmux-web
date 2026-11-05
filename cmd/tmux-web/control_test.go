@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1622,6 +1623,22 @@ func readSkill(t *testing.T) string {
 	return string(b)
 }
 
+// dispatchedVerbCount is how many case VALUES cli.go's dispatch switch has --
+// the thirteen subcommands plus the four spellings of `help`.
+//
+// IT IS THE ONLY NUMBER IN THIS TEST, and it is a review gate rather than a
+// second list. The derivation below decides agent-facing by what a verb IS,
+// which catches one wherever its code lives -- but a verb that reached tmux by
+// some seam other than a controlClient would be invisible to it, and then
+// nothing would ever ask whether the skill should teach it. A total trips on a
+// verb added ANYWHERE, so that question gets asked once, of the person adding
+// it.
+//
+// A count of AGENT-FACING verbs would not do: a verb the derivation misses is
+// exactly a verb that does not change it, so the pin has to be on the switch's
+// own size.
+const dispatchedVerbCount = 17
+
 // TestTheSkillNamesEveryVerbTheCLIDispatches is the drift guard: the
 // documentation and the dispatcher cannot disagree about what exists.
 //
@@ -1630,23 +1647,28 @@ func readSkill(t *testing.T) string {
 // Both halves are derived from the source:
 //
 //   - WHAT EXISTS is the case clauses of the switch in cli.go's run(), parsed
-//     out of the file.
-//   - WHICH OF THEM ARE THE AGENT'S is decided by WHERE EACH HANDLER LIVES.
-//     `panes`, `state`, `peek`, `open`, `type`, `run` and `close` dispatch to
-//     functions declared in control.go, which is the file whose whole subject
-//     is "the verbs an agent running inside a pane gets". serve, enroll,
-//     devices and revoke are declared in cli.go, report in report.go,
-//     install-integration in install.go, and help is handled inline with no
-//     handler at all. So a verb moved into control.go becomes one this test
-//     requires the skill to teach, and a verb moved out becomes one it requires
-//     the skill not to mention, without anybody editing a list.
+//     out of the file, and pinned by count (dispatchedVerbCount).
+//   - WHICH OF THEM ARE THE AGENT'S is decided by WHAT DRIVES THE VERB, which
+//     is a property of the verb rather than of the file it sits in. Every verb
+//     an agent calls from inside its own pane is driven through a
+//     controlClient -- control.go's tmux seam -- handed to it as a `dial`
+//     parameter. `report`'s seam is a tmuxRunner, and serve, enroll, devices,
+//     revoke and install-integration have no tmux seam at all, so the
+//     separation is exact and a file move cannot disturb it.
+//
+// AN EARLIER VERSION OF THIS TEST ASKED WHERE THE HANDLER WAS DECLARED, and
+// that had a silent-pass path: a new agent-facing verb whose handler landed in
+// a NEW file was neither required in the skill nor flagged, and an author who
+// documented it anyway was told to delete it. The seam is the fix -- such a
+// verb is agent-facing wherever it lives -- and the count above is the
+// backstop for the one case the seam cannot see.
 func TestTheSkillNamesEveryVerbTheCLIDispatches(t *testing.T) {
 	dispatched := dispatchedVerbs(t)
-	inControl := funcsDeclaredIn(t, "control.go")
+	funcs := packageFuncs(t)
 
 	agentFacing := map[string]bool{}
 	for verb, handler := range dispatched {
-		if handler != "" && inControl[handler] {
+		if drivenByAControlClient(handler, funcs) {
 			agentFacing[verb] = true
 		}
 	}
@@ -1654,17 +1676,28 @@ func TestTheSkillNamesEveryVerbTheCLIDispatches(t *testing.T) {
 	// parse that silently matched nothing would make every assertion below
 	// vacuously true, and a parse that matched everything would demand the
 	// skill teach `serve`.
-	if len(dispatched) < 8 {
-		t.Fatalf("only %d verbs parsed out of cli.go's dispatch switch (%v) -- the parse, not the switch, is what broke", len(dispatched), dispatched)
+	if len(dispatched) == 0 {
+		t.Fatal("no verbs at all were parsed out of cli.go's dispatch switch -- the parse, not the switch, is what broke")
 	}
 	if len(agentFacing) == 0 || len(agentFacing) == len(dispatched) {
-		t.Fatalf("%d of %d dispatched verbs came out agent-facing (%v): the handler-location test has stopped telling them apart", len(agentFacing), len(dispatched), agentFacing)
+		t.Fatalf("%d of %d dispatched verbs came out agent-facing (%v): the controlClient seam has stopped telling them apart", len(agentFacing), len(dispatched), agentFacing)
+	}
+	// Errorf and not Fatalf: when a verb has been added, the forward
+	// requirement below is the half that says what to do about it, and
+	// stopping here would hide it.
+	if len(dispatched) != dispatchedVerbCount {
+		t.Errorf("cli.go's dispatch switch has %d case values and this test is pinned to %d (%v).\n"+
+			"A verb was added, removed or renamed. Decide whether it is one an agent calls from inside its own pane:\n"+
+			"  if it is, teach it in %s and the check below will stop complaining;\n"+
+			"  if it is not, leave the skill alone.\n"+
+			"Either way, update dispatchedVerbCount -- that decision is what this number exists to force.",
+			len(dispatched), dispatchedVerbCount, slices.Sorted(maps.Keys(dispatched)), skillSource)
 	}
 
 	skill := readSkill(t)
 	for verb := range agentFacing {
 		if !strings.Contains(skill, "tmux-web "+verb) {
-			t.Errorf("the skill never names `tmux-web %s`, which cli.go dispatches to a handler in control.go -- an agent that read the skill does not know the verb exists", verb)
+			t.Errorf("the skill never names `tmux-web %s`, which cli.go dispatches to a verb driven through a controlClient -- an agent that read the skill does not know the verb exists", verb)
 		}
 	}
 	for verb := range skillCommands(t, skill) {
@@ -1675,7 +1708,7 @@ func TestTheSkillNamesEveryVerbTheCLIDispatches(t *testing.T) {
 			t.Errorf("the skill tells an agent to run `tmux-web %s`, and cli.go dispatches no such verb: that command exits 2", verb)
 			continue
 		}
-		t.Errorf("the skill names `tmux-web %s`, which is dispatched to %s outside control.go -- this skill is about the verbs an agent calls from inside its own pane", verb, dispatched[verb])
+		t.Errorf("the skill names `tmux-web %s`, which is dispatched to %s and is not driven through a controlClient -- this skill is about the verbs an agent calls from inside its own pane", verb, dispatched[verb])
 	}
 }
 
@@ -1823,22 +1856,91 @@ func dispatchedVerbs(t *testing.T) map[string]string {
 	return verbs
 }
 
-// funcsDeclaredIn returns the names of the top-level functions one file in this
-// package declares.
-func funcsDeclaredIn(t *testing.T, file string) map[string]bool {
+// packageFuncs returns every top-level function this package's non-test files
+// declare, by name. The whole package and not one file: which file a handler
+// sits in is precisely what this test stopped depending on.
+func packageFuncs(t *testing.T) map[string]*ast.FuncDecl {
 	t.Helper()
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, file, nil, 0)
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("parsing %s: %v", file, err)
+		t.Fatalf("reading the package directory: %v", err)
 	}
-	names := map[string]bool{}
-	for _, decl := range f.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil {
-			names[fn.Name.Name] = true
+	fset := token.NewFileSet()
+	funcs := map[string]*ast.FuncDecl{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		for _, decl := range f.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Recv == nil {
+				funcs[fn.Name.Name] = fn
+			}
 		}
 	}
-	return names
+	if len(funcs) == 0 {
+		t.Fatal("no top-level functions found in the package's non-test files")
+	}
+	return funcs
+}
+
+// drivenByAControlClient reports whether the named handler is a verb an agent
+// calls from inside its own pane, by the one thing all of those have in common:
+// a controlClient, control.go's tmux seam, reaching them as a dial parameter.
+//
+// TWO PLACES ARE LOOKED AT, because the handler itself is a two-liner. cmdState
+// and its six siblings pass os.Getenv and dialControl to a run* function that
+// holds the seam in its own signature, so the dial is on the DELEGATE; a verb
+// written without that seam would hold it directly. Either counts, and nothing
+// deeper does -- a transitive search would eventually reach tmux from anywhere.
+func drivenByAControlClient(handler string, funcs map[string]*ast.FuncDecl) bool {
+	fn := funcs[handler]
+	if fn == nil {
+		// `help` and its flag spellings are handled inline, with no handler.
+		return false
+	}
+	if dialsAControlClient(fn) {
+		return true
+	}
+	if fn.Body == nil {
+		return false
+	}
+	driven := false
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if id, ok := call.Fun.(*ast.Ident); ok && dialsAControlClient(funcs[id.Name]) {
+			driven = true
+		}
+		return true
+	})
+	return driven
+}
+
+// dialsAControlClient reports whether fn takes a parameter that is a function
+// producing a controlClient. The result type is what is matched and not the
+// parameter's name: `dial` is a convention, and `func(socket string)
+// controlClient` is the contract.
+func dialsAControlClient(fn *ast.FuncDecl) bool {
+	if fn == nil || fn.Type.Params == nil {
+		return false
+	}
+	for _, p := range fn.Type.Params.List {
+		ft, ok := p.Type.(*ast.FuncType)
+		if !ok || ft.Results == nil || len(ft.Results.List) != 1 {
+			continue
+		}
+		if id, ok := ft.Results.List[0].Type.(*ast.Ident); ok && id.Name == "controlClient" {
+			return true
+		}
+	}
+	return false
 }
 
 // skillCommands returns every `tmux-web <word>` the skill names INSIDE CODE --
@@ -1851,14 +1953,22 @@ func funcsDeclaredIn(t *testing.T, file string) map[string]bool {
 // told to RUN is in one, which is also what makes the skill copy-pasteable.
 func skillCommands(t *testing.T, skill string) map[string]bool {
 	t.Helper()
-	inlineSpan := regexp.MustCompile("`([^`\n]*)`")
+	// No \n exclusion in the span pattern, and the prose is scanned WHOLE
+	// rather than line by line: a markdown code span may wrap across a line
+	// break, and this skill has one -- `p=$(tmux-web open --split)` is broken
+	// after `open` to fit the column. A per-line pass cannot see that span at
+	// all, which makes a wrapped command the one place a bad verb could hide.
+	inlineSpan := regexp.MustCompile("`([^`]*)`")
 	// [ \t] and not \s: the spans are collected one per line below, and a
 	// `\s` would walk off the end of one span onto the start of the next --
 	// "`tmux-web` does not check ... from the `command` column" would be read
 	// as a verb called `command`.
 	command := regexp.MustCompile(`\btmux-web[ \t]+([a-z][a-z-]*)`)
+	// A wrapped span's own line break, flattened so the pattern above can see
+	// across it. Within one span that is safe: a span is a single command.
+	wrap := regexp.MustCompile(`\s+`)
 
-	var code strings.Builder
+	var code, prose strings.Builder
 	fenced := false
 	for _, line := range strings.Split(skill, "\n") {
 		if strings.HasPrefix(strings.TrimSpace(line), "```") {
@@ -1870,13 +1980,17 @@ func skillCommands(t *testing.T, skill string) map[string]bool {
 			code.WriteByte('\n')
 			continue
 		}
-		for _, m := range inlineSpan.FindAllStringSubmatch(line, -1) {
-			code.WriteString(m[1])
-			code.WriteByte('\n')
-		}
+		prose.WriteString(line)
+		prose.WriteByte('\n')
 	}
 	if fenced {
 		t.Error("the skill has an unclosed ``` fence")
+	}
+	// One span per line, so the command pattern still cannot run from the end
+	// of one span onto the start of the next.
+	for _, m := range inlineSpan.FindAllStringSubmatch(prose.String(), -1) {
+		code.WriteString(wrap.ReplaceAllString(m[1], " "))
+		code.WriteByte('\n')
 	}
 	found := map[string]bool{}
 	for _, m := range command.FindAllStringSubmatch(code.String(), -1) {

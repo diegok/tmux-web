@@ -1,7 +1,7 @@
 # tmux-web — agents driving tmux with the verbs the browser already has
 
 Date: 2026-11-05
-Status: design, not agreed. Revision 4.
+Status: design, not agreed. Revision 5 — decision 4 narrowed during implementation (see its own note); revisions 1-4 below.
 
 **Revision 4 answers one question from the owner**, and it is the best thing
 that has happened to this design: *"hay forma de abrir un nuevo pane o window
@@ -359,11 +359,28 @@ them as one field — revision 1 conflated them.
 `state` (anti-goal). Computing decision 3 for every pane would be two or three
 forks per agent pane plus a settle wait, on a server with a dozen panes.
 
-So `panes` prints the **report-derived** state where there is one — which costs
-no fork, is what the poller itself leans on with no client connected, and is
-honest about its own freshness — and a dash for every other pane, including
-agent panes whose report is stale. A dash means "ask `state`". One listing, one
-cost, no contradiction.
+So `panes` prints **only what `state` would answer without a fork** — a fresh,
+parseable, unexpired `working` report, which is row 1 of decision 3's table — and
+a dash for every other pane. A dash means "ask `state`".
+
+**Revision 5 narrowed this, and revision 4 was wrong.** It said "the
+report-derived state where there is one", which contradicts this design's own
+anti-goal that two verbs must not disagree about the same pane in the same
+second. A standing `blocked` report whose screen no longer holds a dialog would
+print `blocked` here while `state` corroborates it, drops it and says `idle` —
+the forbidden disagreement, on precisely the value `reports.go:252` names as the
+one most often wrong. An `idle` report has the same hazard in the other
+direction, since `state`'s two captures can overrule it with `working`. Only the
+fresh `working` report is a value both verbs reach the same way, so it is the
+only one this listing may carry. Found during implementation, by the
+implementer rather than a reviewer.
+
+The cost is a listing that says less than it could, and an agent that spends one
+`state` call per pane it cares about. That is cheaper than a listing that lies.
+
+This invariant is a property of the PAIR, so it has one standing requirement:
+`state` must keep trusting a fresh `working` report outright. If that ever
+changes, this listing becomes the stale half.
 
 ### 5. Scope: the caller's own session by default
 

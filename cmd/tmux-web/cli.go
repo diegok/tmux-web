@@ -67,6 +67,7 @@ Usage:
   tmux-web revoke  <device-id>
   tmux-web report  --state working|blocked|idle [--text TEXT]
   tmux-web panes   [--all]
+  tmux-web state   <pane-id>
   tmux-web install-integration --agent claude|opencode|pi [dir] [--global] [--yes] [--remove]
 
 serve runs the daemon. enroll, devices and revoke talk to its admin socket,
@@ -84,6 +85,12 @@ label, title. A verb takes the pane id; the session:window.pane is for a human
 to read. The state column is only what state would answer without reading a
 screen -- an agent's own unexpired "working" report, and nothing else -- so a
 "-" there means "ask tmux-web state <pane>", not "nothing is happening".
+
+state answers what one pane is doing now, from the pane itself: "working",
+"idle" or "blocked" for a known agent, "changing" or "quiet" for anything else,
+on the first line. A blocked pane's question follows, under a line saying
+whether the agent's own report or the screen supplied it. An "idle" that says a
+blocked report was dropped means the report stood but no dialog was on screen.
 
 install-integration writes the integration that calls report into a project, and
 it is a command rather than a button in the web UI on purpose: writing
@@ -121,6 +128,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdReport(rest, stdout, stderr)
 	case "panes":
 		return cmdPanes(rest, stdout, stderr)
+	case "state":
+		return cmdState(rest, stdout, stderr)
 	case "install-integration":
 		return cmdInstall(rest, stdout, stderr)
 	case "help", "-h", "-help", "--help":

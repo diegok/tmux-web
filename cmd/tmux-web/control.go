@@ -112,6 +112,120 @@ const paneFieldSep = "  "
 // counting columns is never handed a short line.
 const maxPaneField = tmux.MaxTitle
 
+// stateSettle is the gap `state` leaves between its two captures.
+//
+// 1.5s, which is the poller's own interval, and that is the reason rather than
+// a coincidence: LiveState borrows settleAfter from the classifier to decide
+// how many identical captures mean "still", and that count was chosen for
+// captures 1.5s apart. A shorter gap would let a pane that redraws once a
+// second -- a spinner, a status line ticking -- read still through this verb
+// and working through the browser, which is a disagreement about the same pane
+// that no test of either would find. A longer one buys nothing the classifier
+// does not already have and is paid for by an agent mid-turn.
+//
+// Budget: one gap, two captures and a show-options read. The forks are
+// milliseconds, so the verb is about 1.5s of a controlTimeout of 10s, and a
+// slow server has the other 8s before the deadline cuts the wait short.
+//
+// It is passed to LiveState for every pane, but only the screen path waits: a
+// fresh `working` report returns before the first capture, and a blocked one
+// takes one capture and no gap. Nothing here may change that -- `panes` prints
+// only what `state` answers without a fork, and a corroboration added on top
+// of the report would make the two verbs disagree.
+const stateSettle = 1500 * time.Millisecond
+
+func cmdState(args []string, stdout, stderr io.Writer) int {
+	return runState(args, stdout, stderr, os.Getenv, dialControl)
+}
+
+// runState answers what one pane is doing now: one word on the first line, and
+// for a blocked pane the question after it.
+//
+// The pane is an operand and is named, so the caller's-session default that
+// scopes `panes` does not apply: %7 in another session is as explicit a
+// target as %1, and refusing it would stop the one thing this verb is for,
+// which is one agent asking about another.
+func runState(args []string, stdout, stderr io.Writer, getenv func(string) string, dial func(socket string) controlClient) int {
+	fset := newFlagSet("state", stderr, "tmux-web state <pane-id>")
+	operands, code, ok := parseFlags(fset, args)
+	if !ok {
+		return code
+	}
+	if len(operands) != 1 {
+		return usageError(stderr, fset, "state takes exactly one pane id (see tmux-web panes), got %d arguments", len(operands))
+	}
+	target := operands[0]
+	// Before the environment and before any fork: tmux resolves a malformed
+	// -t to whatever is current and exits 0, so a typo here would be answered
+	// confidently about some other pane.
+	if err := tmux.ValidatePaneID(target); err != nil {
+		return usageError(stderr, fset, "%v -- pass the %%N from tmux-web panes, not a session:window.pane", err)
+	}
+	socket, _, ok := tmuxTarget(getenv)
+	if !ok {
+		return notInsideTmux(stderr, "state")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), controlTimeout)
+	defer cancel()
+	c := dial(socket)
+
+	rows, err := c.Snapshot(ctx)
+	if err != nil {
+		return controlFail(stderr, "state", err)
+	}
+	// The row, and not just the id, because LiveState decides by the pane's
+	// command which vocabulary it speaks. A pane absent from the snapshot is
+	// refused here with its own message: asking tmux about it would put tmux's
+	// stderr in the agent's transcript instead of a sentence naming the pane.
+	var row *tmux.Row
+	for i := range rows {
+		if rows[i].PaneID == target {
+			row = &rows[i]
+			break
+		}
+	}
+	if row == nil {
+		return controlFail(stderr, "state", fmt.Errorf("no pane %s on this tmux server (list them with tmux-web panes --all)", target))
+	}
+
+	v, err := tmux.LiveState(ctx, c, *row, time.Now(), stateSettle)
+	if err != nil {
+		// The word still goes to stdout: a reader that takes the first line
+		// gets "unknown", the one thing that must never be mistaken for quiet.
+		fmt.Fprintln(stdout, v.State)
+		return controlFail(stderr, "state", err)
+	}
+	fmt.Fprintln(stdout, v.State)
+	switch {
+	case v.Dropped:
+		fmt.Fprintln(stdout, "note: a blocked report was standing and no dialog is on screen, so it was dropped; this idle rests on one capture")
+	case v.State == tmux.StateBlocked:
+		// WHO answered goes on its own line, before the text: a report's
+		// Activity is the integration's own words and a screen's question is a
+		// grammar's reading of pixels, and one unlabelled field would let an
+		// agent quote a guess as a statement.
+		fmt.Fprintf(stdout, "from the %s:\n", v.From)
+		if q := v.Question; q != nil {
+			fmt.Fprintln(stdout, display(q.Text, maxQuestion))
+			// Numbered here because the grammar hands the choices back with
+			// their numbers stripped, and the number is what the agent that
+			// answers the dialog will type.
+			for i, ch := range q.Choices {
+				fmt.Fprintf(stdout, "  %d. %s\n", i+1, display(ch, maxQuestion))
+			}
+		} else {
+			fmt.Fprintln(stdout, "(no question could be read from the pane)")
+		}
+	}
+	return 0
+}
+
+// maxQuestion bounds one printed line of a question or a choice. Screen text is
+// untrusted in the way every pane's content is, and display is what keeps an
+// escape sequence in it from being replayed on the caller's terminal; the cap
+// is generous because a dialog's wrapped line is the width of a screen.
+const maxQuestion = 500
+
 func cmdPanes(args []string, stdout, stderr io.Writer) int {
 	return runPanes(args, stdout, stderr, os.Getenv, dialControl)
 }
@@ -216,9 +330,10 @@ func paneLine(r tmux.Row, state string) string {
 // thing a verb takes is the pane id in field 1.
 func paneAddress(r tmux.Row) string {
 	// Fields splits on every kind of unicode whitespace, which is wider than
-	// the space that survives `field`: a tab or a newline in a name is already
-	// a '?' by then, but U+00A0 is printable and would otherwise come through
-	// as a space nobody typed.
+	// the space that survives `field`. It is belt-and-braces: `field` has
+	// already turned every non-printable rune, U+00A0 included, into a '?'
+	// (unicode.IsPrint rejects it), so the only whitespace left to collapse is
+	// the plain space, and a run of those is what this join exists for.
 	name := strings.Join(strings.Fields(field(r.SessionName)), "_")
 	if name == "" {
 		// A name of nothing but whitespace, which tmux accepts and this would

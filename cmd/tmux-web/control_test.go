@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -253,6 +256,7 @@ func TestEveryVerbSaysSoWhenItIsNotRunningInsideTmux(t *testing.T) {
 		run  controlVerb
 	}{
 		{"panes", nil, runPanes},
+		{"state", []string{"%2"}, runState},
 	} {
 		t.Run(v.name, func(t *testing.T) {
 			dialled := 0
@@ -398,6 +402,15 @@ func (s *controlStub) Run(_ context.Context, args ...string) (string, error) {
 	if len(args) > 0 && args[0] == "list-panes" {
 		return renderReportBlock(s.rows, s.reports), nil
 	}
+	// One pane's own option, which is what LiveState reads. An unset option is
+	// an error, as tmux makes it: exit 1, and the ordinary shape of a pane with
+	// no integration installed.
+	if len(args) > 0 && args[0] == "show-options" {
+		if v := s.reports[args[len(args)-3]]; v != "" {
+			return v, nil
+		}
+		return "", errors.New("invalid option: " + tmux.AgentOption)
+	}
 	return "", nil
 }
 
@@ -458,4 +471,201 @@ func renderReportBlock(rows []tmux.Row, reports map[string]string) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// -- state ------------------------------------------------------------------
+
+// fixtureScreen reads a screen from the tmux package's testdata, which is
+// hand-built, so that this suite and LiveState's are looking at the same dialog
+// rather than at two ideas of one.
+func fixtureScreen(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "internal", "tmux", "testdata", name))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	return string(b)
+}
+
+// stateRun runs `state` on one pane as the caller %1 and returns its exit code
+// and both streams.
+func stateRun(stub *controlStub, pane string) (int, string, string) {
+	var out, errb bytes.Buffer
+	code := runState([]string{pane}, &out, &errb, callerEnv("%1"), stubDial(stub))
+	return code, out.String(), errb.String()
+}
+
+func TestStatePrintsOneWordAndThenTheQuestion(t *testing.T) {
+	stub := &controlStub{
+		rows:    twoSessions(),
+		screens: map[string]string{"%1": fixtureScreen(t, "claude-blocked.txt")},
+	}
+	code, out, errs := stateRun(stub, "%1")
+	if code != 0 {
+		t.Fatalf("exited %d: %s", code, errs)
+	}
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	// The first line is one word and nothing else: the owner's loop reads it
+	// with `head -1`, and everything after it is for whoever decides to look.
+	if lines[0] != tmux.StateBlocked {
+		t.Errorf("first line = %q, want exactly %q", lines[0], tmux.StateBlocked)
+	}
+	if !strings.Contains(out, "Do you want to create fixture.txt?") {
+		t.Errorf("the question is missing from:\n%s", out)
+	}
+	if !strings.Contains(out, "1. Yes") || !strings.Contains(out, "3. No") {
+		t.Errorf("the choices are missing from:\n%s", out)
+	}
+
+	// A working pane is one word and nothing after it.
+	working := &controlStub{
+		rows:    twoSessions(),
+		reports: map[string]string{"%1": tmux.FormatReport(tmux.StateWorking, time.Now().UnixMilli(), "running the tests")},
+	}
+	_, out, _ = stateRun(working, "%1")
+	if out != "working\n" {
+		t.Errorf("a working pane printed %q, want \"working\\n\"", out)
+	}
+	// And a fresh working report is trusted without a fork: this is half of the
+	// pair of facts that keep `panes` and `state` from disagreeing.
+	if working.captures != 0 {
+		t.Errorf("took %d captures on a fresh working report, want 0", working.captures)
+	}
+}
+
+// A report's Activity is the integration's own words and ExtractQuestion is a
+// grammar's reading of pixels; they are different texts, and printing them in
+// one unlabelled field would let an agent quote a guess as a statement.
+func TestStateNamesWhichAuthorityAnswered(t *testing.T) {
+	blockedAt := time.Now().Add(-3 * time.Minute).UnixMilli()
+	for _, tc := range []struct {
+		name     string
+		reports  map[string]string
+		want     string // the authority that must be named
+		notWant  string
+		question string
+	}{
+		{"the report", map[string]string{"%1": tmux.FormatReport(tmux.StateBlocked, blockedAt, "Allow rm -rf?")}, "report", "screen", "Allow rm -rf?"},
+		{"the screen", nil, "screen", "report", "Do you want to create fixture.txt?"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &controlStub{
+				rows:    twoSessions(),
+				reports: tc.reports,
+				screens: map[string]string{"%1": fixtureScreen(t, "claude-blocked.txt")},
+			}
+			code, out, errs := stateRun(stub, "%1")
+			if code != 0 {
+				t.Fatalf("exited %d: %s", code, errs)
+			}
+			lines := strings.Split(out, "\n")
+			if lines[0] != "blocked" {
+				t.Fatalf("first line = %q, want \"blocked\"", lines[0])
+			}
+			rest := strings.Join(lines[1:], "\n")
+			if !strings.Contains(rest, tc.want) || strings.Contains(rest, tc.notWant) {
+				t.Errorf("want %q named and %q not named after the first line:\n%s", tc.want, tc.notWant, out)
+			}
+			if !strings.Contains(rest, tc.question) {
+				t.Errorf("want the question %q in:\n%s", tc.question, out)
+			}
+		})
+	}
+}
+
+func TestStateSaysAStandingReportWasDropped(t *testing.T) {
+	stub := &controlStub{
+		rows: twoSessions(),
+		reports: map[string]string{
+			"%1": tmux.FormatReport(tmux.StateBlocked, time.Now().Add(-3*time.Minute).UnixMilli(), "Allow?"),
+		},
+		screens: map[string]string{"%1": fixtureScreen(t, "claude-idle.txt")},
+	}
+	code, out, errs := stateRun(stub, "%1")
+	if code != 0 {
+		t.Fatalf("exited %d: %s", code, errs)
+	}
+	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
+	if lines[0] != "idle" {
+		t.Errorf("first line = %q, want \"idle\"", lines[0])
+	}
+	// The reader who sees idle where a report said blocked is owed the reason,
+	// and the reason is on the lines after the word, not in place of it.
+	if len(lines) < 2 || !strings.Contains(lines[1], "blocked") || !strings.Contains(lines[1], "dropped") {
+		t.Errorf("want a line after \"idle\" saying a blocked report was dropped, got:\n%s", out)
+	}
+	if stub.captures != 1 {
+		t.Errorf("took %d captures, want 1: corroboration is one capture", stub.captures)
+	}
+}
+
+func TestStateRefusesAPaneThatDoesNotExist(t *testing.T) {
+	stub := &controlStub{rows: twoSessions()}
+	code, out, errs := stateRun(stub, "%999")
+	if code != 1 {
+		t.Errorf("exited %d, want 1", code)
+	}
+	if out != "" {
+		t.Errorf("stdout = %q, want nothing: there is no answer", out)
+	}
+	if !strings.Contains(errs, "%999") {
+		t.Errorf("stderr = %q, want the pane named", errs)
+	}
+	if stub.captures != 0 || len(stub.runs) != 0 {
+		t.Errorf("forked for a pane that is not there: %d captures, runs %v", stub.captures, stub.runs)
+	}
+
+	// A malformed target is a command-line error, and is refused before tmux
+	// is asked anything at all.
+	for _, bad := range []string{"work:0.0", "3", ""} {
+		fresh := &controlStub{rows: twoSessions()}
+		if code, _, _ := stateRun(fresh, bad); code != 2 {
+			t.Errorf("state %q exited %d, want 2", bad, code)
+		}
+		if fresh.snapshots != 0 {
+			t.Errorf("state %q read a snapshot before refusing it", bad)
+		}
+	}
+}
+
+// `panes` scopes to the caller's session because "everything here" is the wrong
+// default for a listing. A verb that takes a pane id has no default to apply:
+// the id IS the target, named, and %7 is as good a name as %1.
+func TestStateAcceptsAnExplicitlyNamedPaneFromAnotherSession(t *testing.T) {
+	stub := &controlStub{
+		rows:    twoSessions(),
+		screens: map[string]string{"%7": "$ \n"},
+	}
+	code, out, errs := stateRun(stub, "%7")
+	if code != 0 {
+		t.Fatalf("exited %d: %s", code, errs)
+	}
+	// %7 runs zsh, so it gets the vocabulary of a pane that is not an agent.
+	if out != "quiet\n" {
+		t.Errorf("printed %q, want \"quiet\\n\"", out)
+	}
+}
+
+func TestStateSaysUnknownWhenTheScreenCannotBeRead(t *testing.T) {
+	stub := &controlStub{rows: twoSessions(), err: nil}
+	failing := &failingCapture{controlStub: stub}
+	var out, errb bytes.Buffer
+	code := runState([]string{"%3"}, &out, &errb, callerEnv("%1"), func(string) controlClient { return failing })
+	if code != 1 {
+		t.Errorf("exited %d, want 1", code)
+	}
+	if out.String() != "unknown\n" {
+		t.Errorf("stdout = %q, want \"unknown\\n\"", out.String())
+	}
+	if !strings.Contains(errb.String(), "capture exploded") {
+		t.Errorf("stderr = %q, want the cause", errb.String())
+	}
+}
+
+// failingCapture is a stub whose screen reads fail and whose other reads work,
+// which controlStub's single err field cannot express.
+type failingCapture struct{ *controlStub }
+
+func (f *failingCapture) Capture(context.Context, string) (string, error) {
+	return "", errors.New("capture exploded")
 }

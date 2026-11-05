@@ -271,13 +271,23 @@ func opencodeConfigDir() (string, error) {
 // piAgentDir is pi's own configuration directory. PI_CODING_AGENT_DIR is what
 // pi reads; the default is ~/.pi/agent, measured by running pi under a clean
 // HOME and watching it create ~/.pi/agent/auth.json.
+//
+// A RELATIVE value is refused rather than resolved, for the same reason and in
+// the same shape as opencodeConfigDir above -- and the two being different was
+// a bug, found by a pi reviewing this integration. MEASURED TWICE on pi 1.5.0,
+// independently: started from two different directories with the same relative
+// PI_CODING_AGENT_DIR, pi created <cwd>/relconf under each of them and nothing
+// under HOME. Resolving it here instead resolves it against the INSTALLER's
+// working directory, which writes an extension that no pi will read.
 func piAgentDir() (string, error) {
 	if dir := os.Getenv("PI_CODING_AGENT_DIR"); dir != "" {
-		abs, err := filepath.Abs(dir)
-		if err != nil {
-			return "", fmt.Errorf("cannot resolve PI_CODING_AGENT_DIR (%s): %w", display(dir, 64), err)
+		if !filepath.IsAbs(dir) {
+			return "", fmt.Errorf("PI_CODING_AGENT_DIR is set to %q, which is not an absolute path.\n"+
+				"  pi resolves a relative one against its own working directory, so which directory it\n"+
+				"  reads depends on where you start it and there is none this command could call global.\n"+
+				"  Set PI_CODING_AGENT_DIR to an absolute path, or install into one project instead", display(dir, 64))
 		}
-		return abs, nil
+		return dir, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {

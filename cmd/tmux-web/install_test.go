@@ -397,6 +397,34 @@ func TestGlobalHonoursTheAgentsOwnEnvironmentVariables(t *testing.T) {
 		}
 		assertNothingUnder(t, home)
 	})
+
+	// A RELATIVE PI_CODING_AGENT_DIR is refused for the same reason, and this
+	// one is MEASURED TWICE on pi 1.5.0, independently: started from two
+	// different directories with the same relative value, pi created
+	// <cwd>/relconf under each of them and nothing at all under HOME. So which
+	// directory pi reads depends on where the user starts it, exactly as with
+	// opencode above -- and an installer that resolves the value against ITS
+	// OWN working directory instead writes an extension that no pi will read.
+	t.Run("a relative PI_CODING_AGENT_DIR is refused, not resolved", func(t *testing.T) {
+		home := t.TempDir()
+		cwd := t.TempDir()
+		t.Setenv("HOME", home)
+		t.Setenv("PI_CODING_AGENT_DIR", "relative/agent")
+		// The working directory is the whole point: a resolved relative value
+		// lands under it rather than under HOME, so without this the test
+		// would write into the repository and assert nothing useful.
+		t.Chdir(cwd)
+		stubPiProbe(t, piLoads, "")
+
+		r := installCLI(t, "", "--agent", "pi", "--global", "--yes")
+
+		r.wantCode(t, 1)
+		if !strings.Contains(r.stderr, "PI_CODING_AGENT_DIR") {
+			t.Errorf("the refusal does not name the variable it refused over:\n%s", r)
+		}
+		assertNothingUnder(t, cwd)
+		assertNothingUnder(t, home)
+	})
 }
 
 // TestAGlobalInstallDoesNotWarnAboutARepositoryItIsNotIn.

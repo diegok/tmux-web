@@ -45,11 +45,28 @@ import (
 //     YES. Every check that can refuse runs in the planning phase, so a refusal
 //     leaves the project exactly as it was.
 
-// tmuxWebSchema is the version in the managed header. Bump it when the shape of
-// what gets installed changes in a way a user should be told about; the only
-// thing it controls is whether an existing file of ours is replaced silently or
-// with a note.
-const tmuxWebSchema = 1
+// THE SCHEMA IS PER AGENT (agentSpec.schema), and that is a decision about what
+// the number means. It is the version in the managed header; bump it when the
+// shape of what gets installed changes in a way a user should be told about, and
+// the only thing it controls is whether an existing file of ours is replaced
+// silently or with a note.
+//
+// claude's install grew a second owned file, so claude is at 2. opencode's and
+// pi's did not change at all. One global number would tell an opencode user
+// reinstalling that his file was replaced "because the shape changed" when
+// nothing about his install is different except a digit -- a note that is false
+// is worse than no note. So there are three numbers, and each says what is true
+// of its own agent.
+//
+// What stays shared is opencode's and pi's pair: pi.ts, opencode.js and the
+// queue.ts inlined into both must agree with each other (queue.ts's
+// TMUX_WEB_SCHEMA is compared at run time by the two scopes' copies), and
+// pivalidate_test.go holds them there.
+const (
+	claudeSchema   = 2
+	opencodeSchema = 1
+	piSchema       = 1
+)
 
 // managedHeader matches the first line of every file this command writes. It
 // captures the schema NUMBER rather than matching a prefix, and that difference
@@ -99,11 +116,14 @@ const queueImport = "import { claimReporter, makeQueue, spawnReport } from './qu
 // not is one `tmux-web install` refuses by name.
 var agents = map[string]agentSpec{
 	"pi": {
-		file:   filepath.Join(".pi", "extensions", "tmux-web.ts"),
-		source: "pi.ts",
+		schema: piSchema,
+		files: []ownedFile{{
+			file:       filepath.Join(".pi", "extensions", "tmux-web.ts"),
+			globalFile: filepath.Join("extensions", "tmux-web.ts"),
+			source:     "pi.ts",
+		}},
 		global: &globalSpec{
 			root: piAgentDir,
-			file: filepath.Join("extensions", "tmux-web.ts"),
 			note: "a global pi extension is auto-loaded in every project, with no entry in any settings file " +
 				"and no trust prompt -- which is less gated than a project-local one, which needs `--approve`.\n" +
 				"  tmux-web does not edit pi's own settings.json and does not run `pi install`: MEASURED on pi " +
@@ -117,11 +137,14 @@ var agents = map[string]agentSpec{
 		},
 	},
 	"opencode": {
-		file:   filepath.Join(".opencode", "plugin", "tmux-web.js"),
-		source: "opencode.js",
+		schema: opencodeSchema,
+		files: []ownedFile{{
+			file:       filepath.Join(".opencode", "plugin", "tmux-web.js"),
+			globalFile: filepath.Join("opencode", "plugin", "tmux-web.js"),
+			source:     "opencode.js",
+		}},
 		global: &globalSpec{
 			root: opencodeConfigDir,
-			file: filepath.Join("opencode", "plugin", "tmux-web.js"),
 			note: "a global opencode plugin is loaded in every project, with no entry in any config file.\n" +
 				"  tmux-web does not add a path to `plugin` in your opencode.jsonc: an absolute path there does " +
 				"work, measured, but a directory drop is uninstalled by deleting the one file above and leaves " +
@@ -145,15 +168,30 @@ var agents = map[string]agentSpec{
 			"not control",
 	},
 	"claude": {
-		file:   filepath.Join(".claude", claudeScriptName),
-		source: "claude-report.sh",
-		mode:   0o755,
-		// settings.json is not in `file`: it is the user's, and it is merged
-		// rather than owned.
+		schema: claudeSchema,
+		// The wrapper MUST stay first: the settings.json merge names it.
+		//
+		// The skill is the slot the other two agents will fill when they
+		// are investigated; it is an entry in a slice and not a claude-only
+		// code path so that doing so is one more entry.
+		files: []ownedFile{
+			{
+				file:       filepath.Join(".claude", claudeScriptName),
+				globalFile: filepath.Join(".claude", claudeScriptName),
+				source:     "claude-report.sh",
+				mode:       0o755,
+			},
+			{
+				file:       filepath.Join(".claude", "skills", "tmux-web", "SKILL.md"),
+				globalFile: filepath.Join(".claude", "skills", "tmux-web", "SKILL.md"),
+				source:     "claude-skill.md",
+			},
+		},
+		// settings.json is not in `files`: it is the user's, and it is
+		// merged rather than owned.
 		settings: filepath.Join(".claude", "settings.json"),
 		global: &globalSpec{
 			root:     os.UserHomeDir,
-			file:     filepath.Join(".claude", claudeScriptName),
 			settings: filepath.Join(".claude", "settings.json"),
 			note:     "claude reads hooks from your user-level settings.json as well as a project's, and this merges into it",
 		},
@@ -162,12 +200,19 @@ var agents = map[string]agentSpec{
 
 // agentSpec is one agent's installation.
 type agentSpec struct {
-	file           string      // the file we own, relative to the project root
-	source         string      // its name in internal/integrations' embed.FS
-	mode           fs.FileMode // 0 means 0644
+	schema         int         // what this agent's managed headers say; see claudeSchema
+	files          []ownedFile // every file we own for this agent, never empty
 	settings       string      // a file the user owns that we merge into, if any
 	global         *globalSpec // where --global puts it; nil would refuse it
 	projectWarning string      // shown before the confirmation, PROJECT SCOPE ONLY
+}
+
+// ownedFile is one file we own for an agent.
+type ownedFile struct {
+	file       string      // relative to the project root
+	globalFile string      // relative to the agent's global root
+	source     string      // its name in internal/integrations' embed.FS
+	mode       fs.FileMode // 0 means 0644
 }
 
 // globalSpec is where `--global` puts one agent's integration.
@@ -179,7 +224,6 @@ type agentSpec struct {
 // repository's footprint against no repository at all).
 type globalSpec struct {
 	root     func() (string, error) // the agent's own configuration directory
-	file     string                 // our file, under that root
 	settings string                 // a file the user owns that we merge into, if any
 	note     string                 // what this scope is, and what it does not touch
 	// validate runs BEFORE anything is written, and a non-nil error is a
@@ -302,12 +346,19 @@ func runInstall(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 // warning is true.
 type scope struct {
 	global   bool
-	file     string // the file we own, absolute
-	settings string // a file the user owns that we merge into, absolute; "" if none
-	dir      string // the directory `file` lives in, for messages
-	note     string // what this scope is
-	warning  string // what it costs
+	files    []scopedFile // the files we own, absolute, in the spec's order
+	settings string       // a file the user owns that we merge into, absolute; "" if none
+	dir      string       // the directory the first file lives in, for messages
+	note     string       // what this scope is
+	warning  string       // what it costs
 	validate func(dir string, artifact []byte) error
+}
+
+// scopedFile is one ownedFile placed in a scope.
+type scopedFile struct {
+	path   string
+	source string
+	mode   fs.FileMode
 }
 
 // resolveScope works out that. Every path is made absolute, because every path
@@ -320,16 +371,14 @@ func resolveScope(spec agentSpec, global bool, operands []string) (scope, error)
 		if err != nil {
 			return scope{}, err
 		}
-		out := scope{
-			global:   true,
-			file:     filepath.Join(root, g.file),
-			note:     g.note,
-			validate: g.validate,
+		out := scope{global: true, note: g.note, validate: g.validate}
+		for _, f := range spec.files {
+			out.files = append(out.files, scopedFile{filepath.Join(root, f.globalFile), f.source, f.mode})
 		}
 		if g.settings != "" {
 			out.settings = filepath.Join(root, g.settings)
 		}
-		out.dir = filepath.Dir(out.file)
+		out.dir = filepath.Dir(out.files[0].path)
 		return out, nil
 	}
 
@@ -346,7 +395,10 @@ func resolveScope(spec agentSpec, global bool, operands []string) (scope, error)
 	} else if !info.IsDir() {
 		return scope{}, fmt.Errorf("%s is not a directory", root)
 	}
-	out := scope{file: filepath.Join(root, spec.file), warning: spec.projectWarning, dir: root}
+	out := scope{warning: spec.projectWarning, dir: root}
+	for _, f := range spec.files {
+		out.files = append(out.files, scopedFile{filepath.Join(root, f.file), f.source, f.mode})
+	}
 	if spec.settings != "" {
 		out.settings = filepath.Join(root, spec.settings)
 	}
@@ -390,49 +442,74 @@ type plannedSettings struct {
 func planInstall(agent string, spec agentSpec, where scope, remove bool) (*installPlan, error) {
 	plan := &installPlan{agent: agent, remove: remove}
 
-	path := where.file
-	state, schema, err := ownerOf(path)
-	if err != nil {
-		return nil, err
+	// Every file is checked before any is planned: one foreign file among
+	// several refuses the whole run, so a refusal still writes nothing.
+	type found struct {
+		state  ownership
+		schema int
 	}
-	if state == ownForeign {
-		return nil, fmt.Errorf("%s exists and tmux-web did not write it (it carries no `managed by tmux-web` header).\n"+
-			"  refusing to touch it -- move it aside if you want this integration installed there", path)
-	}
-
-	switch {
-	case remove:
-		if state == ownAbsent {
-			plan.warnings = append(plan.warnings, "there is no tmux-web integration at "+path)
-		} else {
-			plan.files = append(plan.files, plannedFile{path: path, note: "remove"})
-		}
-	default:
-		content, err := renderIntegration(spec)
+	states := make([]found, len(where.files))
+	present := 0
+	for i, f := range where.files {
+		state, schema, err := ownerOf(f.path, spec.schema)
 		if err != nil {
 			return nil, err
 		}
-		// THE PRE-FLIGHT GOES HERE, in the planning phase, with everything else
-		// that can refuse: a refused run has written nothing. It runs on
-		// install only -- `--remove` deletes a file, and a `pi` that cannot be
-		// run is no reason to leave a broken extension in place.
-		if where.validate != nil {
-			if err := where.validate(where.dir, content); err != nil {
-				return nil, err
+		if state == ownForeign {
+			return nil, fmt.Errorf("%s exists and tmux-web did not write it (it carries no `managed by tmux-web` header).\n"+
+				"  refusing to touch it -- move it aside if you want this integration installed there", f.path)
+		}
+		states[i] = found{state, schema}
+		if state != ownAbsent {
+			present++
+		}
+	}
+	// The first file stands for the agent where a single path is wanted: it is
+	// the one settings.json names.
+	path := where.files[0].path
+
+	switch {
+	case remove:
+		// One warning, and only when NOTHING is there: a claude installed
+		// before the skill existed has the wrapper and not the skill, and
+		// being told the skill is missing would be noise about a file that
+		// was never ours to remove.
+		if present == 0 {
+			plan.warnings = append(plan.warnings, "there is no tmux-web integration at "+path)
+		}
+		for i, f := range where.files {
+			if states[i].state != ownAbsent {
+				plan.files = append(plan.files, plannedFile{path: f.path, note: "remove"})
 			}
 		}
-		mode := spec.mode
-		if mode == 0 {
-			mode = 0o644
+	default:
+		for i, f := range where.files {
+			content, err := renderOwned(f.source)
+			if err != nil {
+				return nil, err
+			}
+			// THE PRE-FLIGHT GOES HERE, in the planning phase, with everything
+			// else that can refuse: a refused run has written nothing. It runs
+			// on install only -- `--remove` deletes a file, and a `pi` that
+			// cannot be run is no reason to leave a broken extension in place.
+			if where.validate != nil {
+				if err := where.validate(where.dir, content); err != nil {
+					return nil, err
+				}
+			}
+			mode := f.mode
+			if mode == 0 {
+				mode = 0o644
+			}
+			note := "new"
+			switch states[i].state {
+			case ownCurrent:
+				note = "replacing ours"
+			case ownOutdated:
+				note = fmt.Sprintf("replacing ours, written by an older tmux-web (tmux-web-schema: %d)", states[i].schema)
+			}
+			plan.files = append(plan.files, plannedFile{path: f.path, content: content, mode: mode, note: note})
 		}
-		note := "new"
-		switch state {
-		case ownCurrent:
-			note = "replacing ours"
-		case ownOutdated:
-			note = fmt.Sprintf("replacing ours, written by an older tmux-web (tmux-web-schema: %d)", schema)
-		}
-		plan.files = append(plan.files, plannedFile{path: path, content: content, mode: mode, note: note})
 		if where.note != "" {
 			plan.notes = append(plan.notes, where.note)
 		}
@@ -489,9 +566,11 @@ func globalInstall(spec agentSpec) string {
 	if err != nil {
 		return ""
 	}
-	path := filepath.Join(root, spec.global.file)
-	if state, _, err := ownerOf(path); err == nil && (state == ownCurrent || state == ownOutdated) {
-		return path
+	for _, f := range spec.files {
+		path := filepath.Join(root, f.globalFile)
+		if state, _, err := ownerOf(path, spec.schema); err == nil && (state == ownCurrent || state == ownOutdated) {
+			return path
+		}
 	}
 	return ""
 }
@@ -632,7 +711,7 @@ const (
 )
 
 // ownerOf reads the managed header out of a file's first few kilobytes.
-func ownerOf(path string) (ownership, int, error) {
+func ownerOf(path string, current int) (ownership, int, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return ownAbsent, 0, nil
@@ -655,7 +734,7 @@ func ownerOf(path string) (ownership, int, error) {
 	if err != nil {
 		return ownForeign, 0, nil
 	}
-	if schema == tmuxWebSchema {
+	if schema == current {
 		return ownCurrent, schema, nil
 	}
 	return ownOutdated, schema, nil
@@ -669,9 +748,11 @@ func nestedInstall(root string) string {
 	dir := filepath.Dir(root)
 	for {
 		for _, spec := range agents {
-			candidate := filepath.Join(dir, spec.file)
-			if state, _, err := ownerOf(candidate); err == nil && (state == ownCurrent || state == ownOutdated) {
-				return candidate
+			for _, f := range spec.files {
+				candidate := filepath.Join(dir, f.file)
+				if state, _, err := ownerOf(candidate, spec.schema); err == nil && (state == ownCurrent || state == ownOutdated) {
+					return candidate
+				}
 			}
 		}
 		parent := filepath.Dir(dir)
@@ -691,12 +772,28 @@ func nestedInstall(root string) string {
 // stripped. Both transforms happen HERE, in Go, from one embedded copy --
 // there is never a second copy of the queue in the repository.
 func renderIntegration(spec agentSpec) ([]byte, error) {
-	if spec.source == "claude-report.sh" {
+	return renderOwned(spec.files[0].source)
+}
+
+// renderOwned renders one owned file by its embedded name. renderIntegration
+// above is the single-file agents' spelling of it, kept because their tests
+// call it.
+func renderOwned(source string) ([]byte, error) {
+	switch source {
+	case "claude-report.sh":
 		return integrations.ClaudeReportScript(resolveBinary()), nil
+	case "claude-skill.md":
+		// Written as embedded: a skill is prose, and nothing in it is only
+		// known at install time.
+		b, err := integrations.File(source)
+		if err != nil {
+			return nil, fmt.Errorf("reading the embedded %s: %w", source, err)
+		}
+		return b, nil
 	}
-	src, err := integrations.File(spec.source)
+	src, err := integrations.File(source)
 	if err != nil {
-		return nil, fmt.Errorf("reading the embedded %s: %w", spec.source, err)
+		return nil, fmt.Errorf("reading the embedded %s: %w", source, err)
 	}
 	queue, err := integrations.File("queue.ts")
 	if err != nil {

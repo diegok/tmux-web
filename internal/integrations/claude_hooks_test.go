@@ -157,7 +157,7 @@ func TestClaudeHookBlockQuotesTheScriptPath(t *testing.T) {
 // opencode.js works without it -- both import it -- so an installer that writes
 // the two integrations and not the queue writes two files that throw on load.
 func TestEveryEmbeddedFileIsReachable(t *testing.T) {
-	want := []string{"claude-report.sh", "opencode.js", "pi.ts", "queue.ts"}
+	want := []string{"claude-report.sh", "claude-skill.md", "opencode.js", "pi.ts", "queue.ts"}
 	if !equalStrings(Files, want) {
 		t.Fatalf("Files = %v, want %v", Files, want)
 	}

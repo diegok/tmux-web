@@ -23,7 +23,9 @@ import (
 	"strings"
 )
 
-// files is everything the installer writes.
+// files is everything the installer writes. claude-skill.md is a placeholder
+// until Task 11 of the agent-control plan writes the skill; it is here now so
+// the installer has a second file to carry.
 //
 // queue.ts is in the list and is easy to drop by accident: it is not an
 // integration, it is the single-slot spawn queue that BOTH pi.ts and
@@ -32,14 +34,14 @@ import (
 // `// @ts-nocheck` line for that reason -- the installer ships it into a `.js`
 // context -- and nothing here cares, because nothing here transforms it.
 //
-//go:embed pi.ts opencode.js queue.ts claude-report.sh
+//go:embed pi.ts opencode.js queue.ts claude-report.sh claude-skill.md
 var files embed.FS
 
 // Files is the embedded set, sorted, so a test can hold the //go:embed
 // directive above against something. A name dropped from that directive is not
 // a compile error: it is a ReadFile returning fs.ErrNotExist at install time,
 // on somebody else's machine.
-var Files = []string{"claude-report.sh", "opencode.js", "pi.ts", "queue.ts"}
+var Files = []string{"claude-report.sh", "claude-skill.md", "opencode.js", "pi.ts", "queue.ts"}
 
 // File returns one embedded file's bytes.
 func File(name string) ([]byte, error) { return files.ReadFile(name) }

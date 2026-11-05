@@ -1,5 +1,5 @@
 #!/bin/sh
-# managed by tmux-web (tmux-web-schema: 1)
+# managed by tmux-web (tmux-web-schema: 2)
 # Reinstalling or updating the integration overwrites this file.
 # It does one thing: `tmux set-option -p @tmux_web_agent`. Nothing else.
 #

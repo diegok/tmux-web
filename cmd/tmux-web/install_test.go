@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -333,7 +334,7 @@ func TestGlobalInstallsIntoTheAgentsOwnDirectory(t *testing.T) {
 			if !strings.Contains(r.stdout, path) {
 				t.Errorf("the installed path was not printed on stdout:\n%s", r)
 			}
-			if got := installRead(t, path); !strings.Contains(got, "tmux-web-schema: 1") {
+			if got := installRead(t, path); !strings.Contains(got, "tmux-web-schema: "+strconv.Itoa(agents[tc.agent].schema)) {
 				t.Errorf("what was written to %s is not ours:\n%.200q", path, got)
 			}
 		})
@@ -1044,5 +1045,143 @@ func TestTheInstallableAgentsAreTheAgentsTheDaemonKnows(t *testing.T) {
 			"An agent installable here and unknown to the daemon installs an integration whose "+
 			"every report is answered with `nothing known`; one the daemon knows with nothing "+
 			"installable can never report at all.", installable, known)
+	}
+}
+
+// -- an agent can own more than one file --------------------------------------
+
+// claudeOwned is claude's two owned files at project scope, wrapper first.
+var claudeOwned = []string{
+	filepath.Join(".claude", claudeScriptName),
+	filepath.Join(".claude", "skills", "tmux-web", "SKILL.md"),
+}
+
+// TestAnAgentCanOwnMoreThanOneFile. The plan is what the user is asked to
+// approve, so a file that is written but not listed is a file written without
+// consent: both paths must be on stdout BEFORE anything is written, and a "no"
+// must leave both unwritten.
+func TestAnAgentCanOwnMoreThanOneFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // globalInstall looks in $HOME
+	root := t.TempDir()
+
+	declined := installCLI(t, "n\n", "--agent", "claude", root)
+	declined.wantCode(t, 1)
+	for _, rel := range claudeOwned {
+		path := filepath.Join(root, rel)
+		if !strings.Contains(declined.stdout, path) {
+			t.Errorf("the plan shown before confirmation does not list %s:\n%s", path, declined)
+		}
+		if _, err := os.Stat(path); err == nil {
+			t.Errorf("%s was written although the user said no", path)
+		}
+	}
+
+	installCLI(t, "", "--agent", "claude", "--yes", root).wantCode(t, 0)
+	for _, rel := range claudeOwned {
+		if got := installRead(t, filepath.Join(root, rel)); !managedHeader.MatchString(got) {
+			t.Errorf("%s does not carry the managed header:\n%.200q", rel, got)
+		}
+	}
+}
+
+// TestAgentsWithOneOwnedFileAreUnchanged. Widening the spec to a slice must not
+// make opencode or pi write anything they did not before: one path printed, one
+// file on disk, at the path the integration tests already look for.
+func TestAgentsWithOneOwnedFileAreUnchanged(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // globalInstall looks in $HOME
+	for _, tc := range []struct{ agent, path string }{
+		{"pi", filepath.Join(".pi", "extensions", "tmux-web.ts")},
+		{"opencode", filepath.Join(".opencode", "plugin", "tmux-web.js")},
+	} {
+		t.Run(tc.agent, func(t *testing.T) {
+			root := t.TempDir()
+			r := installCLI(t, "", "--agent", tc.agent, "--yes", root)
+			r.wantCode(t, 0)
+
+			if got, want := strings.TrimSpace(r.stdout), filepath.Join(root, tc.path); got != want {
+				t.Errorf("stdout = %q, want exactly %q", got, want)
+			}
+			var written []string
+			filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+				if err == nil && !d.IsDir() {
+					written = append(written, p)
+				}
+				return nil
+			})
+			if len(written) != 1 || written[0] != filepath.Join(root, tc.path) {
+				t.Errorf("wrote %v, want only %s", written, tc.path)
+			}
+		})
+	}
+}
+
+// TestASchemaOneFileIsReplacedWithANote is what claude's bump to schema 2 is
+// for: both files, written by the one-file installer, are replaced and the user
+// is told for each. A reinstall afterwards is silent again.
+func TestASchemaOneFileIsReplacedWithANote(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // globalInstall looks in $HOME
+	const staleNote = "written by an older tmux-web (tmux-web-schema: 1)"
+	root := t.TempDir()
+	for _, rel := range claudeOwned {
+		installWrite(t, filepath.Join(root, rel), "# managed by tmux-web (tmux-web-schema: 1)\nold\n")
+	}
+
+	r := installCLI(t, "", "--agent", "claude", "--yes", root)
+	r.wantCode(t, 0)
+	if n := strings.Count(r.stderr, staleNote); n != len(claudeOwned) {
+		t.Errorf("the note %q appeared %d times, want once per file (%d):\n%s", staleNote, n, len(claudeOwned), r)
+	}
+	for _, rel := range claudeOwned {
+		if got := installRead(t, filepath.Join(root, rel)); !strings.Contains(got, "tmux-web-schema: 2") {
+			t.Errorf("%s was not replaced:\n%.200q", rel, got)
+		}
+	}
+
+	again := installCLI(t, "", "--agent", "claude", "--yes", root)
+	again.wantCode(t, 0)
+	if strings.Contains(again.stderr, "older tmux-web") {
+		t.Errorf("reinstalling the current schema still reported a schema change:\n%s", again)
+	}
+}
+
+// TestASchemaOneOpencodeFileIsStillCurrent is the reason the schema is per
+// agent: opencode's install did not change shape, so its schema-1 file is
+// replaced silently and nobody is told a falsehood.
+func TestASchemaOneOpencodeFileIsStillCurrent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // globalInstall looks in $HOME
+	root := t.TempDir()
+	installCLI(t, "", "--agent", "opencode", "--yes", root).wantCode(t, 0)
+	r := installCLI(t, "", "--agent", "opencode", "--yes", root)
+	r.wantCode(t, 0)
+	if strings.Contains(r.stderr, "older tmux-web") {
+		t.Errorf("opencode was told its shape changed:\n%s", r)
+	}
+}
+
+// TestRemoveTakesEveryFileTheAgentOwns. A --remove that stopped at the first
+// file would leave a skill behind that tells an agent to use a tool the user
+// just uninstalled.
+func TestRemoveTakesEveryFileTheAgentOwns(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // globalInstall looks in $HOME
+	root := t.TempDir()
+	installCLI(t, "", "--agent", "claude", "--yes", root).wantCode(t, 0)
+	installCLI(t, "", "--agent", "claude", "--yes", "--remove", root).wantCode(t, 0)
+	for _, rel := range claudeOwned {
+		if _, err := os.Stat(filepath.Join(root, rel)); err == nil {
+			t.Errorf("--remove left %s behind", rel)
+		}
+	}
+
+	// A claude installed before the skill existed has only the wrapper, and
+	// removing it is not an occasion for complaining about the skill.
+	old := t.TempDir()
+	installWrite(t, filepath.Join(old, claudeOwned[0]), "#!/bin/sh\n# managed by tmux-web (tmux-web-schema: 1)\n")
+	r := installCLI(t, "", "--agent", "claude", "--yes", "--remove", old)
+	r.wantCode(t, 0)
+	if strings.Contains(r.stderr, "there is no tmux-web integration") {
+		t.Errorf("removing a wrapper-only install complained:\n%s", r)
+	}
+	if _, err := os.Stat(filepath.Join(old, claudeOwned[0])); err == nil {
+		t.Errorf("the wrapper was left behind")
 	}
 }

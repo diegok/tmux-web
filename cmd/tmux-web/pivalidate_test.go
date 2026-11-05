@@ -327,31 +327,42 @@ func TestThePiProbeRunsNowhereNearTheUsersOwnPi(t *testing.T) {
 
 // TestTheIntegrationSourcesCarryTheSchemaTheInstallerWrites.
 //
-// The schema number is written down in four places -- Go's tmuxWebSchema, the
-// managed header of pi.ts and of opencode.js, and queue.ts's TMUX_WEB_SCHEMA,
-// which is the number the two copies of the integration compare at run time to
-// decide which of them reports. Four numbers that must agree and are typed out
-// separately are four numbers that drift, and the drift is SILENT in the worst
-// direction: a queue.ts left at 1 while the header says 2 makes a fresh global
-// install lose the claim to a stale project one, forever, with no message
-// anywhere.
+// The schema number is written down in several places and is PER AGENT (see the
+// comment on claudeSchema): opencode's and pi's managed headers and queue.ts's
+// TMUX_WEB_SCHEMA, which is the number the two copies of the integration compare
+// at run time to decide which of them reports; and claude's two owned files.
+// Numbers that must agree and are typed out separately are numbers that drift,
+// and the drift is SILENT in the worst direction: a queue.ts left at 1 while the
+// header says 2 makes a fresh global install lose the claim to a stale project
+// one, forever, with no message anywhere.
 func TestTheIntegrationSourcesCarryTheSchemaTheInstallerWrites(t *testing.T) {
-	want := "tmux-web-schema: " + strconv.Itoa(tmuxWebSchema)
-	for _, name := range []string{"pi.ts", "opencode.js"} {
-		body, err := integrations.File(name)
-		if err != nil {
-			t.Fatalf("reading %s: %v", name, err)
-		}
-		if !strings.Contains(string(body), want) {
-			t.Errorf("%s's managed header does not say %q", name, want)
+	for agent, files := range map[string][]string{
+		"pi":       {"pi.ts"},
+		"opencode": {"opencode.js"},
+		"claude":   {"claude-report.sh", "claude-skill.md"},
+	} {
+		want := "tmux-web-schema: " + strconv.Itoa(agents[agent].schema)
+		for _, name := range files {
+			body, err := integrations.File(name)
+			if err != nil {
+				t.Fatalf("reading %s: %v", name, err)
+			}
+			if !strings.Contains(string(body), want) {
+				t.Errorf("%s's managed header does not say %q", name, want)
+			}
 		}
 	}
 
+	// queue.ts is inlined into pi and opencode only, so it has to agree with both.
+	if agents["pi"].schema != agents["opencode"].schema {
+		t.Fatalf("pi is at schema %d and opencode at %d, and the queue they share can carry one number",
+			agents["pi"].schema, agents["opencode"].schema)
+	}
 	queue, err := integrations.File("queue.ts")
 	if err != nil {
 		t.Fatalf("reading queue.ts: %v", err)
 	}
-	wantConst := "export const TMUX_WEB_SCHEMA = " + strconv.Itoa(tmuxWebSchema)
+	wantConst := "export const TMUX_WEB_SCHEMA = " + strconv.Itoa(agents["pi"].schema)
 	if !strings.Contains(string(queue), wantConst) {
 		t.Errorf("queue.ts does not declare %q, so the two scopes would compare the wrong numbers", wantConst)
 	}

@@ -77,10 +77,27 @@ const controlTimeout = 10 * time.Second
 //
 // Two spaces, and no alignment padding: this listing is grepped, cut and read
 // by an agent, and a padded column moves every time a neighbour's value gets
-// longer. Two rather than one because a session name and a title may each
-// contain a space, so a single space would not look like a boundary at all --
-// and two do not make it parseable either, which is why the pane id a verb
-// takes is the FIRST field and the two free-form ones are last.
+// longer.
+//
+// WHAT IS POSITIONAL AND WHAT IS NOT, exactly, because five verbs and the skill
+// that teaches them quote this:
+//
+//   - FIELDS 1 TO 5 -- pane id, address, command, agent, state -- are
+//     positional. Every one of them is a value whose spelling this file controls
+//     or tmux generates: an id, an address with its whitespace collapsed (see
+//     paneAddress), a command name, a word from the Agents list, a word from
+//     ParseReport's three. None can contain a space, so `awk '{print $5}'` reads
+//     the state of every pane on the server.
+//   - THE TRAILING label AND title ARE FOR READING, NOT PARSING. Both are
+//     free-form -- the owner types the label, and whatever runs in the pane
+//     rewrites the title -- so either may contain a space, two spaces, or
+//     something that looks exactly like a field boundary. A parser cannot split
+//     that trailing pair unambiguously and must not try: everything a verb needs
+//     is in the first five.
+//
+// The separator being two spaces rather than one is what makes the boundary
+// visible to a person in the trailing pair as well; it is not what makes the
+// first five safe. Collapsing the address is.
 const paneFieldSep = "  "
 
 // maxPaneField bounds one printed field.
@@ -183,10 +200,32 @@ func paneLine(r tmux.Row, state string) string {
 // It is NOT a target: tmux prefix-matches session and window names without
 // reporting the ambiguity, and the indices are positions that renumbering moves
 // (snapshot.go says so of WindowIndex). Everything here takes the %N instead.
-// The name goes through `field` for the same reason the title does -- a session
-// name may contain anything the owner typed, spaces included.
+//
+// EVERY RUN OF WHITESPACE IN THE NAME BECOMES ONE "_", and that is what keeps
+// fields 1 to 5 positional. A session name may contain spaces: ValidateSessionName
+// refuses them only for the sessions tmux-web itself creates, and it refuses
+// nothing about the ones that were already on the server -- `tmux new -s "my
+// work"` is ordinary. Printed raw, that name adds a field to its own line, and
+// `awk '{print $5}'` then reads a pane's COMMAND out of the state column while
+// every other line reads correctly. A mangled name is loud; a column that is
+// right eleven times out of twelve is not.
+//
+// The session ID would also have been unambiguous and is deliberately not used:
+// "$3:0.0" orients nobody, and orienting the owner is this field's entire job.
+// A name made unambiguous keeps that, and nothing is lost by it, because the
+// thing a verb takes is the pane id in field 1.
 func paneAddress(r tmux.Row) string {
-	return field(r.SessionName) + ":" + strconv.Itoa(r.WindowIndex) + "." + strconv.Itoa(r.PaneIndex)
+	// Fields splits on every kind of unicode whitespace, which is wider than
+	// the space that survives `field`: a tab or a newline in a name is already
+	// a '?' by then, but U+00A0 is printable and would otherwise come through
+	// as a space nobody typed.
+	name := strings.Join(strings.Fields(field(r.SessionName)), "_")
+	if name == "" {
+		// A name of nothing but whitespace, which tmux accepts and this would
+		// otherwise render as a bare ":0.0".
+		name = "-"
+	}
+	return name + ":" + strconv.Itoa(r.WindowIndex) + "." + strconv.Itoa(r.PaneIndex)
 }
 
 // field makes one value safe to print and never empty. See maxPaneField.

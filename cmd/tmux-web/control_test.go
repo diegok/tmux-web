@@ -49,10 +49,13 @@ func TestPanesListsTheCallersSessionByDefault(t *testing.T) {
 			t.Errorf("%s is in the caller's session and is missing from:\n%s", pane, out.String())
 		}
 	}
-	// $1 is another session nobody asked about. Listing it is not a leak, it is
-	// noise that makes the default listing stop being the caller's own.
-	if paneFields(t, out.String(), "%7") != nil {
-		t.Errorf("%%7 belongs to another session and must not be listed by default:\n%s", out.String())
+	// $1 and $2 are other sessions nobody asked about. Listing them is not a
+	// leak, it is noise that makes the default listing stop being the caller's
+	// own.
+	for _, pane := range []string{"%7", "%8"} {
+		if paneFields(t, out.String(), pane) != nil {
+			t.Errorf("%s belongs to another session and must not be listed by default:\n%s", pane, out.String())
+		}
 	}
 }
 
@@ -63,7 +66,7 @@ func TestPanesWithAllListsEverySession(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exited %d: %s", code, errb.String())
 	}
-	for _, pane := range []string{"%1", "%2", "%3", "%7"} {
+	for _, pane := range []string{"%1", "%2", "%3", "%7", "%8"} {
 		if paneFields(t, out.String(), pane) == nil {
 			t.Errorf("--all must list %s:\n%s", pane, out.String())
 		}
@@ -81,7 +84,13 @@ func TestPanesPrintsThePaneIDAVerbCanTake(t *testing.T) {
 	rows[1].Label = "deploy"
 	rows[1].Title = "~/devel/sandbox"
 
-	stub := &controlStub{rows: rows}
+	stub := &controlStub{
+		rows: rows,
+		// On %8, whose session name has a space in it, so the positional
+		// assertion below is made against a line where getting it wrong moves
+		// the state column rather than merely looking odd.
+		reports: map[string]string{"%8": tmux.FormatReport(tmux.StateWorking, time.Now().UnixMilli(), "")},
+	}
 	var out, errb bytes.Buffer
 	if code := runPanes([]string{"--all"}, &out, &errb, callerEnv("%1"), stubDial(stub)); code != 0 {
 		t.Fatalf("exited %d: %s", code, errb.String())
@@ -92,6 +101,11 @@ func TestPanesPrintsThePaneIDAVerbCanTake(t *testing.T) {
 		{"%2", "work:1.0"},
 		{"%3", "work:1.1"},
 		{"%7", "other:0.0"},
+		// Every run of whitespace in a session name collapses to one "_". The
+		// name is mangled visibly on purpose: printed raw it would make this one
+		// line carry eight fields where every other line carries seven, and the
+		// reader counting columns has no way to notice.
+		{"%8", "my_work:0.0"},
 	} {
 		f := paneFields(t, out.String(), want.pane)
 		if f == nil {
@@ -115,6 +129,18 @@ func TestPanesPrintsThePaneIDAVerbCanTake(t *testing.T) {
 	}
 	if un := paneFields(t, out.String(), "%1"); un[fLabel] != "-" || un[fTitle] != "-" {
 		t.Errorf("%%1 has neither label nor title: got %q and %q, want \"-\" for both", un[fLabel], un[fTitle])
+	}
+
+	// FIELDS 1 TO 5 ARE POSITIONAL, and this is the line that proves it: a
+	// session named "my work" is the one value in the first five that could
+	// carry a space, and the skill tells an agent to read the state out of
+	// position 5. Asserted the way such a reader would do it -- on whitespace,
+	// not on the separator -- because `awk '{print $5}'` is what will be run
+	// against this, and paneFields' own split would not notice an extra field.
+	line := paneLineFor(t, out.String(), "%8")
+	if cols := strings.Fields(line); len(cols) != fieldsPerLine || cols[fState] != tmux.StateWorking {
+		t.Errorf("splitting %q on whitespace gave %d columns with state = %q; want %d columns and %q in position 5",
+			line, len(cols), cols[fState], fieldsPerLine, tmux.StateWorking)
 	}
 }
 
@@ -268,14 +294,23 @@ func stubDial(s *controlStub) func(string) controlClient {
 	return func(string) controlClient { return s }
 }
 
-// twoSessions is a snapshot spanning the caller's session and one other: three
-// panes over two windows in $0, where %1 is the caller, and one pane in $1.
+// twoSessions is a snapshot spanning the caller's session and two others: three
+// panes over two windows in $0, where %1 is the caller, one pane in $1, and one
+// in a session whose NAME CONTAINS A SPACE.
+//
+// That last row is not decoration. `tmux new -s "my work"` is an ordinary thing
+// for the owner to have done -- ValidateSessionName governs only the sessions
+// tmux-web creates -- and a name printed raw would add a field to its own line,
+// which is how a state column comes to be read out of the wrong position for
+// one pane out of twelve. The fixture is here so that nothing can regress to
+// printing it raw without a test going red.
 func twoSessions() []tmux.Row {
 	return []tmux.Row{
 		paneFixture("$0", "work", "%1", 0, 0, "claude"),
 		paneFixture("$0", "work", "%2", 1, 0, "zsh"),
 		paneFixture("$0", "work", "%3", 1, 1, "pi"),
 		paneFixture("$1", "other", "%7", 0, 0, "zsh"),
+		paneFixture("$2", "my work", "%8", 0, 0, "claude"),
 	}
 }
 
@@ -294,6 +329,19 @@ func paneFixture(sessionID, sessionName, paneID string, windowIndex, paneIndex i
 		WindowName:  "w" + strconv.Itoa(windowIndex),
 		Command:     command,
 	}
+}
+
+// paneLineFor returns paneID's whole record, unsplit, for an assertion about
+// how a reader would split it.
+func paneLineFor(t *testing.T, out, paneID string) string {
+	t.Helper()
+	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		if strings.HasPrefix(line, paneID+paneFieldSep) {
+			return line
+		}
+	}
+	t.Fatalf("no record for %s:\n%s", paneID, out)
+	return ""
 }
 
 // paneFields finds paneID's record in a listing and splits it back into its

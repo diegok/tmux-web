@@ -39,8 +39,9 @@ exit before skills load, so the trick the extension pre-flight uses does not
 work for a skill. A TUI in a throwaway tmux, read with `capture-pane`, is what
 works.
 
-**opencode is the one left**, and it is blocked rather than pending: opencode
-v2 broke the plugin, and the port comes first. opencode reads
+**opencode is the one left, and it is pending rather than blocked now.** The
+port that blocked it has landed (see below), so nothing stands in front of the
+skill but the measurement: opencode reads
 `~/.config/opencode/skills/<name>/SKILL.md`, `.opencode/skills/`, and also
 `.claude/skills` — so a project install may already be seen through the file
 claude owns, which is worth measuring before writing a third path.
@@ -51,8 +52,9 @@ in `renderOwned` if the file is not a plain copy.
 **The shared skill source is still called `claude-skill.md`**, which is now a
 lie: claude and pi install the same bytes of it. Renaming it moves the
 `//go:embed` line in `internal/integrations`, the `Files` list beside it and the
-two tests that assert that list — and that directory is where opencode's v2 port
-is working, so the rename waits for it rather than racing it.
+two tests that assert that list. It waited for opencode's v2 port, which was
+working in that directory; the port has landed, so the rename is free to happen
+whenever somebody wants it.
 
 ## Two behaviours that are right but unobvious
 
@@ -139,6 +141,14 @@ corrected, and it is the one that matters.
    embedded file carries its own number, and `ownerOf` compares the file's
    rather than the agent's. That resolves this and the companion in 2 together.
 
+   *Since then:* the opencode v2 port took the constant out of `queue.ts`
+   altogether. Each integration declares its own `TMUX_WEB_SCHEMA` next to its
+   own header — `pi.ts` at 1, `opencode.js` at 2 — because the port changed one
+   install's shape and not the other's, and one shared number would have made a
+   reinstall tell pi's users their file had changed when it had not. The Go
+   suite holds each file's constant to that file's number. Nothing forces the
+   two to agree again: the two runtimes never meet.
+
 4. **`pivalidate_test.go`'s "last green on pi 1.3.0" is now also green on
    1.5.0.** Add the version rather than replacing it: that comment is a history
    of green runs, which is what makes it worth anything. And the measurement
@@ -146,9 +156,44 @@ corrected, and it is the one that matters.
    `~/.pi/agent/skills/<name>/SKILL.md` — is answered: it does, measured on pi
    1.5.0 with the file placed by hand.
 
-Still open: where pi looks for a PROJECT skill. The pi spec needs both paths,
-and the project one is unmeasured.
+Both pi skill paths are in the spec and both are measured — see the top of this
+document for how, and for the subcommand that does not exist.
 
-**Reported by the owner, unverified here:** the opencode integration no longer
-works on opencode v2, and an opencode is porting it. Nothing in this document
-has been checked against v2.
+## What the opencode v2 port changed (2026-11-06, opencode 2.2.5)
+
+Reported by the owner, ported by an opencode, reviewed here. It is recorded
+because almost everything this feature knew about opencode was measured against
+1.18.30, and a reader who trusts those measurements on 2.2.5 will be wrong four
+times over. The code comments carry each measurement where it is used; this is
+the map.
+
+- **The plugin's shape.** A v1 factory function fails v2's schema check and the
+  plugin never loads — which is what the owner saw. The default export is now an
+  object with an `id` and a `setup`, registering `session.hook('prompt')`,
+  `tool.hook('execute.before')` and an `event.subscribe` iteration, and
+  returning the function that aborts it.
+- **The turn lifecycle moved.** `session.status` and `session.idle` are off the
+  public event stream entirely — neither reaches a plugin subscription, with a
+  client connected or without one — and `todo.updated` went with the todo
+  feature's retreat from the bus. The turn now starts on
+  `session.execution.started`, keeps saying so on `session.step.started` (once
+  per model step, the rate `status(busy)` used to arrive at) and ends on exactly
+  one of `session.execution.succeeded` / `.failed` / `.interrupted`.
+- **Two things that existed only because of v1 are gone.** Rung 2 of the
+  activity ladder (`todo.updated`'s `in_progress` entry) has no member on any
+  agent now, and opencode's turn end is an ordinary edge: the one re-assertion
+  that dated from now, and the only one any agent had that was also a genuine
+  turn end, retired with the event it was about.
+- **The repository footprint is gone, at both scopes.** A dependency-free plugin
+  leaves the project empty and puts nothing beside itself in the configuration
+  directory. The project-scope warning and its test are retired; if a future
+  opencode brings the bootstrap back, they come back with a capture that shows
+  it.
+- **Two test oracles had to be replaced, not merely adjusted.** `opencode debug
+  config` no longer prints a per-plugin `spec` and `scope`, only the directories
+  it scans — which cannot tell you that *our* file was accepted — so the install
+  test reads the service's own log for `loading plugin` against our path. And
+  the v2 service binds a **fixed default port (49374)**, the one the developer's
+  own service is already holding, so an isolated-HOME run fails to bind and
+  exits before any plugin loads; every test that boots opencode now writes a
+  `service.json` with a port of its own.

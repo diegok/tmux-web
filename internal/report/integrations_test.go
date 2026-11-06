@@ -94,19 +94,20 @@ func TestTheRegisteredClaudeHooksAreExactlyTheEventsTheTableKnows(t *testing.T) 
 // TestTheOpencodePluginForwardsExactlyTheEventsTheTableKnows holds
 // opencode.js's own lists to this table.
 //
-// The plugin's six names arrive two ways -- two are hooks of their own,
-// `chat.message` and `tool.execute.before`, and four come off the bus through
-// the `event` hook and its busEvents whitelist -- and the union is what this
-// checks. Both halves matter and they fail differently:
+// The plugin's names arrive two ways -- two are hooks of their own, `prompt`
+// and `tool.execute.before`, and the rest come off the event subscription
+// through its busEvents whitelist -- and the union is what this checks. Both
+// halves matter and they fail differently:
 //
 //   - A NAME IN THE PLUGIN THE TABLE DOES NOT MAP is a process per event for
-//     nothing. opencode's bus is chatty -- one message.part.updated per
-//     streamed chunk, 45 plugin.added at startup -- so the whitelist is the
-//     difference between six forks a turn and dozens, and a name added to it
-//     that the table ignores buys the forks and no badge.
+//     nothing. opencode's bus is chatty -- one delta event per streamed token
+//     under v2 -- so the whitelist is the difference between a handful of forks
+//     a turn and hundreds, and a name added to it that the table ignores buys
+//     the forks and no badge.
 //   - A NAME IN THE TABLE THE PLUGIN DOES NOT FORWARD is a row that can never
-//     run. Not harmless here: the turn end is `session.idle`, and a busEvents
-//     that lost it is a pane that never clears.
+//     run. Not harmless here: the turn end is one of the three
+//     `session.execution.*` endings, and a busEvents that lost them is a pane
+//     that never clears.
 //
 // It reads the embedded source rather than a live opencode because the live
 // test skips wherever opencode is not installed, which is where this drift
@@ -118,11 +119,11 @@ func TestTheOpencodePluginForwardsExactlyTheEventsTheTableKnows(t *testing.T) {
 	named := matchAll(reportedEvent, src)
 	if len(named) != 2 {
 		t.Fatalf("found %v reported by name in opencode.js, want the two hooks of its own "+
-			"(chat.message and tool.execute.before). A parse that stopped matching would make "+
+			"(prompt and tool.execute.before). A parse that stopped matching would make "+
 			"this test pass by finding nothing on both sides", named)
 	}
 
-	// The four the bus forwards, whose name at the call site is event.type.
+	// The ones the bus forwards, whose name at the call site is event.type.
 	set := busEventsSet.FindStringSubmatch(src)
 	if set == nil {
 		t.Fatal("opencode.js no longer declares `const busEvents = new Set([...])`: this test " +

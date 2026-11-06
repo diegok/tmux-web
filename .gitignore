@@ -1,5 +1,11 @@
 /tmux-web
 /web/node_modules
+# vitest's cache, which lands beside the test files it runs -- and those live in
+# internal/integrations/ because that tree is what the installer //go:embed's
+# (see web/vitest.config.ts's include). Nothing is installed here; the directory
+# is cache and nothing else. The embed directive names its five files one by
+# one, so this never reaches the binary either way.
+/internal/integrations/node_modules
 /web/dist
 # dist is Vite's output and stays out of git -- except for .gitkeep, which is
 # what lets `//go:embed all:dist` compile on a clone where the frontend has
@@ -8,5 +14,11 @@
 /internal/front/dist/*
 !/internal/front/dist/.gitkeep
 /node_modules
+# vitest's cache, which lands beside the test files it runs -- and those live in
+# internal/integrations/ because that tree is what the installer //go:embed's
+# (see web/vitest.config.ts's include). Nothing is installed here; the directory
+# is cache and nothing else. The embed directive names its five files one by
+# one, so this never reaches the binary either way.
+/internal/integrations/node_modules
 /test-results
 /playwright-report

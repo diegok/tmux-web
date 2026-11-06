@@ -167,8 +167,9 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 		}
 		if m.State() == "" {
 			// Expected traffic the table deliberately ignores -- an
-			// unrecognised notification_type, auth_success, a session.status
-			// that is not busy. No write, no state change, no timestamp
+			// unrecognised notification_type, auth_success, one of the four
+			// claude waits that are ignored pending a capture. No write, no
+			// state change, no timestamp
 			// refresh, not an error, and no noise either: claude fires
 			// Notification for things that are none of our business often
 			// enough that a line each would be a log of nothing.
@@ -206,10 +207,14 @@ func runReport(args []string, stdin io.Reader, stdout, stderr io.Writer, getenv 
 	tm := dial(socket)
 
 	// The re-assertion read. It happens on this path only -- PreToolUse, the
-	// hot hook and the whole subject of open question 1, pays nothing, and
-	// opencode pays it once per turn, on session.idle, and on nothing else:
-	// its two hot events (session.status busy, 17 times in one three-tool
-	// turn, and tool.execute.before) are working edges and read nothing.
+	// hot hook and the whole subject of open question 1, pays nothing -- and
+	// the three mappings that take it are rare by nature: claude's idle_prompt
+	// and quota_auto_resume_disabled, about a minute after a turn, and pi's
+	// session_start(idle), once per reload. OPENCODE PAYS NOTHING AT ALL since
+	// the v2 port: its turn end used to be the one re-assertion that could fire
+	// twice in a resting period, and v2 replaced that event with three edges
+	// that fire once. Its hot events (session.step.started, once per model
+	// step, and tool.execute.before) were always edges and still read nothing.
 	//
 	// It decides two things from the one fork, not one: whether to write at
 	// all, and what timestamp to write under. The second is the mapping's own

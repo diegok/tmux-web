@@ -267,11 +267,13 @@ edited:
 - claude: `~/.claude/tmux-web-report.sh`, with the four hooks merged into
   `~/.claude/settings.json`.
 - opencode: `$XDG_CONFIG_HOME/opencode/plugin/tmux-web.js` (`~/.config` when that is
-  unset). Nothing is added to `opencode.jsonc` — an absolute path in its `plugin`
-  array does work, but a dropped file uninstalls with one `rm` and leaves your
-  config alone. opencode's own bootstrap (`package.json`, `node_modules/`, a
-  `.gitignore`) lands beside the plugin in opencode's config directory, **not in
-  any repository**.
+  unset). Nothing is added to `opencode.jsonc`: a dropped file uninstalls with
+  one `rm` and leaves your config alone. The plugin imports nothing but
+  `node:child_process`, so opencode installs no bootstrap beside it and **adds
+  nothing to any repository** — measured on opencode 2.2.5, at both scopes.
+  Through opencode 1.x it did: `package.json`, `package-lock.json`,
+  `node_modules/` and a `.gitignore` landed wherever the plugin loaded from, and
+  a project install warned about it.
 - pi: `$PI_CODING_AGENT_DIR/extensions/tmux-web.ts` and
   `$PI_CODING_AGENT_DIR/skills/tmux-web/SKILL.md` (`~/.pi/agent` when that is
   unset), which pi auto-loads with no settings entry and no trust prompt. A
@@ -370,7 +372,10 @@ whose text is `internal/integrations/claude-skill.md`, the same prose for both �
 and one for opencode, unchanged. At project scope pi loads neither of its files
 until the project is trusted, by `--approve` for one run or its own prompt once;
 a global install has no such gate, measured on pi 1.5.0. Teaching opencode is a
-known follow-up: its v2 release broke the plugin and is being ported first.
+known follow-up: its plugin is ported to the v2 API and reporting again, and the
+skill is the piece still missing — opencode also reads `.claude/skills`, so a
+project install may already be seen through the file claude owns, which is worth
+measuring before a third path is written.
 
 **Two things to know before one of them surprises you.** `close` is deliberately
 not limited to panes the agent created, and closing a window's last pane closes

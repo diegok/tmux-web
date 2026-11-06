@@ -20,21 +20,29 @@ One recorder per agent, in a scratchpad, never in the repo:
   `TMUX*`/`CLAUDE_*` environment and `tty` to a per-event log.
 - **opencode** — a plugin in `<proj>/.opencode/plugin/` registering the `event`
   hook (which sees every `event.type`) plus `chat.message`, `chat.params`,
-  `permission.ask`, `tool.execute.before` and `tool.execute.after`.
+  `permission.ask`, `tool.execute.before` and `tool.execute.after`. **Recaptured
+  on 2026-11-06 against opencode 2.2.5**, where none of those names exist any
+  more: a v2 plugin definition (`{id, setup}`) registering
+  `ctx.session.hook('prompt')`, `ctx.tool.hook('execute.before')` and an
+  `ctx.event.subscribe` iteration, which is what sees every event type now.
 - **pi** — an extension in `<proj>/.pi/extensions/` calling `pi.on(name, fn)` for
   fourteen candidate event names and logging the `event` argument together with a
   summary of `ctx` (`mode`, `hasUI`, `isIdle()`).
 
 Agent versions: **Claude Code 2.1.267**, **opencode 1.18.30**, **pi 0.85.1**.
+The opencode files are from the 2026-11-06 recapture on **opencode 2.2.5**; the
+1.18.30 ones went with the events that stopped existing (see the opencode
+section).
 
 A fixture is the payload as the hook receives it:
 
 - claude — the JSON object on the hook process's stdin.
-- opencode `event` hook — the `event` object (`{id, type, properties}`).
-- opencode `chat.message` / `tool.execute.before` — these hooks take two
-  arguments, so the fixture is `{"input": …, "output": …}`, which is what the
-  handler actually sees. `tool.execute.before` puts the tool's arguments under
-  `output.args`, not under `input`.
+- opencode bus — the event object the subscription delivers,
+  `{id, created, type, data, …}` on 2.2.5 (`{id, type, properties}` on 1.18.30).
+- opencode `prompt` / `execute.before` hooks — ONE event argument each on 2.2.5,
+  recorded whole, with the tool's arguments on `input`. On 1.18.30 these hooks
+  took two arguments and the fixture was `{"input": …, "output": …}`, with the
+  arguments under `output.args`.
 - pi — the `event` argument only. `ctx` is not part of the payload and is
   recorded in prose below, because the three pi filters live in `ctx`.
 
@@ -73,7 +81,16 @@ to prove. None of them identifies anything outside the capture.
 
 No text from any of the owner's live panes appears in any file. Every prompt was
 written for this capture ("Write a haiku about tmux panes", "run `wc -l
-sample.txt`", "write a two-line poem about terminal windows").
+sample.txt`", "write a two-line poem about terminal windows", and for the 2.2.5
+recapture "use the shell tool to run exactly: ls .").
+
+Two of the 2.2.5 fixtures — `session_created_child.json` and
+`session_step_started.json` — are the only ones not recorded in the capture
+scratchpad: a subagent and a model step could only be provoked from a session
+with a working model, which was the porting agent's own. They carry the masking
+above (`/home/user`, `example-provider`, `example-model`) rather than the real
+home, provider and model. The path hash `projectID` is left as captured: it is a
+hash of a directory name and names nothing.
 
 ---
 
@@ -120,45 +137,77 @@ ignored until somebody manufactures the screen and writes a grammar.
 
 ## opencode
 
+Captured on **2026-11-06, opencode 2.2.5**. The 1.18.30 table that stood here
+went with its files: see "What 1.18.30 had and 2.2.5 does not" below for what
+was lost and why none of it could be kept.
+
 | File | Provoked by | Notes |
 | --- | --- | --- |
-| `chat_message.json` | typing the haiku prompt | Two arguments. The prompt text is `output.parts[].text` for `type: "text"`. |
-| `chat_message_child.json` | the subagent's own first message | Same shape, child `sessionID`. `input` here also carries `messageID`, which the root's did not. |
-| `session_created_root.json` | starting the session | `properties.info` has **no `parentID`**. |
-| `session_created_child.json` | the `task` tool | `properties.info.parentID` names the root. This is the only event that establishes parentage. |
-| `session_status_busy.json` | turn start | `properties.status.type == "busy"`. |
-| `session_status_idle.json` | turn end | `properties.status.type == "idle"`. Fires in the same millisecond as `session.idle`. |
-| `tool_execute_before_bash.json` | "run `wc -l sample.txt`" | `input.tool`, `input.sessionID`, `input.callID`; args under `output.args`. |
-| `tool_execute_before_todowrite.json` | the todo list | |
-| `tool_execute_before_write.json` | writing `out.txt` | args key is **`filePath`** (camelCase), unlike pi's `path`. |
-| `tool_execute_before_task.json` | the subagent launch | `description`, `prompt`, `subagent_type`. |
-| `todo_updated.json` | the same todo list, mid-run | `properties.todos[]` with `content`, `status`, `priority`; exactly one `in_progress`. |
-| `permission_asked_bash.json` | `"permission": {"bash": "ask"}` in a project config | |
-| `permission_asked_edit.json` | `"permission": {"edit": "ask"}` | |
-| `session_idle_root.json` | the root turn ending | `properties` is **`{sessionID}`** and nothing else. |
-| `session_idle_child.json` | **the subagent's turn ending while the root was still working** | Same shape, child id. |
+| `prompt.json` | typing the shell prompt | The `prompt` hook's one argument. The prompt text is `prompt.text`; `delivery` says how it was admitted. |
+| `session_created_root.json` | starting the session | `data` has **no `parentID`**. |
+| `session_created_child.json` | a subagent | `data.parentID` names the root — one level deep now, where 1.18.30 nested it under `properties.info`. The only event that establishes parentage. |
+| `session_execution_started.json` | turn start | `data` is **`{sessionID}`** and nothing else. |
+| `session_step_started.json` | each model step within the turn | `data` carries the agent, the model and a snapshot. Arrives as often as 1.18.30's `session.status(busy)` did. |
+| `session_execution_succeeded.json` | the root turn ending | `data` is **`{sessionID}`**. |
+| `session_execution_succeeded_child.json` | **the subagent's turn ending while the root was still working** | Byte-compatible with the root's shape, child id, **no `parentID`**. |
+| `session_execution_failed.json` | a turn that died at the provider | `data.error` with `type`, `message`, `status` and the provider's own body. A real failure: "This model is not available in your country". |
+| `tool_execute_before_shell.json` | "run `ls .`" | One event: `tool`, `sessionID`, `agent`, `messageID`, `id`, args under **`input`**. The bash tool is called **`shell`** now. |
+| `tool_execute_before_read.json` | reading the capture directory | args key is **`path`**, like pi's. |
+| `tool_execute_before_write.json` | writing `hello.txt` | args key is **`path`** too — 1.18.30 spelled it `filePath`. |
+| `permission_asked_shell.json` | a shell call with permission set to ask | **No `metadata` at all**: the command is `data.resources[0]`, and `data.action` is `"shell"`. |
+| `permission_asked_edit.json` | an edit with permission set to ask | `data.metadata.files[0]` with `file`, `patch`, `status` and counts. That `patch` is a whole patch, over the 1 KiB report cap on its own. |
+
+`session.execution.interrupted` has **no fixture**: three provocations of a real
+interruption all finished as `succeeded` instead — the API answered
+`{"interrupted": false}` each time, the runs being already over — so the row in
+the event table is held to the schema rather than to a capture. Its payload is
+`data.sessionID` plus a reason string, the shape `succeeded` and `failed` carry
+verbatim.
 
 Confirmed:
 
-- **`session.idle` carries a session identifier.** A child's `session.idle`
-  arrived **2.05 s before** the root's, while the root was still `busy`. The
-  false-`done` this would cause is real and reproducible, and the `sessionID` is
-  enough to filter it — provided the `session.created` that named the
-  `parentID` was seen first.
-- `session.status` fires `busy` repeatedly within one turn — 17 times in the
-  three-tool turn captured here — so a `busy` handler must be idempotent or the
-  write must be a re-assertion.
+- **The turn end carries a session identifier and no parent.** A child's arrives
+  before the root's, while the root is still working — the false-`done` this
+  would cause is the same one 1.18.30 measured at 2.05 s, and the `sessionID` is
+  enough to filter it, provided the `session.created` that named the `parentID`
+  was seen first.
+- **`session.step.started` fires repeatedly within one turn**, so a handler for
+  it must be idempotent or the write must be a re-assertion.
 
 **Where the design is wrong about `permission.asked`:** it is described as
-carrying "the question". It does not. There is no question string and no title.
-It carries `permission` (the class: `"bash"`, `"edit"`), `patterns`, `always`,
-`tool: {messageID, callID}`, and a **`metadata` object whose keys depend on the
-permission class**: `{command}` for bash, `{filepath, diff}` for edit — and that
-`diff` is a full unified diff, comfortably over the 1 KiB report cap on its own.
-Task 15 must reduce per class, not read one field.
+carrying "the question". It does not, on either version. There is no question
+string and no title. 2.2.5 carries `data.action` (the class: `"shell"`,
+`"edit"`), `data.resources`, `data.save`, `data.source` and — **for some classes
+only** — a `data.metadata` whose keys depend on the class. The reduction is per
+class, not one field.
 
-Also note: the **`permission.ask` plugin hook never fired** in any of these runs.
-Only the `event` hook's `permission.asked` did.
+### What 1.18.30 had and 2.2.5 does not
+
+These files were deleted rather than updated, because the events they recorded
+are not on the public stream any more. MEASURED on 2.2.5, with a client
+connected and without one:
+
+- `session_status_busy.json`, `session_status_idle.json` — `session.status`
+  does not reach a plugin subscription at all. `session.execution.started` and
+  `session.step.started` are what report the turn now.
+- `session_idle_root.json`, `session_idle_child.json` — `session.idle` does not
+  either. The turn ends on one of `session.execution.succeeded` / `.failed` /
+  `.interrupted`, each once.
+- `todo_updated.json` — the todo list left the bus with the todo feature's own
+  retreat from it, and with it rung 2 of the activity ladder.
+- `chat_message.json`, `chat_message_child.json` — the hook is called `prompt`
+  and takes one argument.
+- `tool_execute_before_bash.json` — the tool is called `shell`.
+- `tool_execute_before_todowrite.json`, `tool_execute_before_task.json` — not
+  reprovoked. `todowrite` went with the todo feature; the `task` tool simply was
+  not provoked on 2.2.5, and a fixture built to prove nothing is worse than no
+  fixture. Both tools reduce through the same `tool`/`input` reader as the three
+  that were captured.
+- `permission_asked_bash.json` — the class is `shell`, and its metadata is gone.
+
+Also note: the **`permission.ask` plugin hook never fired** in any of the 1.18.30
+runs — only the `event` hook's `permission.asked` did — and on 2.2.5 there is no
+such hook to register.
 
 ---
 

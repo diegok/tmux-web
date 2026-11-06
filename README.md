@@ -35,6 +35,9 @@ make build
 ./tmux-web serve --host tmux.example.com
 ```
 
+`make container-build` produces the same `./tmux-web` inside podman, so the
+machine building it needs neither Go nor pnpm.
+
 It gets a TLS certificate for that hostname over ACME, so ports 80 and 443 need
 to reach it. To try it locally instead, skip the certificate:
 
@@ -458,7 +461,8 @@ tells you an agent is waiting.
 
 ## Requirements
 
-tmux 3.4 or newer (developed against 3.7), and Go 1.26 plus pnpm to build.
+tmux 3.4 or newer (developed against 3.7), and Go 1.26 plus pnpm to build — or only
+podman, with `make container-build`.
 
 ## Development
 

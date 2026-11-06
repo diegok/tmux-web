@@ -39,12 +39,34 @@ exit before skills load, so the trick the extension pre-flight uses does not
 work for a skill. A TUI in a throwaway tmux, read with `capture-pane`, is what
 works.
 
-**opencode is the one left, and it is pending rather than blocked now.** The
-port that blocked it has landed (see below), so nothing stands in front of the
-skill but the measurement: opencode reads
-`~/.config/opencode/skills/<name>/SKILL.md`, `.opencode/skills/`, and also
-`.claude/skills` — so a project install may already be seen through the file
-claude owns, which is worth measuring before writing a third path.
+**opencode is the one left, and the measurement says it may need nothing at
+all.** MEASURED on 2026-11-06, opencode 2.2.5, against the owner's own running
+service: `GET /api/skill?location[directory]=<dir>` lists `tmux-web` with
+`"path": "/home/<owner>/.claude/skills/tmux-web/SKILL.md"` — the file the GLOBAL
+CLAUDE install writes, with our description verbatim. opencode reads claude's
+global skills directory, so an owner who installs for claude globally has already
+taught opencode, with no opencode skill path involved. The owner confirmed it
+from the other side the same day: his opencode used the verbs after a restart.
+
+That turns the follow-up from "write a third path" into a decision:
+
+- The user who installs for claude globally is done. Nothing to write.
+- The user who installs ONLY for opencode is not, and that is the case a
+  `skills/tmux-web/SKILL.md` under `$XDG_CONFIG_HOME/opencode/` or
+  `.opencode/skills/` would be for. The documented paths are
+  `~/.config/opencode/skills/<name>/SKILL.md` and `.opencode/skills/`, neither
+  measured yet.
+- `--agent claude --remove` takes the skill away from opencode as well, and
+  nothing says so to the user.
+
+**The oracle is worth keeping.** `/api/skill` with a `location[directory]` query
+(deepObject style, per the spec at `GET /openapi.json`) is a model-free,
+deterministic list of what opencode loaded — the lever pi does not have, and the
+one that would make an opencode skill install testable. One caveat, measured: in
+a throwaway HOME and XDG the same call returned an empty list even for opencode's
+own BUILTIN skills, which the owner's service lists. So an isolated test has to
+make the oracle answer at all — a positive control — before it can read anything
+into a zero.
 
 A further agent costs one `ownedFile` entry, one embedded source, and one `case`
 in `renderOwned` if the file is not a plain copy.

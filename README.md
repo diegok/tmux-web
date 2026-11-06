@@ -371,11 +371,12 @@ writes two files for each — the report wrapper or extension, and a `SKILL.md`
 whose text is `internal/integrations/claude-skill.md`, the same prose for both —
 and one for opencode, unchanged. At project scope pi loads neither of its files
 until the project is trusted, by `--approve` for one run or its own prompt once;
-a global install has no such gate, measured on pi 1.5.0. Teaching opencode is a
-known follow-up: its plugin is ported to the v2 API and reporting again, and the
-skill is the piece still missing — opencode also reads `.claude/skills`, so a
-project install may already be seen through the file claude owns, which is worth
-measuring before a third path is written.
+a global install has no such gate, measured on pi 1.5.0. **opencode is taught
+without a file of its own**: measured on opencode 2.2.5, it loads
+`~/.claude/skills/tmux-web/SKILL.md` — exactly what `--agent claude --global`
+writes — so installing for claude globally teaches opencode too, and removing
+claude's install un-teaches it. Installing only for opencode teaches it nothing,
+and that is the one case still open.
 
 **Two things to know before one of them surprises you.** `close` is deliberately
 not limited to panes the agent created, and closing a window's last pane closes

@@ -240,7 +240,9 @@ an agent runs to report what it is doing onto its own tmux pane:
 claude gets `.claude/tmux-web-report.sh` and four hooks merged into
 `.claude/settings.json`, which is a file you own and is merged rather than
 rewritten; opencode gets `.opencode/plugin/tmux-web.js`; pi gets
-`.pi/extensions/tmux-web.ts`.
+`.pi/extensions/tmux-web.ts`. All three also get a `skills/tmux-web/SKILL.md`
+in their own directory, which is what teaches the agent the verbs below — the
+same prose for all three, from the same file in the binary.
 
 It writes into the current directory, or into a directory you name after the
 flags. It prints every path it is going to touch and asks before writing
@@ -266,7 +268,8 @@ edited:
 
 - claude: `~/.claude/tmux-web-report.sh`, with the four hooks merged into
   `~/.claude/settings.json`.
-- opencode: `$XDG_CONFIG_HOME/opencode/plugin/tmux-web.js` (`~/.config` when that is
+- opencode: `$XDG_CONFIG_HOME/opencode/plugin/tmux-web.js` and
+  `$XDG_CONFIG_HOME/opencode/skills/tmux-web/SKILL.md` (`~/.config` when that is
   unset). Nothing is added to `opencode.jsonc`: a dropped file uninstalls with
   one `rm` and leaves your config alone. The plugin imports nothing but
   `node:child_process`, so opencode installs no bootstrap beside it and **adds
@@ -366,17 +369,16 @@ open, no daemon — and that is why they keep working while you are away. `panes
 lists only the caller's own session; a pane in another one must be named
 explicitly. That is there so an agent does not surprise you, not as a security
 boundary, since an agent in your tmux can reach the whole `tmux` CLI anyway.
-`claude` and `pi` are taught these verbs automatically: `install-integration`
-writes two files for each — the report wrapper or extension, and a `SKILL.md`
-whose text is `internal/integrations/claude-skill.md`, the same prose for both —
-and one for opencode, unchanged. At project scope pi loads neither of its files
-until the project is trusted, by `--approve` for one run or its own prompt once;
-a global install has no such gate, measured on pi 1.5.0. **opencode is taught
-without a file of its own**: measured on opencode 2.2.5, it loads
-`~/.claude/skills/tmux-web/SKILL.md` — exactly what `--agent claude --global`
-writes — so installing for claude globally teaches opencode too, and removing
-claude's install un-teaches it. Installing only for opencode teaches it nothing,
-and that is the one case still open.
+All three agents are taught these verbs automatically: `install-integration`
+writes two files for each — the report wrapper, plugin or extension, and a
+`SKILL.md` whose text is `internal/integrations/claude-skill.md`, the same prose
+for all three. At project scope pi loads neither of its files until the project
+is trusted, by `--approve` for one run or its own prompt once; a global install
+has no such gate, measured on pi 1.5.0. opencode's two paths are measured on
+2.2.5 against its own loaded-skill list, which is readable with no model at all
+(`GET /api/skill`): it also reads claude's `~/.claude/skills`, so a global claude
+install teaches it as well, and when both copies are present the list carries one
+skill and it is opencode's own.
 
 **Two things to know before one of them surprises you.** `close` is deliberately
 not limited to panes the agent created, and closing a window's last pane closes

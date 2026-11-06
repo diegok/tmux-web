@@ -194,17 +194,38 @@ var agents = map[string]agentSpec{
 			"`Trust project folder?` prompt once, or start it with `--approve` for a single run",
 	},
 	"opencode": {
-		files: []ownedFile{{
-			file:       filepath.Join(".opencode", "plugin", "tmux-web.js"),
-			globalFile: filepath.Join("opencode", "plugin", "tmux-web.js"),
-			source:     "opencode.js",
-			schema:     opencodeSchema,
-		}},
+		// The plugin MUST stay first: pivalidate_test.go holds files[0]'s
+		// schema against the constant opencode.js declares, and the skill
+		// carries a different number for a different reason.
+		files: []ownedFile{
+			{
+				file:       filepath.Join(".opencode", "plugin", "tmux-web.js"),
+				globalFile: filepath.Join("opencode", "plugin", "tmux-web.js"),
+				source:     "opencode.js",
+				schema:     opencodeSchema,
+			},
+			// The same prose claude and pi install, from the same bytes. Both
+			// paths MEASURED on opencode 2.2.5 against opencode's own skill
+			// list (`GET /api/skill?location[directory]=<dir>`, which needs no
+			// model): each is listed, and when this global copy and a
+			// ~/.claude/skills copy are both present the list carries ONE
+			// tmux-web and it is this one. See
+			// TestOpencodeOwnsItsSkillAtBothScopes.
+			{
+				file:       filepath.Join(".opencode", "skills", "tmux-web", "SKILL.md"),
+				globalFile: filepath.Join("opencode", "skills", "tmux-web", "SKILL.md"),
+				source:     "claude-skill.md",
+				schema:     skillSchema,
+			},
+		},
 		global: &globalSpec{
 			root: opencodeConfigDir,
 			note: "a global opencode plugin is loaded in every project, with no entry in any config file.\n" +
 				"  tmux-web does not add a path to `plugin` in your opencode.jsonc: a directory drop is " +
-				"uninstalled by deleting the one file above and leaves a file you own untouched",
+				"uninstalled by deleting the one file above and leaves a file you own untouched.\n" +
+				"  opencode also reads claude's `~/.claude/skills`, so a global claude install already " +
+				"teaches it these verbs; the copy above takes precedence over that one and the agent is " +
+				"never shown two (measured on opencode 2.2.5)",
 		},
 		// PROJECT SCOPE ONLY -- and EMPTY since the OpenCode V2 port. Through
 		// V1 this warned that opencode's own bootstrap (package.json,

@@ -9,7 +9,7 @@ Fifty-two minor findings came out of the per-task reviews. Eleven were fixed in
 the final wave; the whole-branch review judged the other forty-one not worth the
 merge. What follows is only the part with a future in it.
 
-## Teaching opencode and pi
+## Teaching opencode and pi — both done
 
 **pi is taught.** It owns two files now, the extension and
 `skills/tmux-web/SKILL.md`, from the same embedded prose claude installs. Both
@@ -39,44 +39,46 @@ exit before skills load, so the trick the extension pre-flight uses does not
 work for a skill. A TUI in a throwaway tmux, read with `capture-pane`, is what
 works.
 
-**opencode is the one left, and the measurement says it may need nothing at
-all.** MEASURED on 2026-11-06, opencode 2.2.5, against the owner's own running
-service: `GET /api/skill?location[directory]=<dir>` lists `tmux-web` with
-`"path": "/home/<owner>/.claude/skills/tmux-web/SKILL.md"` — the file the GLOBAL
-CLAUDE install writes, with our description verbatim. opencode reads claude's
-global skills directory, so an owner who installs for claude globally has already
-taught opencode, with no opencode skill path involved. The owner confirmed it
-from the other side the same day: his opencode used the verbs after a restart.
+**opencode is taught too, and it owns its own copy.** The port unblocked it and
+a measurement settled where it goes. MEASURED on opencode 2.2.5 against
+opencode's own loaded-skill list — `GET /api/skill?location[directory]=<dir>`,
+which answers with no model and no credentials:
 
-That turns the follow-up from "write a third path" into a decision:
+- `$XDG_CONFIG_HOME/opencode/skills/tmux-web/SKILL.md` is listed, in a project
+  that carries nothing of its own.
+- `.opencode/skills/tmux-web/SKILL.md` is listed in that project.
+- With opencode's own global copy AND a `~/.claude/skills/tmux-web/SKILL.md`
+  both present, the list carries exactly ONE tmux-web and it is opencode's. So
+  the install does not have to care whether claude's copy is there: it wins, and
+  the agent is never shown two.
 
-- The user who installs for claude globally is done. Nothing to write.
-- The user who installs ONLY for opencode is not, and that is the case a
-  `skills/tmux-web/SKILL.md` under `$XDG_CONFIG_HOME/opencode/` or
-  `.opencode/skills/` would be for. The documented paths are
-  `~/.config/opencode/skills/<name>/SKILL.md` and `.opencode/skills/`, neither
-  measured yet.
-- `--agent claude --remove` takes the skill away from opencode as well, and
-  nothing says so to the user.
+That third row is also the answer to the question this section used to ask.
+opencode reads claude's global skills directory, which is why the owner's
+opencode knew the verbs before anything was installed for it — `--agent claude
+--global` had been teaching it all along. It is no longer load-bearing: opencode
+installs its own file now, so an opencode-only user is taught, and a claude user
+who removes claude's install does not silently un-teach opencode as well.
 
-**The oracle is worth keeping.** `/api/skill` with a `location[directory]` query
-(deepObject style, per the spec at `GET /openapi.json`) is a model-free,
-deterministic list of what opencode loaded — the lever pi does not have, and the
-one that would make an opencode skill install testable. One caveat, measured: in
-a throwaway HOME and XDG the same call returned an empty list even for opencode's
-own BUILTIN skills, which the owner's service lists. So an isolated test has to
-make the oracle answer at all — a positive control — before it can read anything
-into a zero.
+**The oracle is in the suite.** `TestAGlobalOpencodeInstallIsLoadedAndRemovable`
+now asserts the skill's presence after the install and its absence after
+`--remove`, from a real opencode's own list. It carries a POSITIVE CONTROL,
+because the first call after a cold start lists nothing at all — opencode's own
+builtins included — so the poll waits for the builtins before reading anything
+into the absence of ours. Without that control the assertion would pass on a
+race and prove nothing, which is how the first version of this measurement
+briefly concluded that none of the paths worked.
 
 A further agent costs one `ownedFile` entry, one embedded source, and one `case`
-in `renderOwned` if the file is not a plain copy.
+in `renderOwned` if the file is not a plain copy. opencode's skill cost exactly
+that: one entry, no new source, no new code path.
 
 **The shared skill source is still called `claude-skill.md`**, which is now a
-lie: claude and pi install the same bytes of it. Renaming it moves the
-`//go:embed` line in `internal/integrations`, the `Files` list beside it and the
-two tests that assert that list. It waited for opencode's v2 port, which was
-working in that directory; the port has landed, so the rename is free to happen
-whenever somebody wants it.
+lie three times over: all three agents install the same bytes of it, and only
+one of them is claude. Renaming it moves the `//go:embed` line in
+`internal/integrations`, the `Files` list beside it and the three tests that
+assert that list -- `pivalidate_test.go`'s source table now names it for every
+agent. It waited for opencode's v2 port, which was working in that directory;
+the port has landed, so the rename is free to happen whenever somebody wants it.
 
 ## Two behaviours that are right but unobvious
 

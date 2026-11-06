@@ -341,12 +341,13 @@ func TestThePiProbeRunsNowhereNearTheUsersOwnPi(t *testing.T) {
 //
 // The table is written out rather than derived from the specs, because half of
 // what it holds is WHICH sources each agent owns. Deriving it would make the
-// test agree with whatever the spec says, including the day pi quietly loses
-// its skill again.
+// test agree with whatever the spec says, including the day pi or opencode
+// quietly loses its skill again. All three agents install the same skill prose
+// now, and the three entries that say so are the only record of it.
 func TestTheIntegrationSourcesCarryTheSchemaTheInstallerWrites(t *testing.T) {
 	for agent, sources := range map[string][]string{
 		"pi":       {"pi.ts", "claude-skill.md"},
-		"opencode": {"opencode.js"},
+		"opencode": {"opencode.js", "claude-skill.md"},
 		"claude":   {"claude-report.sh", "claude-skill.md"},
 	} {
 		owned := agents[agent].files

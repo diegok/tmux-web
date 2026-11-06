@@ -474,12 +474,89 @@ func TestPiOwnsItsSkillAndOnlyTheExtensionIsProbed(t *testing.T) {
 	}
 }
 
+// TestOpencodeOwnsItsSkillAtBothScopes.
+//
+// opencode is taught the verbs out of the same prose claude and pi install, and
+// the two directories are MEASURED on opencode 2.2.5 against opencode's own
+// skill list -- `GET /api/skill?location[directory]=<dir>`, which answers with
+// no model and no credentials, and which needs a settle window: the first call
+// after a cold start lists nothing at all, builtins included, so a zero means
+// "ask again" and not "nothing loaded".
+//
+//   - `$XDG_CONFIG_HOME/opencode/skills/tmux-web/SKILL.md` is listed, in a
+//     project that carries nothing of its own.
+//   - `.opencode/skills/tmux-web/SKILL.md` is listed in that project.
+//   - With opencode's own global copy AND a `~/.claude/skills/tmux-web/SKILL.md`
+//     both present, the list carries exactly ONE tmux-web and it is opencode's.
+//     That is why this install does not have to care that claude's copy may
+//     already be there: the agent is never shown two.
+//
+// THE PATHS ARE LITERAL HERE ON PURPOSE. Derived from the spec they would hold
+// the installer to whatever it does today; what has to be held is the two
+// directories opencode actually reads.
+func TestOpencodeOwnsItsSkillAtBothScopes(t *testing.T) {
+	skill, err := integrations.File("claude-skill.md")
+	if err != nil {
+		t.Fatalf("reading the embedded skill: %v", err)
+	}
+
+	t.Run("global", func(t *testing.T) {
+		home := globalHome(t)
+		installCLI(t, "", "--agent", "opencode", "--global", "--yes").wantCode(t, 0)
+
+		for _, want := range []string{
+			filepath.Join(home, "xdg", "opencode", "plugin", "tmux-web.js"),
+			filepath.Join(home, "xdg", "opencode", "skills", "tmux-web", "SKILL.md"),
+		} {
+			if _, err := os.Stat(want); err != nil {
+				t.Errorf("a global opencode install wrote nothing to %s: %v", want, err)
+			}
+		}
+		got := installRead(t, filepath.Join(home, "xdg", "opencode", "skills", "tmux-web", "SKILL.md"))
+		if got != string(skill) {
+			t.Errorf("the installed skill is %d bytes and the embedded source is %d: opencode must be "+
+				"taught the same prose as claude and pi, not a copy of it", len(got), len(skill))
+		}
+	})
+
+	t.Run("project", func(t *testing.T) {
+		globalHome(t)
+		root := t.TempDir()
+		installCLI(t, "", "--agent", "opencode", "--yes", root).wantCode(t, 0)
+
+		for _, want := range []string{
+			filepath.Join(root, ".opencode", "plugin", "tmux-web.js"),
+			filepath.Join(root, ".opencode", "skills", "tmux-web", "SKILL.md"),
+		} {
+			if _, err := os.Stat(want); err != nil {
+				t.Errorf("a project opencode install wrote nothing to %s: %v", want, err)
+			}
+		}
+	})
+
+	t.Run("--remove takes both back out", func(t *testing.T) {
+		home := globalHome(t)
+		installCLI(t, "", "--agent", "opencode", "--global", "--yes").wantCode(t, 0)
+		installCLI(t, "", "--agent", "opencode", "--global", "--yes", "--remove").wantCode(t, 0)
+
+		for _, gone := range []string{
+			filepath.Join(home, "xdg", "opencode", "plugin", "tmux-web.js"),
+			filepath.Join(home, "xdg", "opencode", "skills", "tmux-web", "SKILL.md"),
+		} {
+			if _, err := os.Stat(gone); err == nil {
+				t.Errorf("%s survived --remove: an install that cannot be undone whole is one the "+
+					"owner has to finish by hand", gone)
+			}
+		}
+	})
+}
+
 // TestEachOwnedFileIsClassifiedAgainstItsOwnSchema is the other per-file half.
 //
 // The skill pi installs is the same file claude installs, so its managed header
-// carries claude's number. The extension's carries the number queue.ts exports,
-// which is what two loaded copies of the integration compare AT RUN TIME to
-// agree on which of them reports. Those are two different numbers with two
+// carries the skill's number. The extension's carries the constant pi.ts
+// declares, which is what two loaded copies of the integration compare AT RUN
+// TIME to agree on which of them reports. Those are two different numbers with two
 // different jobs, and they have to be free to move apart: with one number per
 // agent, one of pi's two files reads `ownOutdated` forever and every reinstall
 // tells the owner an older tmux-web wrote what this very command just wrote.

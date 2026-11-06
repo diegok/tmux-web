@@ -457,7 +457,7 @@ func TestAGlobalOpencodeInstallIsLoadedAndRemovable(t *testing.T) {
 	// after its CLI has exited -- so all three are running for the back half of
 	// this test and none of them outlives it. They are whole opencode servers,
 	// and leaving them behind would not be untidiness, it would be a leak.
-	boot := func(name string, port int) string {
+	boot := func(name string, port int) ocPhase {
 		t.Helper()
 		data := filepath.Join(dir, name+"-data")
 		state := filepath.Join(dir, name+"-state")
@@ -489,6 +489,19 @@ func TestAGlobalOpencodeInstallIsLoadedAndRemovable(t *testing.T) {
 				t.Fatalf("opencode %s did not run (%s): %v", strings.Join(args, " "), name, err)
 			}
 		}
+		// The same call, for the answers a phase reads rather than the
+		// booting. Errors are swallowed: every caller is a poller that has to
+		// cope with an answer that is not there yet anyway, and a hard failure
+		// here would turn a settle window into a flake.
+		out := func(args ...string) string {
+			ctx, cancel := context.WithTimeout(context.Background(), opencodeColdStart)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, oc, args...)
+			cmd.Dir = project
+			cmd.Env = env()
+			stdout, _ := cmd.Output()
+			return string(stdout)
+		}
 		run("api", "get", "/api/plugin")
 		log := filepath.Join(data, "opencode", "log", "opencode.log")
 		if _, err := os.Stat(log); err != nil {
@@ -502,17 +515,49 @@ func TestAGlobalOpencodeInstallIsLoadedAndRemovable(t *testing.T) {
 			cmd.Env = env()
 			_ = cmd.Run()
 		})
-		return log
+		return ocPhase{log: log, out: out}
+	}
+
+	// THE SKILL ORACLE, AND ITS POSITIVE CONTROL. `GET /api/skill` lists what
+	// opencode loaded for a location, with no model and no credentials -- the
+	// lever pi does not have. MEASURED on 2.2.5: the first call after a cold
+	// start lists NOTHING AT ALL, opencode's own builtins included, so a zero
+	// means "ask again" and a test that read it as "our skill is not loaded"
+	// would be reading a race and calling it a measurement. This waits for the
+	// builtins to appear and only then looks for ours -- which is also what
+	// makes the absence asserted after --remove mean anything.
+	skills := func(p ocPhase, within time.Duration) []ocSkill {
+		t.Helper()
+		deadline := time.Now().Add(within)
+		for {
+			var answer struct {
+				Data []ocSkill `json:"data"`
+			}
+			out := p.out("api", "get", "/api/skill?location[directory]="+project)
+			if json.Unmarshal([]byte(out), &answer) == nil && len(answer.Data) > 0 {
+				return answer.Data
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("opencode never listed one skill for %s, its own builtins included, so nothing "+
+					"can be read into the absence of ours:\n%.400s", project, out)
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
 	}
 
 	// (1) A boot with nothing installed: the log names no plugin of ours.
 	before := boot("before", 21000+os.Getpid()%8000)
-	beforeLog, err := os.ReadFile(before)
+	beforeLog, err := os.ReadFile(before.log)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(beforeLog), "tmux-web.js") {
-		t.Fatalf("%s mentions tmux-web.js with nothing installed:\n%.400s", before, beforeLog)
+		t.Fatalf("%s mentions tmux-web.js with nothing installed:\n%.400s", before.log, beforeLog)
+	}
+	for _, sk := range skills(before, 30*time.Second) {
+		if sk.ID == "tmux-web" {
+			t.Fatalf("opencode lists a tmux-web skill at %q with nothing installed", sk.Path)
+		}
 	}
 
 	installCLI(t, "", "--agent", "opencode", "--global", "--yes").wantCode(t, 0)
@@ -544,13 +589,29 @@ func TestAGlobalOpencodeInstallIsLoadedAndRemovable(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
-	line, ok := outcome(after, 15*time.Second)
+	line, ok := outcome(after.log, 15*time.Second)
 	if !ok {
-		afterLog, _ := os.ReadFile(after)
+		afterLog, _ := os.ReadFile(after.log)
 		t.Fatalf("opencode's service log never records an outcome for %s:\n%.600s", plugin, afterLog)
 	}
 	if strings.Contains(line, "failed to load plugin") {
 		t.Fatalf("opencode refused our plugin: %.400s", line)
+	}
+
+	// And the other half of the install. The plugin reports the pane; the skill
+	// is what teaches the agent the verbs, and opencode is the one agent whose
+	// loaded-skill list can be read back without a model.
+	skill := filepath.Join(xdg, "opencode", "skills", "tmux-web", "SKILL.md")
+	loaded := ""
+	for _, sk := range skills(after, 30*time.Second) {
+		if sk.ID == "tmux-web" {
+			loaded = sk.Path
+		}
+	}
+	if loaded != skill {
+		t.Errorf("opencode lists the tmux-web skill at %q, want %q: a global install that loads the "+
+			"plugin and not the skill is half an install, and the half it loses is the half the agent reads",
+			loaded, skill)
 	}
 
 	// The project stayed empty. This is the measurement behind not printing the
@@ -568,10 +629,29 @@ func TestAGlobalOpencodeInstallIsLoadedAndRemovable(t *testing.T) {
 	// same settle window the positive case needed, then read.
 	installCLI(t, "", "--agent", "opencode", "--global", "--yes", "--remove").wantCode(t, 0)
 	removed := boot("removed", 23000+os.Getpid()%8000)
-	if _, hit := outcome(removed, 3*time.Second); hit {
-		removedLog, _ := os.ReadFile(removed)
+	if _, hit := outcome(removed.log, 3*time.Second); hit {
+		removedLog, _ := os.ReadFile(removed.log)
 		t.Errorf("opencode still loads or refuses %s after --remove:\n%.400s", plugin, removedLog)
 	}
+	for _, sk := range skills(removed, 30*time.Second) {
+		if sk.ID == "tmux-web" {
+			t.Errorf("opencode still lists the tmux-web skill at %q after --remove", sk.Path)
+		}
+	}
+}
+
+// ocPhase is one boot of this test: its service log, and a way to ask that
+// service a question.
+type ocPhase struct {
+	log string
+	out func(args ...string) string
+}
+
+// ocSkill is one entry of `GET /api/skill`, which is opencode's own answer to
+// "which skills did you load".
+type ocSkill struct {
+	ID   string `json:"id"`
+	Path string `json:"path"`
 }
 
 // pluginOrigin is one entry of V1's `opencode debug config` output, retired

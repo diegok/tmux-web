@@ -1,0 +1,10 @@
+{
+  "tool": "shell",
+  "sessionID": "ses_e532855d7ffeFY8IPCSZ6Ff4xL",
+  "agent": "build",
+  "messageID": "msg_1acd7aa6a001w7qoK9RtcxYK2l",
+  "id": "call_b1e217b21cbb49608c396dbb",
+  "input": {
+    "command": "ls ."
+  }
+}

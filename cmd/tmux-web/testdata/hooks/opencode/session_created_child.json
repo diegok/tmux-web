@@ -1,39 +1,31 @@
 {
-  "id": "evt_08ecc24b4001PPvlICFEeEPp6D",
+  "id": "evt_1acd6fe2c001NWhRfamgSy0bGm",
+  "created": 1793901133356,
   "type": "session.created",
-  "properties": {
-    "sessionID": "ses_f7133db4cffe0EZNl6K9sGw9IX",
-    "info": {
-      "id": "ses_f7133db4cffe0EZNl6K9sGw9IX",
-      "slug": "proud-knight",
-      "version": "1.18.30",
-      "projectID": "global",
-      "directory": "/tmp/tmux-web-capture/oc/proj",
-      "path": "tmp/tmux-web-capture/oc/proj",
-      "parentID": "ses_f7135fcc9ffebuJVObk3PCMWN8",
-      "title": "Two-line terminal poem (@general subagent)",
-      "agent": "general",
-      "permission": [
-        {
-          "permission": "task",
-          "pattern": "*",
-          "action": "deny"
-        }
-      ],
-      "cost": 0,
-      "tokens": {
-        "input": 0,
-        "output": 0,
-        "reasoning": 0,
-        "cache": {
-          "read": 0,
-          "write": 0
-        }
-      },
-      "time": {
-        "created": 1789102138547,
-        "updated": 1789102138547
-      }
+  "location": {
+    "directory": "/home/user/devel/sandbox/tmux-web"
+  },
+  "data": {
+    "sessionID": "ses_e532901edffe1tGNdi6hzoXlyC",
+    "slug": "cosmic-falcon",
+    "version": "2.2.5",
+    "projectID": "7b83aa48e49c83cae1a8b76853181588ef39c61d",
+    "parentID": "ses_e53a18060ffeJiLzUPi1y1YyJ0",
+    "location": {
+      "directory": "/home/user/devel/sandbox/tmux-web"
+    },
+    "subpath": "",
+    "title": "Tarea mínima para captura",
+    "agent": "explore",
+    "model": {
+      "id": "example-model",
+      "providerID": "example-provider",
+      "variant": "high"
     }
+  },
+  "durable": {
+    "aggregateID": "ses_e532901edffe1tGNdi6hzoXlyC",
+    "seq": 0,
+    "version": 1
   }
 }

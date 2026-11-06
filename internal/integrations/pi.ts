@@ -127,6 +127,16 @@ export function handlers(report: (item: ReportItem) => void): Record<string, Han
 // the newest state rather than to a backlog of forks, and the claim that
 // decides whether this copy is the one that should be reporting at all.
 //
+// TMUX_WEB_SCHEMA is the schema number of THIS copy, the same number as the
+// one in the `managed by tmux-web (tmux-web-schema: N)` header of this file.
+// cmd/tmux-web/install.go holds its `piSchema` against this constant on every
+// run of the Go suite, because two numbers that must agree and are written
+// down twice are two numbers that drift. It lives HERE since the opencode V2
+// port and not in queue.ts: pi's install did not change shape when opencode's
+// did, and one shared constant would have forced a false "your file changed"
+// note onto one of the two. opencode.js carries its own.
+const TMUX_WEB_SCHEMA = 1
+//
 // THE CLAIM IS MADE HERE AND CHECKED AT THE QUEUE, and those are deliberately
 // two moments. Since `--global`, one pi process can hold two copies of this
 // file -- $PI_CODING_AGENT_DIR/extensions/ auto-loads in every project and
@@ -136,7 +146,7 @@ export function handlers(report: (item: ReportItem) => void): Record<string, Han
 // stays registered and says nothing. See queue.ts for why the winner is the
 // newer schema rather than the first to load.
 export default function (pi: Pi) {
-  const mine = claimReporter()
+  const mine = claimReporter(TMUX_WEB_SCHEMA)
   const q = makeQueue(spawnReport('pi'))
   const report = (item: ReportItem) => {
     if (mine()) q.push(item)

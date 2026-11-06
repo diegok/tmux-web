@@ -1,36 +1,23 @@
 {
-  "id": "evt_08eca0337001y3MTikfdtdtf4P",
+  "id": "evt_1acd6fef00012mYWVUHpbF5Ujj",
+  "created": 1793901133552,
   "type": "session.created",
-  "properties": {
-    "sessionID": "ses_f7135fcc9ffebuJVObk3PCMWN8",
-    "info": {
-      "id": "ses_f7135fcc9ffebuJVObk3PCMWN8",
-      "slug": "silent-rocket",
-      "version": "1.18.30",
-      "projectID": "global",
-      "directory": "/tmp/tmux-web-capture/oc/proj",
-      "path": "tmp/tmux-web-capture/oc/proj",
-      "title": "New session - 2026-09-11T04:46:38.902Z",
-      "agent": "build",
-      "model": {
-        "id": "example-model",
-        "providerID": "example-provider",
-        "variant": "high"
-      },
-      "cost": 0,
-      "tokens": {
-        "input": 0,
-        "output": 0,
-        "reasoning": 0,
-        "cache": {
-          "read": 0,
-          "write": 0
-        }
-      },
-      "time": {
-        "created": 1789101998902,
-        "updated": 1789101998902
-      }
-    }
+  "location": {
+    "directory": "/tmp/opencode/tmux-web-capture-v2"
+  },
+  "data": {
+    "sessionID": "ses_e53290111ffeiB9gk7g0uS78cw",
+    "slug": "silent-pixel",
+    "version": "2.2.5",
+    "projectID": "0b721f5af1a58acce64c16e67fe6e3998d2c95c9",
+    "location": {
+      "directory": "/tmp/opencode/tmux-web-capture-v2"
+    },
+    "subpath": ""
+  },
+  "durable": {
+    "aggregateID": "ses_e53290111ffeiB9gk7g0uS78cw",
+    "seq": 0,
+    "version": 1
   }
 }

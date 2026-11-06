@@ -221,49 +221,52 @@ var eventFixtures = []struct {
 	{"claude/subagent_stop.json", "claude", "SubagentStop", "", ""},
 
 	// -- opencode -------------------------------------------------------
-	// The prompt is under output.parts[].text and is not used, on the root's
-	// message and on the child's alike. Same two reasons as claude's.
-	{"opencode/chat_message.json", "opencode", "chat.message", tmux.StateWorking, ""},
-	{"opencode/chat_message_child.json", "opencode", "chat.message", tmux.StateWorking, ""},
-	{"opencode/session_status_busy.json", "opencode", "session.status", tmux.StateWorking, ""},
-	// The turn end is session.idle, and one turn end is enough. session.status
-	// idle fires in the same millisecond; reporting both would write the same
-	// state twice with two timestamps for no gain.
-	{"opencode/session_status_idle.json", "opencode", "session.status", "", ""},
-	{"opencode/tool_execute_before_bash.json", "opencode", "tool.execute.before",
-		tmux.StateWorking, "run wc -l sample.txt"},
-	// opencode spells the path argument filePath, in camelCase, where claude
-	// spells it file_path and pi spells it path. `content` is not read: a
-	// file's length has no bound and MaxReportBytes does.
-	{"opencode/tool_execute_before_write.json", "opencode", "tool.execute.before", tmux.StateWorking, "write out.txt"},
-	// todowrite's argument is the todo list itself: no path, no command, so the
-	// tool name alone. The list arrives as text one event later, through
-	// todo.updated, which is rung 2 and says it better.
-	{"opencode/tool_execute_before_todowrite.json", "opencode", "tool.execute.before", tmux.StateWorking, "todowrite"},
-	// opencode's subagent launcher IS called task, and carries a prompt like
-	// claude's Agent. Same answer, same reason.
-	{"opencode/tool_execute_before_task.json", "opencode", "tool.execute.before", tmux.StateWorking, "task"},
-	// Rung 2: the agent's own statement of intent, which beats a mechanical
-	// trace of the tool it happens to be in. Exactly one entry is in_progress.
-	{"opencode/todo_updated.json", "opencode", "todo.updated", tmux.StateWorking, "Read sample.txt"},
+	// The prompt is under prompt.text and is not used -- the user's raw
+	// prompt, same two reasons as claude's. V2 fires this hook once per
+	// prompt ADMISSION, where V1 called it chat.message.
+	{"opencode/prompt.json", "opencode", "prompt", tmux.StateWorking, ""},
+	// The turn start proper and busy's stand-in, both edges, both plain.
+	// step.started fires once per model step -- as often as V1's status(busy)
+	// did -- and neither may assume it arrives once.
+	{"opencode/session_execution_started.json", "opencode", "session.execution.started", tmux.StateWorking, ""},
+	{"opencode/session_step_started.json", "opencode", "session.step.started", tmux.StateWorking, ""},
+	// The V2 hook is ONE event with the tool's arguments on `input`, where V1
+	// carried them on a second `output` argument. The bash tool is named shell
+	// now, and the command goes through whole as before.
+	{"opencode/tool_execute_before_shell.json", "opencode", "tool.execute.before",
+		tmux.StateWorking, "run ls ."},
+	// opencode still spells the path argument path on read and write, like pi;
+	// `content` is not read: a file's length has no bound and MaxReportBytes
+	// does.
+	{"opencode/tool_execute_before_read.json", "opencode", "tool.execute.before",
+		tmux.StateWorking, "read tmux-web-capture-v2"},
+	{"opencode/tool_execute_before_write.json", "opencode", "tool.execute.before", tmux.StateWorking, "write hello.txt"},
 	// permission.asked carries NO question string -- the design says it does
-	// and the recorded payload says it does not -- so the text is read out of
-	// `metadata`, whose keys vary by permission class. bash's is {command},
-	// and the command IS the question the dialog is asking, so it goes whole.
-	{"opencode/permission_asked_bash.json", "opencode", "permission.asked",
-		tmux.StateBlocked, "run echo hello from opencode"},
-	// edit's metadata is {filepath, diff}, and that diff is a whole unified
-	// diff: unbounded, and over MaxReportBytes on its own in this one sample.
-	// Reducing per class rather than reading one fixed field is what keeps the
-	// report parseable; the filename answers the dialog's question.
-	{"opencode/permission_asked_edit.json", "opencode", "permission.asked", tmux.StateBlocked, "edit note.txt"},
-	{"opencode/session_idle_root.json", "opencode", "session.idle", tmux.StateIdle, ""},
-	// Still StateIdle, and that is the honest answer: this payload is
-	// {sessionID} and nothing else, byte-compatible with the root's shape, and
-	// it carries no parentID for Go to refuse. What keeps it off the pane is
-	// the plugin's child-session map -- the plugin saw the session.created that
-	// named the parent and a fresh Go process never can.
-	{"opencode/session_idle_child.json", "opencode", "session.idle", tmux.StateIdle, ""},
+	// and the recorded payloads say it does not -- so the text is reduced per
+	// ACTION class. The V2 shell class sends the command as resources[0] with
+	// no metadata at all, and the command IS the question the dialog is
+	// asking, so it goes whole.
+	{"opencode/permission_asked_shell.json", "opencode", "permission.asked",
+		tmux.StateBlocked, "run ls ."},
+	// edit's metadata is {files: [{file, patch, ...}]}, and that patch is a
+	// whole patch: unbounded, and over MaxReportBytes on its own in this one
+	// sample. Reducing per class rather than reading one fixed field is what
+	// keeps the report parseable; the filename answers the dialog's question.
+	{"opencode/permission_asked_edit.json", "opencode", "permission.asked", tmux.StateBlocked, "edit hello.txt"},
+	// The turn end, split three ways by V2. Each of the three is an edge that
+	// fires once; V1's session.idle -- a re-assertion that could recur -- is
+	// gone from the bus entirely, and session.status with it.
+	{"opencode/session_execution_succeeded.json", "opencode", "session.execution.succeeded", tmux.StateIdle, ""},
+	// The fixture is a REAL provider failure ("This model is not available in
+	// your country"), which is the case V1's re-assertion comment was about:
+	// what used to be idle, message.updated, idle is now one failed edge.
+	{"opencode/session_execution_failed.json", "opencode", "session.execution.failed", tmux.StateIdle, ""},
+	// A subagent's own turn end, recorded from one: the payload is
+	// byte-compatible with the root's -- {data: {sessionID}} and nothing else
+	// -- and it carries no parentID for Go to refuse. What keeps it off the
+	// pane is the plugin's child-session map -- the plugin saw the
+	// session.created that named the parent and a fresh Go process never can.
+	{"opencode/session_execution_succeeded_child.json", "opencode", "session.execution.succeeded", tmux.StateIdle, ""},
 	// session.created establishes parentage inside the plugin. It is not a
 	// state of the pane and the plugin never reports it.
 	{"opencode/session_created_root.json", "opencode", "session.created", "", ""},
@@ -658,63 +661,46 @@ func TestEdgeAndReassertion(t *testing.T) {
 		}
 	})
 
-	// The fourth row that carries more weight than the rest, and the one this
-	// table got wrong for three revisions.
-	//
-	// MEASURED on opencode 1.18.30, on the run that drove the integration
-	// test: a turn that DIED AT THE PROVIDER fired session.idle, then
-	// message.updated, then session.idle again, about a second apart, with no
-	// session.status(busy) anywhere between them. Two turn ends, one resting
-	// period, and nothing in the payload distinguishes them -- both are
-	// {type, properties.sessionID} on the same session.
-	//
-	// It is driven as two consecutive calls rather than asserted on the table,
-	// because the damage is entirely in the SECOND one: finishedAt is derived
-	// statelessly from a resting report's own timestamp, so an edge here
-	// re-dates a finish a device has already seen and badges it again about a
-	// second later. Small, bounded, failed turns only -- and wrong.
-	t.Run("opencode's session.idle can fire twice in one resting period", func(t *testing.T) {
-		const idleEvent = `{"type":"session.idle","properties":{"sessionID":"ses_1"}}`
+	// THE TURN END IS AN EDGE AGAIN. V1's session.idle was the fourth row that
+	// carried more weight than the rest, and the one this table got wrong for
+	// three revisions: MEASURED on opencode 1.18.30, a turn that died at the
+	// provider fired idle, message.updated, idle about a second apart, and the
+	// second idle re-dated a finish a device had already seen. V2 retired that
+	// row honestly: session.idle is off the public bus, and the turn ends with
+	// exactly one of three execution events, each of which fires once. The
+	// re-assertion machinery above is claude's and pi's now; what opencode
+	// contributes is the guarantee that a second turn end for one turn cannot
+	// arrive, which the table asserts structurally elsewhere (opencode has no
+	// kindReassertion row at all).
+	t.Run("opencode's turn end is an edge and dates from now", func(t *testing.T) {
+		const failed = `{"id":"evt_x","created":1793901134480,"type":"session.execution.failed","data":{"sessionID":"ses_1"}}`
 
-		// The turn end proper. The pane carries this turn's working, the two
-		// states disagree, and the finish is written: a re-assertion still
-		// badges every finish the turn-start invariant put a working in front
-		// of, it just looks before it writes.
-		first := &recordingTmux{standing: standingWorking}
-		runReportWith(t, first, []string{"--agent", "opencode", "--event", "session.idle"}, withStdin(idleEvent))
-		if first.shows != 1 || first.sets != 1 {
-			t.Fatalf("the turn end over a standing working: shows=%d sets=%d, want 1 and 1 -- "+
-				"a re-assertion that never writes is a turn that never badges", first.shows, first.sets)
+		// The pane carries this turn's working, the states disagree, and the
+		// finish is written -- dated from now, because the event knows the
+		// turn ended at that moment.
+		r := &recordingTmux{standing: standingWorking}
+		runReportWith(t, r, []string{"--agent", "opencode", "--event", "session.execution.failed"}, withStdin(failed))
+		if r.shows != 0 {
+			t.Fatalf("shows=%d, want 0: an edge never reads what is standing", r.shows)
 		}
-		if got := wroteState(t, first); got != tmux.StateIdle {
+		if r.sets != 1 {
+			t.Fatalf("sets=%d, want 1 -- a turn end that never writes is a turn that never badges", r.sets)
+		}
+		if got := wroteState(t, r); got != tmux.StateIdle {
 			t.Fatalf("the turn end wrote %q, want idle", got)
-		}
-		set := first.lastSet()
-		finish := set[len(set)-1]
-
-		// The second idle, about a second later. What tmux is holding is what
-		// the first call really wrote, not a fixture built to agree with it.
-		second := &recordingTmux{standing: finish}
-		runReportWith(t, second, []string{"--agent", "opencode", "--event", "session.idle"}, withStdin(idleEvent))
-		if second.sets != 0 {
-			t.Errorf("the second session.idle of one resting period wrote %q over the finish %q; "+
-				"that is a second finish, under a newer timestamp, on every device that had "+
-				"already seen the first", second.lastSet(), finish)
-		}
-		if second.shows != 1 {
-			t.Errorf("shows=%d, want 1: a re-assertion decides by reading what is standing", second.shows)
 		}
 	})
 
 	t.Run("the hot hooks pay nothing", func(t *testing.T) {
 		// Fork volume under a burst is open question 1 and it is about exactly
-		// this number. PreToolUse fires on every tool call; opencode's busy
-		// fired 17 times in one three-tool turn. Neither may read.
+		// this number. PreToolUse fires on every tool call; opencode's step
+		// started fires once per model step -- 17 statuses(busy) in one
+		// three-tool turn under V1, the same rate now. Neither may read.
 		for _, tc := range []struct{ agent, event, stdin string }{
 			{"claude", "PreToolUse", `{"tool_name":"Bash"}`},
 			{"claude", "UserPromptSubmit", `{"prompt":"hi"}`},
-			{"opencode", "session.status", `{"properties":{"status":{"type":"busy"}}}`},
-			{"opencode", "tool.execute.before", `{"input":{"tool":"bash"}}`},
+			{"opencode", "session.step.started", `{"id":"evt_x","type":"session.step.started","data":{"sessionID":"s1"}}`},
+			{"opencode", "tool.execute.before", `{"tool":"shell","input":{"command":"ls"}}`},
 			{"pi", "input", `{"type":"input","text":"hi"}`},
 			{"pi", "tool_execution_start", `{"type":"tool_execution_start"}`},
 		} {

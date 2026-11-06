@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,15 +21,16 @@ import (
 // directly with a fake report and which THIS FILE CANNOT REACH AT ALL: a
 // subagent needs a working model, and this test deliberately has no
 // credentials. What only a real opencode can answer is whether the plugin is
-// loaded, whether an async default export returning a hook object is still the
-// form, whether `event` / `chat.message` / `tool.execute.before` are still the
-// hook names, and -- the one that cannot be faked -- what the real event bus
-// does to a plugin that forwards the wrong things.
+// loaded, whether a default export of {id, setup} registering
+// session.hook / tool.hook / event.subscribe is still the form, whether
+// `prompt` / `tool.execute.before` / the bus events are still the names
+// things arrive under, and -- the one that cannot be faked -- what the real
+// event bus does to a plugin that forwards the wrong things.
 //
 // That last one is why these tests exist even though the gates are covered in
-// vitest. opencode's bus is CHATTY: one `message.part.updated` per streamed
-// chunk, 45 `plugin.added` at startup, a `session.updated` on every turn of
-// the crank. A fixture cannot show you that; a real run can, and does.
+// vitest. opencode's bus is CHATTY: one delta event per streamed token under
+// V2, a usage update per step, an inbox event per queued message. A fixture
+// cannot show you that; a real run can, and does.
 //
 // A recording stub named `tmux-web` on PATH stands in for the subcommand, so
 // nothing here writes a tmux option or touches a real pane. Everything runs
@@ -36,9 +38,12 @@ import (
 // ~/.config/opencode/opencode.jsonc must not be read, let alone written -- and
 // with no provider credential at all: the turn is EXPECTED TO FAIL at the
 // provider, and it does not matter, because every event asserted on here fires
-// before or after the model call rather than because of it. Measured: a run
-// that died on `ProviderAuthError` still produced chat.message, two
-// session.status(busy), a session.error and two session.idle.
+// before or after the model call rather than because of it. Measured on
+// 1.18.30: a run that died on `ProviderAuthError` still produced chat.message,
+// two session.status(busy), a session.error and two session.idle. Measured on
+// 2.2.5, where status and idle are off the public bus entirely: the same dead
+// run produces the prompt hook, session.step.started, session.step.failed and
+// session.execution.failed.
 //
 // If opencode is not installed, these SKIP LOUDLY.
 
@@ -67,10 +72,11 @@ func opencodeReportedEvents() map[string]bool {
 // It asserts the TURN-START INVARIANT as a sequence. opencode's turn end is an
 // edge -- it writes a resting state without reading what is standing -- and
 // that is only safe if a working-producing event was written first. opencode
-// has two of those, `chat.message` and `session.status(busy)`, and the queue
-// collapses a burst to the newest, so which of them survives into the log on
-// any given run is not fixed. What is fixed is that the turn start is IN FRONT
-// OF the turn end, and that is what is checked.
+// has several of those -- the `prompt` hook, `session.execution.started`,
+// `session.step.started`, `tool.execute.before` -- and the queue collapses a
+// burst to the newest, so which of them survives into the log on any given run
+// is not fixed. What is fixed is that the turn start is IN FRONT OF the turn
+// end, and that is what is checked.
 func TestOpencodePluginWiresTheBusToTheReportArgv(t *testing.T) {
 	oc := requireOpencode(t)
 	dir := t.TempDir()
@@ -90,22 +96,26 @@ func TestOpencodePluginWiresTheBusToTheReportArgv(t *testing.T) {
 
 	// The turn start. It is the first thing the plugin can report, and the
 	// plugin is only loaded at all because the pane's TMUX_PANE reached it.
-	waitForCalls(t, log, 1, opencodeColdStart, "opencode to start and report its chat.message")
+	waitForCalls(t, log, 1, opencodeColdStart, "opencode to start and report its prompt")
 	first := readCalls(t, log)[0]
-	if first.argv != "report --agent opencode --event chat.message" {
-		t.Errorf("first call argv = %q, want the argv spawnReport builds for opencode's chat.message", first.argv)
+	if first.argv != "report --agent opencode --event prompt" {
+		t.Errorf("first call argv = %q, want the argv spawnReport builds for opencode's prompt hook", first.argv)
 	}
 	// The turn start is rung 4 of the activity ladder -- a state-only report --
-	// and the only string in chat.message's payload that is not an id is
-	// output.parts[].text, the user's raw prompt. This assertion is what keeps
-	// it out.
+	// and the only string in the prompt event's payload that is not an id is
+	// prompt.text, the user's raw prompt. This assertion is what keeps it out.
 	if first.stdin != "{}" {
-		t.Errorf("chat.message stdin = %q, want {} -- this mapping has no activity text, and the payload's only real string is the prompt the user typed",
+		t.Errorf("prompt stdin = %q, want {} -- this mapping has no activity text, and the payload's only real string is the prompt the user typed",
 			first.stdin)
 	}
 
-	// The turn end, which arrives whether the turn succeeded or failed.
-	waitForEvent(t, log, "session.idle", opencodeTurn, "the turn to end and report session.idle")
+	// The turn end, which arrives whether the turn succeeded or failed. Under
+	// no provider credential this run will fail at the provider, and that is
+	// the point: V1 measured the dead turn reporting its end too. What the
+	// whitelist below holds the plugin to is the whole set; what this wait
+	// needs is the one a dead turn actually fires.
+	waitForEvent(t, log, "session.execution.failed", opencodeTurn,
+		"the dead turn to report session.execution.failed")
 
 	calls := readCalls(t, log)
 	allowed := opencodeReportedEvents()
@@ -122,9 +132,10 @@ func TestOpencodePluginWiresTheBusToTheReportArgv(t *testing.T) {
 		if !strings.HasPrefix(c.argv, "report --agent opencode --event ") {
 			t.Errorf("call argv = %q, want exactly `report --agent opencode --event <name>`", c.argv)
 		}
-		// The live-bus half of the forwarding whitelist. Around sixty events
-		// reached the `event` hook in the run this was written against, and
-		// only the ones below may become a process.
+		// The live-bus half of the forwarding whitelist. Several hundred
+		// events reached the subscription in the capture this was written
+		// against -- one delta event per streamed token -- and only the ones
+		// below may become a process.
 		if !allowed[name] {
 			t.Errorf("the plugin reported %q, which internal/report does not map. Forwarding the bus unfiltered is a fork per streamed chunk and per plugin.added; the payload was %.120q",
 				name, c.stdin)
@@ -133,29 +144,39 @@ func TestOpencodePluginWiresTheBusToTheReportArgv(t *testing.T) {
 
 	// The sequence, not a set. A turn end with no working in front of it is
 	// suppressed by `report`, and the pane loses that turn's badge.
-	start, end := indexOfEvent(events, "chat.message"), indexOfEvent(events, "session.idle")
+	endOfTurn := func(name string) bool {
+		return name == "session.execution.succeeded" || name == "session.execution.failed" ||
+			name == "session.execution.interrupted"
+	}
+	start, end := indexOfEvent(events, "prompt"), -1
+	for i, name := range events {
+		if endOfTurn(name) {
+			end = i
+			break
+		}
+	}
 	if start < 0 || end < 0 || start > end {
-		t.Errorf("recorded events = %v; want a turn start before the turn end. opencode's session.idle is a RE-ASSERTION -- measured firing twice inside one resting period, so it reads the standing report and writes only on a disagreement -- and with no working reported in front of it there is nothing to disagree with and the finish is suppressed",
+		t.Errorf("recorded events = %v; want a turn start before the turn end. A turn end with no working in front of it writes nothing, and the pane loses that turn's badge",
 			events)
 	}
-	if last := events[len(events)-1]; last != "session.idle" {
-		t.Errorf("last recorded event = %q, want session.idle: the turn end must be the last thing written, or the state standing on the pane is not the state the agent is in", last)
+	if last := events[len(events)-1]; !endOfTurn(last) {
+		t.Errorf("last recorded event = %q, want a session.execution turn end: the turn end must be the last thing written, or the state standing on the pane is not the state the agent is in", last)
 	}
 
 	// And the turn end goes over whole, because Task 18's filter needs the
-	// session id and the Go table reads `properties`.
+	// session id and the Go table reads `data`.
 	idle := calls[len(calls)-1]
 	var p struct {
-		Type       string `json:"type"`
-		Properties struct {
+		Type string `json:"type"`
+		Data struct {
 			SessionID string `json:"sessionID"`
-		} `json:"properties"`
+		} `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(idle.stdin), &p); err != nil {
-		t.Fatalf("session.idle stdin is not the event object: %v (%.200q)", err, idle.stdin)
+		t.Fatalf("the turn end's stdin is not the event object: %v (%.200q)", err, idle.stdin)
 	}
-	if p.Type != "session.idle" || !strings.HasPrefix(p.Properties.SessionID, "ses_") {
-		t.Errorf("session.idle stdin = %.200q, want the bus event whole -- {type, properties.sessionID} is what the child filter and the Go table both read", idle.stdin)
+	if !endOfTurn(p.Type) || !strings.HasPrefix(p.Data.SessionID, "ses_") {
+		t.Errorf("turn end stdin = %.200q, want the bus event whole -- {type, data.sessionID} is what the child filter and the Go table both read", idle.stdin)
 	}
 }
 
@@ -300,6 +321,25 @@ func opencodeEnv(t *testing.T, dir, log string) []string {
 	if err := os.MkdirAll(tmp, 0o755); err != nil {
 		t.Fatalf("mkdir %s: %v", tmp, err)
 	}
+	// THE SERVICE PORT, and it is the reason this test once failed on every
+	// machine that had opencode open. V2 runs opencode against a managed
+	// background service, and the default channel binds a FIXED port (49374)
+	// -- the port the developer's own running service is already holding.
+	// MEASURED on 2.2.5: an isolated-HOME `opencode run` still tries 49374,
+	// fails to bind, and exits 1 before any plugin loads -- which reads as
+	// "the plugin did not load" and would have this test asserting on a boot
+	// failure. The port is configured through service.json in XDG_CONFIG_HOME
+	// (`opencode service set port <port>` writes exactly that file, one
+	// "port" key), so the test writes it itself and takes a port in a range
+	// nothing else here is told about.
+	port := 20000 + (os.Getpid()+time.Now().Nanosecond())%19999
+	cfg := filepath.Join(dir, "xdg-config", "opencode", "service.json")
+	if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(cfg), err)
+	}
+	if err := os.WriteFile(cfg, []byte(fmt.Sprintf("{\n  \"port\": %d\n}\n", port)), 0o644); err != nil {
+		t.Fatalf("writing %s: %v", cfg, err)
+	}
 	return []string{
 		"PATH=" + stub + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"HOME=" + home,
@@ -373,15 +413,23 @@ func indexOfEvent(events []string, name string) int {
 // reaches opencode rather than merely reaching a plausible directory. It SKIPS
 // LOUDLY without opencode.
 //
-// `opencode debug config` resolves the whole plugin set and prints
-// `plugin_origins`, one entry per plugin with its `spec`, the `source`
-// directory it came from and its `scope`. A directory drop shows up there, so
-// it answers both halves: the install is `"scope": "global"` with our path in
-// it, and `--remove` takes it back out of that array entirely.
+// V2 retired the V1 oracle's source: `opencode debug config` used to resolve
+// the plugin set and print `plugin_origins` with a per-plugin `spec` and
+// `scope`, and on 2.2.5 it prints only the plugin DIRECTORIES it scans
+// (`[{type: "directory", path: ...}]`) -- which can say a directory is scanned
+// but not that OUR file in it was accepted. What V2 does write, for every
+// plugin file it accepts, is the server log line
+// `loading plugin id=<path>` -- the same line whose absence, with a
+// `failed to load plugin` WARN beside it, is how the V1-format file's failure
+// was diagnosed. So the oracle boots opencode (three times, below) and reads
+// the service's own log: our path under `loading plugin`, and no
+// `failed to load plugin` for it.
 //
 // This also measures the claim that made the project-scope footprint warning
 // wrong for a global install: with only a global plugin present, the project
-// directory this runs in must still be EMPTY afterwards.
+// directory this runs in must still be EMPTY afterwards. Re-measured on 2.2.5
+// it is, and so is the configuration directory -- V2 creates no bootstrap at
+// all; see install.go's projectWarning.
 func TestAGlobalOpencodeInstallIsLoadedAndRemovable(t *testing.T) {
 	oc := requireOpencode(t)
 	dir := t.TempDir()
@@ -396,27 +444,117 @@ func TestAGlobalOpencodeInstallIsLoadedAndRemovable(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", xdg)
 
+	// Each boot gets its own port, its own XDG_DATA_HOME -- that is where the
+	// service log lives, and a phase that asserts an ABSENCE cannot share a
+	// log with a phase that asserts a presence -- and its own XDG_STATE_HOME,
+	// because that is where the service REGISTRATION lives: a phase whose CLI
+	// finds the previous phase's registration connects to that still-running
+	// service instead of starting one, and reads a log the new install never
+	// reached. `opencode api get /api/plugin` is the call this oracle makes:
+	// MEASURED, /api/info boots the service too but never resolves plugins.
+	// Every service a phase starts is stopped from t.Cleanup -- not at the end
+	// of its own phase, because the phase that asserts a presence polls the log
+	// after its CLI has exited -- so all three are running for the back half of
+	// this test and none of them outlives it. They are whole opencode servers,
+	// and leaving them behind would not be untidiness, it would be a leak.
+	boot := func(name string, port int) string {
+		t.Helper()
+		data := filepath.Join(dir, name+"-data")
+		state := filepath.Join(dir, name+"-state")
+		// THE PORT GOES IN AFTER THE ENVIRONMENT IS BUILT, and the order is the
+		// whole point: opencodeEnv writes a service.json of its own, with a
+		// port of its own, into this very path. Written before it, the phase's
+		// port is overwritten and the three boots are kept apart by a random
+		// number instead of by construction.
+		cfg := filepath.Join(xdg, "opencode", "service.json")
+		env := func() []string {
+			e := append(opencodeEnv(t, dir, filepath.Join(dir, opencodeEventsFile)),
+				"XDG_CONFIG_HOME="+xdg, "HOME="+home, "XDG_DATA_HOME="+data, "XDG_STATE_HOME="+state)
+			if err := os.MkdirAll(filepath.Dir(cfg), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cfg, []byte(fmt.Sprintf("{\n  \"port\": %d\n}\n", port)), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return e
+		}
+		run := func(args ...string) {
+			t.Helper()
+			ctx, cancel := context.WithTimeout(context.Background(), opencodeColdStart)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, oc, args...)
+			cmd.Dir = project
+			cmd.Env = env()
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("opencode %s did not run (%s): %v", strings.Join(args, " "), name, err)
+			}
+		}
+		run("api", "get", "/api/plugin")
+		log := filepath.Join(data, "opencode", "log", "opencode.log")
+		if _, err := os.Stat(log); err != nil {
+			t.Fatalf("the boot (%s) wrote no service log at %s: %v", name, log, err)
+		}
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, oc, "service", "stop")
+			cmd.Dir = project
+			cmd.Env = env()
+			_ = cmd.Run()
+		})
+		return log
+	}
+
+	// (1) A boot with nothing installed: the log names no plugin of ours.
+	before := boot("before", 21000+os.Getpid()%8000)
+	beforeLog, err := os.ReadFile(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(beforeLog), "tmux-web.js") {
+		t.Fatalf("%s mentions tmux-web.js with nothing installed:\n%.400s", before, beforeLog)
+	}
+
 	installCLI(t, "", "--agent", "opencode", "--global", "--yes").wantCode(t, 0)
 	plugin := filepath.Join(xdg, "opencode", "plugin", "tmux-web.js")
 
-	origins := opencodePluginOrigins(t, oc, dir, project)
-	found := false
-	for _, o := range origins {
-		if strings.Contains(o.Spec, plugin) {
-			found = true
-			if o.Scope != "global" {
-				t.Errorf("opencode loaded our plugin at scope %q, want \"global\": a --global install that lands somewhere opencode calls local is an install whose reach depends on where the user runs opencode from", o.Scope)
+	// (2) The boot after the install. The service resolves and loads plugins
+	// while -- and briefly after -- the api call is being answered, so the
+	// log is POLLED for the outcome rather than read once: the definitive
+	// lines are `loading plugin` for our path, or `failed to load plugin`
+	// beside it. The api CLI exits when ITS call is answered; the log keeps
+	// moving after that.
+	after := boot("after", 22000+os.Getpid()%8000)
+	outcome := func(log string, within time.Duration) (string, bool) {
+		t.Helper()
+		deadline := time.Now().Add(within)
+		for {
+			b, err := os.ReadFile(log)
+			if err == nil {
+				for _, line := range strings.Split(string(b), "\n") {
+					if strings.Contains(line, "tmux-web.js") &&
+						(strings.Contains(line, `loading plugin`) || strings.Contains(line, "failed to load plugin")) {
+						return line, true
+					}
+				}
 			}
+			if time.Now().After(deadline) {
+				return "", false
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
 	}
-	if !found {
-		t.Fatalf("opencode does not load %s at all. plugin_origins = %+v", plugin, origins)
+	line, ok := outcome(after, 15*time.Second)
+	if !ok {
+		afterLog, _ := os.ReadFile(after)
+		t.Fatalf("opencode's service log never records an outcome for %s:\n%.600s", plugin, afterLog)
+	}
+	if strings.Contains(line, "failed to load plugin") {
+		t.Fatalf("opencode refused our plugin: %.400s", line)
 	}
 
 	// The project stayed empty. This is the measurement behind not printing the
-	// repository-footprint warning for a global install: opencode's
-	// package.json, node_modules/ and .gitignore land in its OWN config
-	// directory, beside the plugin.
+	// repository-footprint warning for a global install.
 	entries, err := os.ReadDir(project)
 	if err != nil {
 		t.Fatal(err)
@@ -424,47 +562,20 @@ func TestAGlobalOpencodeInstallIsLoadedAndRemovable(t *testing.T) {
 	if len(entries) != 0 {
 		t.Errorf("a global opencode plugin put %d entries in the project directory: %v. The global install's note tells the user it does not touch their repository", len(entries), entries)
 	}
-	if _, err := os.Stat(filepath.Join(xdg, "opencode", "node_modules")); err != nil {
-		t.Errorf("opencode's bootstrap is not in its own config directory either (%v); the note names a footprint that is not there", err)
-	}
 
-	// And back out. `--remove` is one unlink, and the oracle says so.
+	// And back out. `--remove` is one unlink, and the oracle says so: a boot
+	// with the file gone reaches no outcome for it -- give the service the
+	// same settle window the positive case needed, then read.
 	installCLI(t, "", "--agent", "opencode", "--global", "--yes", "--remove").wantCode(t, 0)
-	for _, o := range opencodePluginOrigins(t, oc, dir, project) {
-		if strings.Contains(o.Spec, plugin) {
-			t.Errorf("opencode still loads %s after --remove: %+v", plugin, o)
-		}
+	removed := boot("removed", 23000+os.Getpid()%8000)
+	if _, hit := outcome(removed, 3*time.Second); hit {
+		removedLog, _ := os.ReadFile(removed)
+		t.Errorf("opencode still loads or refuses %s after --remove:\n%.400s", plugin, removedLog)
 	}
 }
 
-// pluginOrigin is one entry of `opencode debug config`'s resolved plugin set.
-type pluginOrigin struct {
-	Spec   string `json:"spec"`
-	Source string `json:"source"`
-	Scope  string `json:"scope"`
-}
-
-// opencodePluginOrigins runs `opencode debug config` in a throwaway project
-// under throwaway XDG directories and returns what it resolved.
-func opencodePluginOrigins(t *testing.T, oc, dir, project string) []pluginOrigin {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), opencodeColdStart)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, oc, "debug", "config")
-	cmd.Dir = project
-	// Built, not inherited, and the XDG_CONFIG_HOME here is the one the install
-	// above was pointed at -- which is the whole assertion.
-	cmd.Env = append(opencodeEnv(t, dir, filepath.Join(dir, opencodeEventsFile)),
-		"XDG_CONFIG_HOME="+os.Getenv("XDG_CONFIG_HOME"), "HOME="+os.Getenv("HOME"))
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("opencode debug config: %v", err)
-	}
-	var config struct {
-		PluginOrigins []pluginOrigin `json:"plugin_origins"`
-	}
-	if err := json.Unmarshal(out, &config); err != nil {
-		t.Fatalf("opencode debug config did not print the JSON this oracle reads (%v):\n%.400s", err, out)
-	}
-	return config.PluginOrigins
-}
+// pluginOrigin is one entry of V1's `opencode debug config` output, retired
+// with the oracle that read it: 2.2.5 prints only the plugin directories it
+// scans, with no per-plugin spec or scope, so nothing here can be asserted
+// from it any more. See TestAGlobalOpencodeInstallIsLoadedAndRemovable for the
+// oracle that replaced it.

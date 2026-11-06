@@ -201,14 +201,13 @@ func TestTheRepairsAreExactlyThese(t *testing.T) {
 		// criterion, and revision 3 of the design classified this event
 		// nowhere at all.
 		"pi/session_start(idle)": true,
-		// opencode's TURN END, which reads like an edge and is not one.
-		// MEASURED on opencode 1.18.30: on a turn that died at the provider,
-		// session.idle fired TWICE inside one resting period -- idle,
-		// message.updated, idle, about a second apart, with no busy between
-		// them. An event that can recur inside one resting period and writes a
-		// resting state is a re-assertion by the criterion, and the name of
-		// the event has no vote.
-		"opencode/session.idle": true,
+		// opencode's TURN END was here from V1 through the V1 era: session.idle
+		// read like an edge and recurred inside one resting period when a turn
+		// died at the provider (MEASURED on opencode 1.18.30: idle,
+		// message.updated, idle, about a second apart, no busy between). V2
+		// removed the event from the public bus entirely and split the turn
+		// end across three execution edges, so the agent has no re-assertion
+		// any more -- and nothing here needs one.
 	}
 	for _, m := range allMappings() {
 		if got := m.kind == kindReassertion; got != want[m.name] {
@@ -338,9 +337,11 @@ func TestTheRepairsDatedFromTheStandingReportAreExactlyThese(t *testing.T) {
 		// length of time, and this event is the extension asking what it
 		// missed.
 		"pi/session_start(idle)": true,
-		// And the one re-assertion that is NOT here, named so that a reader
-		// finds the exception where the rule is: opencode/session.idle is a
-		// re-assertion AND a genuine turn end, so it dates from now.
+		// And the one re-assertion that is NOT here any more, named so that a
+		// reader finds the exception where the rule was: opencode's
+		// session.idle was a re-assertion AND a genuine turn end, so it dated
+		// from now. V2 removed the event; the execution edges that replaced it
+		// are edges and carry no dating at all.
 	}
 	reassertions := 0
 	for _, m := range allMappings() {
@@ -354,18 +355,6 @@ func TestTheRepairsDatedFromTheStandingReportAreExactlyThese(t *testing.T) {
 	}
 	if reassertions == 0 {
 		t.Fatal("no mapping reasserts at all; this test then proves nothing")
-	}
-	// The exception, asserted rather than implied by the map above: a mutant
-	// that made every re-assertion date from now would fail the rows above, and
-	// one that made every re-assertion date from the standing report has to
-	// fail somewhere too.
-	for _, m := range allMappings() {
-		if m.name == "opencode/session.idle" && datesFromStandingReport(m) {
-			t.Error("opencode/session.idle dates from the standing report. It is the one " +
-				"re-assertion that is also a genuine turn end: dating it that way stamps every " +
-				"opencode finish at that turn's last working write, up to a minute early, on " +
-				"every turn -- a certain regression traded for a rare race")
-		}
 	}
 }
 

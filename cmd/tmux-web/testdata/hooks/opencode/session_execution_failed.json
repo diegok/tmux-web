@@ -1,0 +1,21 @@
+{
+  "id": "evt_1acd70290001EUfXiEB1uUvHCb",
+  "created": 1793901134480,
+  "type": "session.execution.failed",
+  "durable": {
+    "aggregateID": "ses_e53290111ffeiB9gk7g0uS78cw",
+    "seq": 7,
+    "version": 1
+  },
+  "data": {
+    "sessionID": "ses_e53290111ffeiB9gk7g0uS78cw",
+    "error": {
+      "type": "provider.auth",
+      "message": "This model is not available in your country",
+      "status": 403,
+      "response": {
+        "body": "{\"type\":\"error\",\"error\":{\"type\":\"RegionError\",\"message\":\"This model is not available in your country\"}}"
+      }
+    }
+  }
+}

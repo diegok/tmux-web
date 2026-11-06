@@ -1,23 +1,35 @@
 {
-  "id": "evt_08ecf702c002l5Icgh5i08pZ1K",
+  "id": "evt_1acd9f657002DC25cblcFHgQ8W",
+  "created": 1793901327959,
   "type": "permission.asked",
-  "properties": {
-    "id": "per_08ecf702c001ymmXFfUmU382pQ",
-    "sessionID": "ses_f7130a2d2ffeSYuih1sneHpGL3",
-    "permission": "edit",
-    "patterns": [
-      "tmp/tmux-web-capture/oc/proj/note.txt"
+  "location": {
+    "directory": "/tmp/opencode/tmux-web-capture-v2"
+  },
+  "data": {
+    "id": "per_1acd9f657001HLXI9CXB1uSpwY",
+    "sessionID": "ses_e53261071ffeu4ApUsErNOKM6P",
+    "action": "edit",
+    "resources": [
+      "hello.txt"
     ],
-    "metadata": {
-      "filepath": "/tmp/tmux-web-capture/oc/proj/note.txt",
-      "diff": "Index: /tmp/tmux-web-capture/oc/proj/note.txt\n===================================================================\n--- /tmp/tmux-web-capture/oc/proj/note.txt\n+++ /tmp/tmux-web-capture/oc/proj/note.txt\n@@ -0,0 +1,1 @@\n+hello\n"
-    },
-    "always": [
+    "save": [
       "*"
     ],
-    "tool": {
-      "messageID": "msg_08ecf5d73001GB734PKsKxHe86",
-      "callID": "call_38db03058e364465a102fa7d"
+    "metadata": {
+      "files": [
+        {
+          "file": "hello.txt",
+          "patch": "Index: hello.txt\n===================================================================\n--- hello.txt\n+++ hello.txt\n@@ -0,0 +1,1 @@\n+hi\n\\ No newline at end of file\n",
+          "status": "added",
+          "additions": 1,
+          "deletions": 0
+        }
+      ]
+    },
+    "source": {
+      "type": "tool",
+      "messageID": "msg_1acd9efb3001afR4XtgvZs0CAK",
+      "id": "call_3fe30b07a1d54d7fac7a8ef3"
     }
   }
 }

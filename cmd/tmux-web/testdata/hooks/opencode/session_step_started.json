@@ -1,0 +1,25 @@
+{
+  "id": "evt_1acd7a631001PjiFANr5hgma7z",
+  "created": 1793901176369,
+  "type": "session.step.started",
+  "durable": {
+    "aggregateID": "ses_e53a18060ffeJiLzUPi1y1YyJ0",
+    "seq": 479,
+    "version": 1
+  },
+  "location": {
+    "directory": "/home/user/devel/sandbox/tmux-web"
+  },
+  "data": {
+    "sessionID": "ses_e53a18060ffeJiLzUPi1y1YyJ0",
+    "assistantMessageID": "msg_1acd79ec3001IXBuI6i4ce57HW",
+    "agent": "build",
+    "model": {
+      "id": "example-model",
+      "providerID": "example-provider",
+      "variant": "high"
+    },
+    "snapshot": "328c47b53a918d62dc6f75b763e452686a4c1c90",
+    "started": 1793901174474
+  }
+}

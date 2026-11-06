@@ -110,8 +110,12 @@ func TestThePromptIsNotTheLabel(t *testing.T) {
 		// through a different door: a tool argument. The Agent tool has no
 		// path and no command, so it is its own name.
 		{"claude/pre_tool_use_agent.json", "claude", "PreToolUse", "two-line poem", "Agent"},
-		{"opencode/chat_message.json", "opencode", "chat.message", "haiku", ""},
-		{"opencode/tool_execute_before_task.json", "opencode", "tool.execute.before", "two-line poem", "task"},
+		// The V2 prompt hook carries the raw prompt on prompt.text. V1's
+		// second row here -- a subagent's task prompt arriving through a tool
+		// argument -- has no V2 capture: the Task tool was never provoked on
+		// 2.2.5, and a fixture built to prove nothing is worse than none.
+		{"opencode/prompt.json", "opencode", "prompt",
+			"Use the shell tool to run exactly", ""},
 		{"pi/input.json", "pi", "input", "haiku", ""},
 		{"pi/tool_execution_start_subagent.json", "pi", "tool_execution_start", "two-line poem", "subagent"},
 	} {
@@ -256,12 +260,13 @@ func TestSubagentFilters(t *testing.T) {
 		// keeps the child-session map -- it is the only thing that saw the
 		// session.created naming the parent -- and this is the second gate.
 		for _, tc := range []struct{ name, stdin string }{
-			{"at the top level", `{"type":"session.idle","parentID":"ses_root","properties":{"sessionID":"ses_child"}}`},
-			{"under properties", `{"type":"session.idle","properties":{"sessionID":"ses_child","parentID":"ses_root"}}`},
-			{"nested, where session.created really carries it",
-				`{"type":"session.idle","properties":{"sessionID":"ses_child","info":{"parentID":"ses_root"}}}`},
+			{"at the top level", `{"type":"session.execution.succeeded","parentID":"ses_root","data":{"sessionID":"ses_child"}}`},
+			{"under data, where V2 really carries it",
+				`{"type":"session.execution.succeeded","data":{"sessionID":"ses_child","parentID":"ses_root"}}`},
+			{"nested like V1 carried it",
+				`{"type":"session.execution.succeeded","properties":{"sessionID":"ses_child","info":{"parentID":"ses_root"}}}`},
 		} {
-			_, writes := reportValue(t, []string{"--agent", "opencode", "--event", "session.idle"}, tc.stdin)
+			_, writes := reportValue(t, []string{"--agent", "opencode", "--event", "session.execution.succeeded"}, tc.stdin)
 			if writes != 0 {
 				t.Errorf("%s: wrote %d times, want 0", tc.name, writes)
 			}
@@ -270,16 +275,16 @@ func TestSubagentFilters(t *testing.T) {
 
 	t.Run("the filter is not a licence to claim the doors are shut", func(t *testing.T) {
 		// The honest half, and it is here so that nobody reads the rows above
-		// as "subagents are handled". opencode's session.idle carries NO
-		// parentID -- Task 12 measured a child's arriving 2.05 s before the
-		// root's, while the root was still busy -- and pi's agent_settled
-		// payload is {"type":"agent_settled"} entire. Both still report from
-		// here; what keeps them off the pane is the integration's own state
+		// as "subagents are handled". opencode's turn end carries NO parentID
+		// -- Task 12 measured a child's arriving 2.05 s before the root's,
+		// while the root was still working -- and pi's agent_settled payload
+		// is {"type":"agent_settled"} entire. Both still report from here;
+		// what keeps them off the pane is the integration's own state
 		// (opencode's child-session map, pi's ctx.mode !== "tui" gate), and a
 		// Go-side test that pretended otherwise would be describing code that
 		// does not exist.
 		for _, tc := range []struct{ fixture, agent, event string }{
-			{"opencode/session_idle_child.json", "opencode", "session.idle"},
+			{"opencode/session_execution_succeeded_child.json", "opencode", "session.execution.succeeded"},
 			{"pi/agent_settled.json", "pi", "agent_settled"},
 		} {
 			rep, writes := reportOne(t, []string{"--agent", tc.agent, "--event", tc.event},
@@ -308,8 +313,8 @@ func TestTheFilterOverEveryRecordedPayload(t *testing.T) {
 		// agent_id again. Its hook is not registered either, so this one is
 		// refused twice over -- structurally and by the filter.
 		"claude/subagent_stop.json": true,
-		// properties.info.parentID, nested two deep. The only opencode event
-		// that names a parent at all.
+		// data.parentID, nested one deep. The only opencode event that names
+		// a parent at all.
 		"opencode/session_created_child.json": true,
 	}
 	seen, denied := 0, 0

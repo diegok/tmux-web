@@ -57,27 +57,33 @@ import (
 // is why it is not global. It is not per AGENT either, and that is the newer
 // half: pi owns two files that are versioned by two different things.
 //
-//   - opencodeSchema and piSchema are a RUN-TIME number. It is queue.ts's
-//     TMUX_WEB_SCHEMA, inlined into opencode.js and pi.ts, and two loaded
-//     copies of the integration compare it to agree which of them reports.
-//     Bumping it changes which installed copy wins.
+//   - opencodeSchema and piSchema are RUN-TIME numbers. Each integration
+//     declares its own TMUX_WEB_SCHEMA -- pi.ts and opencode.js since the V2
+//     port, queue.ts before that -- and two loaded copies of the SAME
+//     integration compare their numbers to agree which of them reports.
+//     Bumping one changes which installed copy of that integration wins.
 //   - skillSchema versions one prose file, which claude and pi install the
 //     same bytes of.
 //
 // Per AGENT, giving pi the skill forces piSchema to the skill's number, which
-// drags queue.ts's constant along -- so editing the prose of a claude skill
-// would change which copy of the OPENCODE integration claims the reporter.
-// Per file, the two move independently. Found by a pi reviewing this
-// integration; docs/plans/2026-11-05-tmux-web-agent-control-followups.md has
-// the chain written out.
+// would drag the integration's claim constant along -- so editing the prose of
+// a claude skill would change which copy of the OPENCODE integration claims
+// the reporter. Per file, the two move independently. Found by a pi reviewing
+// this integration; docs/plans/2026-11-05-tmux-web-agent-control-followups.md
+// has the chain written out.
 //
-// What stays shared is opencode's and pi's pair: pi.ts, opencode.js and the
-// queue.ts inlined into both must agree with each other, and
-// pivalidate_test.go holds them there.
+// What used to be shared was opencode's and pi's pair: queue.ts, inlined into
+// both, carried one TMUX_WEB_SCHEMA that the two scopes' copies compared at
+// run time, and that single constant forced the two files' numbers to move
+// together. The OpenCode V2 port split them: each integration now declares its
+// own constant beside its header, because installs that change independently
+// cannot share one number without one of them lying about it -- see queue.ts's
+// claim block and pivalidate_test.go, which holds each file's constant to its
+// own number.
 const (
 	claudeSchema   = 2 // claude's report wrapper
 	skillSchema    = 2 // the skill, which claude and pi install from the same bytes
-	opencodeSchema = 1 // opencode.js, with queue.ts inlined
+	opencodeSchema = 2 // opencode.js, with queue.ts inlined: the V2 plugin API and bus
 	piSchema       = 1 // pi.ts, with the same queue.ts inlined
 )
 
@@ -197,26 +203,21 @@ var agents = map[string]agentSpec{
 		global: &globalSpec{
 			root: opencodeConfigDir,
 			note: "a global opencode plugin is loaded in every project, with no entry in any config file.\n" +
-				"  tmux-web does not add a path to `plugin` in your opencode.jsonc: an absolute path there does " +
-				"work, measured, but a directory drop is uninstalled by deleting the one file above and leaves " +
-				"a file you own untouched.\n" +
-				"  opencode's own bootstrap -- package.json, package-lock.json, node_modules/ and a .gitignore " +
-				"-- lands beside the plugin, in opencode's configuration directory. MEASURED: with only a global " +
-				"plugin installed, a fresh project directory stayed empty, so nothing is added to any repository",
+				"  tmux-web does not add a path to `plugin` in your opencode.jsonc: a directory drop is " +
+				"uninstalled by deleting the one file above and leaves a file you own untouched",
 		},
-		// PROJECT SCOPE ONLY, and that is the point of the field's name. The
-		// same sentence is measurably FALSE for a global install: the bootstrap
-		// lands in opencode's own configuration directory instead, and a fresh
-		// project stayed empty. A warning about a repository the install does
-		// not touch teaches the user to stop reading warnings.
-		//
-		// Measured on opencode 1.18.30, in a throwaway project: the first run
-		// with a plugin present created all of these.
-		projectWarning: "opencode creates .opencode/package.json, .opencode/package-lock.json, " +
-			".opencode/node_modules/ and a .opencode/.gitignore in this project the first " +
-			"time it loads a plugin. Installing into a repository therefore adds files that " +
-			"repository did not have, including a .gitignore tmux-web did not write and does " +
-			"not control",
+		// PROJECT SCOPE ONLY -- and EMPTY since the OpenCode V2 port. Through
+		// V1 this warned that opencode's own bootstrap (package.json,
+		// package-lock.json, node_modules/ and a .gitignore) landed in the
+		// project the first time it loaded a plugin, which was MEASURED on
+		// 1.18.30. Re-measured on 2.2.5, global and project scope both: a
+		// dependency-free plugin leaves the project empty and puts nothing
+		// beside itself in the configuration directory -- no bootstrap at all.
+		// A warning about a repository the install does not touch teaches the
+		// user to stop reading warnings, so there is no warning; if a future
+		// opencode restores that footprint, the warning and its test come
+		// back with it (TestInstallWarnsAboutOpencodesFootprint, retired).
+		projectWarning: "",
 	},
 	"claude": {
 		// The wrapper MUST stay first: the settings.json merge names it.

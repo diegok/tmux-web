@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -330,13 +331,13 @@ func TestThePiProbeRunsNowhereNearTheUsersOwnPi(t *testing.T) {
 // TestTheIntegrationSourcesCarryTheSchemaTheInstallerWrites.
 //
 // The schema number is written down in several places and is PER FILE (see the
-// comment on claudeSchema): every owned file's managed header, and queue.ts's
-// TMUX_WEB_SCHEMA, which is the number the two copies of the integration compare
-// at run time to decide which of them reports. Numbers that must agree and are
-// typed out separately are numbers that drift, and the drift is SILENT in the
-// worst direction: a queue.ts left at 1 while the header says 2 makes a fresh
-// global install lose the claim to a stale project one, forever, with no
-// message anywhere.
+// comment on claudeSchema): every owned file's managed header, and each
+// integration's own TMUX_WEB_SCHEMA -- the number the two copies of THAT
+// integration compare at run time to decide which of them reports. Numbers
+// that must agree and are typed out separately are numbers that drift, and the
+// drift is SILENT in the worst direction: a file whose constant lags its
+// header makes a fresh global install lose the claim to a stale project one,
+// forever, with no message anywhere.
 //
 // The table is written out rather than derived from the specs, because half of
 // what it holds is WHICH sources each agent owns. Deriving it would make the
@@ -370,20 +371,20 @@ func TestTheIntegrationSourcesCarryTheSchemaTheInstallerWrites(t *testing.T) {
 		}
 	}
 
-	// queue.ts is inlined into pi's and opencode's integrations only -- not
-	// into the skill they do not version together -- so it has to agree with
-	// those two files and nothing else.
-	piExt, ocPlugin := agents["pi"].files[0], agents["opencode"].files[0]
-	if piExt.schema != ocPlugin.schema {
-		t.Fatalf("%s is at schema %d and %s at %d, and the queue inlined into both can carry one number",
-			piExt.source, piExt.schema, ocPlugin.source, ocPlugin.schema)
-	}
-	queue, err := integrations.File("queue.ts")
-	if err != nil {
-		t.Fatalf("reading queue.ts: %v", err)
-	}
-	wantConst := "export const TMUX_WEB_SCHEMA = " + strconv.Itoa(piExt.schema)
-	if !strings.Contains(string(queue), wantConst) {
-		t.Errorf("queue.ts does not declare %q, so the two scopes would compare the wrong numbers", wantConst)
+	// The schema number lives in EACH integration now, next to its header --
+	// it moved out of queue.ts when the opencode V2 port changed one install's
+	// shape and not the other's, and one shared constant would have forced a
+	// false "your file changed" note onto pi or onto opencode. The suite holds
+	// each file's constant to its own agent's number; nothing forces the two
+	// to agree again, because the two runtimes never meet.
+	for agent, file := range map[string]string{"pi": "pi.ts", "opencode": "opencode.js"} {
+		body, err := integrations.File(file)
+		if err != nil {
+			t.Fatalf("reading %s: %v", file, err)
+		}
+		wantConst := fmt.Sprintf("const TMUX_WEB_SCHEMA = %d", agents[agent].files[0].schema)
+		if !strings.Contains(string(body), wantConst) {
+			t.Errorf("%s does not declare %q, so the two scopes would compare the wrong numbers", file, wantConst)
+		}
 	}
 }

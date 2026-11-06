@@ -250,9 +250,12 @@ func datesFromStandingReport(m Mapping) bool {
 //  1. The question, when blocked -- pi's ui_prompt_start.title, claude's
 //     Notification message, and for opencode a reduction of permission.asked,
 //     which carries no question at all.
-//  2. The current step, when opencode reports one: todo.updated's in_progress
-//     entry. Better than a tool call when it exists, because it is the agent's
-//     own statement of intent rather than a mechanical trace.
+//  2. The current step, when the agent reports one: opencode's todo.updated
+//     in_progress entry used to be the only rung-2 source on any agent, and
+//     opencode V2 removed it -- the todo list no longer rides the public event
+//     bus -- so rung 2 is empty everywhere until some agent earns it back.
+//     Better than a tool call when it exists, because it is the agent's own
+//     statement of intent rather than a mechanical trace.
 //  3. The current tool call, verb plus object -- the command whole, a path
 //     reduced to its basename so the directories do not eat the line.
 //  4. Nothing -- AN EMPTY TEXT FIELD, NOT AN ABSENT REPORT. At turn end the
@@ -272,13 +275,14 @@ const (
 	// textClaudeNotification reads `message`. It is the only rung-1 field
 	// claude has, and it is not a question; see activityText.
 	textClaudeNotification
-	// textOpencodeTool reads input.tool and output.args -- the tool's
-	// arguments are under the SECOND of the hook's two arguments.
+	// textOpencodeTool reads `tool` and `input` -- one V2 hook event, with the
+	// tool's arguments on `input` where V1 carried them on a second argument.
 	textOpencodeTool
-	// textOpencodeTodo reads the in_progress entry of properties.todos.
-	textOpencodeTodo
-	// textOpencodePermission reduces properties.metadata PER PERMISSION CLASS,
-	// because its keys vary by class and one of them is a full unified diff.
+	// textOpencodePermission reduces permission.asked PER ACTION CLASS, from
+	// `data.metadata` where a class carries one and from `data.resources`
+	// where it does not -- the V2 shell class sends the command as
+	// resources[0] and no metadata at all -- because the keys vary by class
+	// and one of them is a full patch.
 	textOpencodePermission
 	// textPiTool reads toolName and args.
 	textPiTool
@@ -430,63 +434,63 @@ var rules = map[string]agentTable{
 		// SubagentStop keeps the CHILD from reporting; it says nothing about
 		// the parent reporting too early.
 	}},
-	"opencode": {turnStart: turnStartRef{event: "session.status", value: "busy"}, events: map[string]eventRule{
-		// The turn start, with the prompt text on it.
-		"chat.message": {mapping: Mapping{name: "opencode/chat.message", state: tmux.StateWorking, kind: kindEdge}},
-		// busy is the turn start proper, and it fires repeatedly within one
-		// turn -- 17 times in the three-tool turn Task 12 captured -- so
-		// nothing here may assume it arrives once.
-		"session.status": {discriminate: opencodeStatusType, byValue: opencodeStatuses},
+	"opencode": {turnStart: turnStartRef{event: "session.execution.started"}, events: map[string]eventRule{
+		// The turn start as the prompt HOOK reports it: once per prompt
+		// ADMISSION, with the prompt text deliberately absent from the item.
+		// V1 called this hook chat.message; V2 calls it prompt and the item
+		// name follows the runtime.
+		"prompt": {mapping: Mapping{name: "opencode/prompt", state: tmux.StateWorking, kind: kindEdge}},
+		// The turn start proper on the bus, and step started is busy's
+		// stand-in: it fires once per model step, which is to say repeatedly
+		// within one turn -- 17 statuses(busy) in the three-tool turn Task 12
+		// captured, and step.started arrives at the same rate on 2.2.5 -- so
+		// nothing here may assume either arrives once. Both fire on a run with
+		// no client connected, which is exactly what V1's status/busy did not
+		// guarantee.
+		"session.execution.started": {mapping: Mapping{name: "opencode/session.execution.started",
+			state: tmux.StateWorking, kind: kindEdge}},
+		"session.step.started": {mapping: Mapping{name: "opencode/session.step.started",
+			state: tmux.StateWorking, kind: kindEdge}},
 		"tool.execute.before": {mapping: Mapping{name: "opencode/tool.execute.before",
 			state: tmux.StateWorking, kind: kindEdge, text: textOpencodeTool}},
-		// The todo rung of the activity ladder. Rung 2, with the tool call
-		// underneath it, which is correct whether or not the list is empty.
-		"todo.updated": {mapping: Mapping{name: "opencode/todo.updated", state: tmux.StateWorking,
-			kind: kindEdge, text: textOpencodeTodo}},
 		// The one blocked event any agent has that arrives with no delay.
 		// There is no question string on it -- the design says there is and the
 		// recorded payload says there is not -- but there does not need to be
-		// one for the state, and the text is reduced from `metadata` per
-		// permission class, whose keys vary and one of which is a whole diff.
+		// one for the state, and the text is reduced per ACTION class, from
+		// `data.metadata` where the class carries one and from
+		// `data.resources[0]` where it does not: the V2 shell class sends the
+		// command as resources[0] with no metadata, and the edit class sends
+		// metadata.files[].file plus a whole patch -- the one genuine
+		// exclusion, kept inside MaxReportBytes by taking the basename.
 		"permission.asked": {mapping: Mapping{name: "opencode/permission.asked", state: tmux.StateBlocked,
 			kind: kindEdge, form: tmux.OpencodePermissionForm, text: textOpencodePermission}},
-		// The turn end. It carries a sessionID, and a subagent's arrives
-		// BEFORE the root's -- 2.05 s before, measured -- which is what Task
-		// 15's parentID filter is for. That filter lives in the plugin,
-		// because only the plugin saw the session.created that named the
-		// parent.
+		// The turn end, and V2 split it three ways. MEASURED on opencode 2.2.5:
+		// V1's session.idle and session.status are NOT on the public event
+		// stream -- neither reaches a plugin subscription, with a client
+		// connected or without one -- and the turn now ends with exactly one
+		// of succeeded, failed (a provider error among others; the captured
+		// fixture is one) or interrupted, each an EDGE that fires once. That
+		// also retires V1's only re-assertion: an event that recurred inside
+		// one resting period and re-dated a finish it had already dated. What
+		// the three lose against V1's idle is nothing the turn-start invariant
+		// does not already cover, and what they gain is a turn end that
+		// headless runs -- `opencode run`, which V1's idle never reached -- can
+		// also report.
 		//
-		// A RE-ASSERTION, and the only turn end on any agent that is one.
-		// MEASURED on opencode 1.18.30: a turn that DIED AT THE PROVIDER fired
-		// session.idle, then message.updated, then session.idle again, about a
-		// second apart, with no session.status(busy) between them. That is the
-		// criterion exactly -- an event that can recur inside one resting
-		// period and writes a resting state -- and the fact that it is named
-		// like a turn end has no vote. As an edge the second idle re-dates a
-		// finish the first already dated, and finishedAt is derived from the
-		// report's own timestamp, so every device that had seen the finish
-		// badges again about a second later. Bounded and small: failed turns
-		// only, and about a second of re-dating.
-		//
-		// WHAT IT COSTS opencode, which had paid nothing until now: ONE
-		// show-options fork per turn end. Not per event -- the hot paths
-		// (session.status busy, 17 times in one three-tool turn, and
-		// tool.execute.before) are working edges and still read nothing.
-		//
-		// WHAT IT COSTS THE BADGE: nothing the turn-start invariant does not
-		// already cover. session.status(busy) writes working before this can
-		// fire, so the standing state disagrees and the finish is written. The
-		// one case it loses is a turn whose START write also failed, and that
-		// is a pane that never showed working either.
-		//
-		// DATED FROM NOW, and it is the only re-assertion that is. It is a
-		// genuine turn end as well as a re-assertion: when it fires the first
-		// time, the turn ended at that moment and this event knows it. Dating
-		// it from the standing report would stamp the finish at the turn's last
-		// working write -- its last tool call, up to a minute earlier -- on
-		// every opencode turn. See dating for why that trade is refused.
-		"session.idle": {mapping: Mapping{name: "opencode/session.idle", state: tmux.StateIdle,
-			kind: kindReassertion, dates: dateFromNow}},
+		// session.execution.interrupted is the one row here held to the schema
+		// rather than to a capture: three provocations of a real interruption
+		// all finished as succeeded instead (the API answered
+		// {"interrupted":false} each time -- the runs were already over), and
+		// no capture holds the event. Its payload is data.sessionID plus a
+		// reason string, the shape succeeded and failed carry verbatim; if the
+		// shape is wrong the plugin forwards it whole, the state is still
+		// right, and a capture will settle the text some day.
+		"session.execution.succeeded": {mapping: Mapping{name: "opencode/session.execution.succeeded",
+			state: tmux.StateIdle, kind: kindEdge}},
+		"session.execution.failed": {mapping: Mapping{name: "opencode/session.execution.failed",
+			state: tmux.StateIdle, kind: kindEdge}},
+		"session.execution.interrupted": {mapping: Mapping{name: "opencode/session.execution.interrupted",
+			state: tmux.StateIdle, kind: kindEdge}},
 		// session.created is absent on purpose: it is the plugin's own
 		// bookkeeping, the event that establishes parentage, and not a state
 		// of the pane.
@@ -754,17 +758,6 @@ func piSessionStartIdle(payload []byte) string {
 	return "working"
 }
 
-// opencodeStatuses is session.status's discriminator table, and it is a
-// whitelist for the same reason claudeNotifications is.
-//
-// Only busy reports. status idle fires in the same millisecond as session.idle,
-// which is opencode's turn end and carries the sessionID that Task 15's filter
-// needs; reporting both would write idle twice under two timestamps, and the
-// second one re-dates a finish the first already dated.
-var opencodeStatuses = map[string]Mapping{
-	"busy": {name: "opencode/session.status(busy)", state: tmux.StateWorking, kind: kindEdge},
-}
-
 // Lookup is what one (agent, event, payload) means.
 //
 // ok reports whether the agent and the event are known at all. A known event
@@ -963,17 +956,4 @@ func claudeNotificationType(payload []byte) string {
 	// one type has been seen under two different messages.
 	_ = json.Unmarshal(payload, &p)
 	return p.NotificationType
-}
-
-// opencodeStatusType reads a session.status event's properties.status.type.
-func opencodeStatusType(payload []byte) string {
-	var p struct {
-		Properties struct {
-			Status struct {
-				Type string `json:"type"`
-			} `json:"status"`
-		} `json:"properties"`
-	}
-	_ = json.Unmarshal(payload, &p)
-	return p.Properties.Status.Type
 }

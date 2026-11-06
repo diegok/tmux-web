@@ -414,11 +414,11 @@ func TestATruncatedPayloadAndGarbageAreRefusedForDifferentReasons(t *testing.T) 
 }
 
 // editPermissionWithDiff is the recorded opencode edit permission with its
-// unified diff padded out to roughly n bytes.
+// patch padded out to roughly n bytes.
 //
 // Built from the real fixture rather than hand-written, so the payload that
 // exercises the cap is the same shape as the one the subagent filter, the event
-// table and the text reader all run on -- a synthetic `{"diff": "..."}` would
+// table and the text reader all run on -- a synthetic `{"patch": "..."}` would
 // pass the cap and prove nothing about the path behind it.
 func editPermissionWithDiff(t *testing.T, n int) string {
 	t.Helper()
@@ -430,11 +430,27 @@ func editPermissionWithDiff(t *testing.T, n int) string {
 	if err := json.Unmarshal(raw, &top); err != nil {
 		t.Fatal(err)
 	}
-	meta, ok := top["properties"].(map[string]any)["metadata"].(map[string]any)
+	data, ok := top["data"].(map[string]any)
 	if !ok {
-		t.Fatalf("%s no longer carries properties.metadata; this helper pads its diff", "permission_asked_edit.json")
+		t.Fatalf("%s no longer carries data; this helper pads its patch", "permission_asked_edit.json")
 	}
-	meta["diff"] = meta["diff"].(string) + strings.Repeat("+padding\n", n/9)
+	meta, ok := data["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("%s no longer carries data.metadata; this helper pads its patch", "permission_asked_edit.json")
+	}
+	files, ok := meta["files"].([]any)
+	if !ok || len(files) == 0 {
+		t.Fatalf("%s no longer carries data.metadata.files; this helper pads its patch", "permission_asked_edit.json")
+	}
+	first, ok := files[0].(map[string]any)
+	if !ok {
+		t.Fatalf("%s no longer carries data.metadata.files[0]; this helper pads its patch", "permission_asked_edit.json")
+	}
+	patch, ok := first["patch"].(string)
+	if !ok {
+		t.Fatalf("%s no longer carries files[0].patch; this helper pads its patch", "permission_asked_edit.json")
+	}
+	first["patch"] = patch + strings.Repeat("+padding\n", n/9)
 	out, err := json.Marshal(top)
 	if err != nil {
 		t.Fatal(err)

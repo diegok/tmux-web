@@ -10,7 +10,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { TMUX_WEB_SCHEMA, claimReporter, makeQueue, spawnReport } from './queue'
+import { claimReporter, makeQueue, spawnReport } from './queue'
 
 // A spawn that records what it was handed and hands back a promise the test
 // resolves by hand. Every ordering claim in here is about WHEN that promise
@@ -293,13 +293,16 @@ describe('claimReporter', () => {
     delete (globalThis as Record<string, unknown>)[slot]
   })
 
+  // The schema number now lives in each integration (pi.ts carries pi's,
+  // opencode.js carries opencode's); these tests pass literals for the same
+  // reason they pass fakes for everything else.
   it('lets a single copy report', () => {
-    expect(claimReporter(TMUX_WEB_SCHEMA)()).toBe(true)
+    expect(claimReporter(1)()).toBe(true)
   })
 
   it('leaves exactly one owner when two copies of the same schema load', () => {
-    const first = claimReporter(TMUX_WEB_SCHEMA)
-    const second = claimReporter(TMUX_WEB_SCHEMA)
+    const first = claimReporter(1)
+    const second = claimReporter(1)
     expect([first(), second()]).toEqual([false, true])
   })
 
@@ -334,7 +337,7 @@ describe('claimReporter', () => {
   // exactly where a throw costs the pane its reporting.
   it('survives a foreign value in the slot', () => {
     ;(globalThis as Record<string, unknown>)[slot] = 'not ours'
-    expect(claimReporter(TMUX_WEB_SCHEMA)()).toBe(true)
+    expect(claimReporter(1)()).toBe(true)
   })
 
   // And the case that makes the predicate re-read globalThis instead of closing

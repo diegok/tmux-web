@@ -191,23 +191,21 @@ export function spawnReport(agent, spawnProcess = spawnChildProcess) {
 // project first -- so a first-wins guard picks a different copy in each. After a
 // partial upgrade (a new global install over an old project one, or the other
 // way round) that means the OLDER copy wins in one of the two runtimes, silently
-// and for as long as the mismatch lasts. Comparing TMUX_WEB_SCHEMA makes the answer
-// the same in both: the newer copy reports.
+// and for as long as the mismatch lasts. Comparing the schema number makes the
+// answer the same in both: the newer copy reports.
+//
+// The number is NOT here any more. It used to be one shared TMUX_WEB_SCHEMA,
+// and it could only be one while pi and opencode changed shape together; the
+// opencode V2 port changed one shape and not the other, so each integration
+// now declares its own number and hands it to claimReporter -- pi.ts's is
+// held to piSchema and opencode.js's to opencodeSchema by the Go suite, the
+// same way their managed headers are. See cmd/tmux-web/install.go.
 //
 // The claim is made when the copy LOADS and the answer is read when it REPORTS,
 // and those have to be two separate moments. A copy that loses the slot has
 // already returned its handlers to the runtime by then -- there is no
 // unregistering in either API -- so the loser must go on being called and go on
 // saying nothing.
-
-/**
- * TMUX_WEB_SCHEMA is the schema number of THIS copy, and it is the same number as
- * the one in the `managed by tmux-web (tmux-web-schema: N)` header of every file
- * the installer writes. cmd/tmux-web/install.go holds its own `tmuxWebSchema`
- * against this constant on every run of the Go suite, because two numbers that
- * must agree and are written down twice are two numbers that drift.
- */
-export const TMUX_WEB_SCHEMA = 1
 
 /** The key on globalThis the two copies meet at. Namespaced, because it is a
  *  key in somebody else's process. */
@@ -217,17 +215,20 @@ const CLAIM_SLOT = '__tmux_web_reporter__'
  * claimReporter claims the right to report for this process, and returns the
  * predicate that says whether this copy still holds it.
  *
+ * The schema number is REQUIRED, and it is the caller's own: two copies of one
+ * integration compare THEIR number against each other, and a default here
+ * would quietly reunite the numbers the port above split.
+ *
  * `>=` rather than `>`: two copies of the SAME schema is the ordinary case -- a
  * global install and a project install made by the same tmux-web -- and one of
  * them has to win. The later loader takes it, which is arbitrary and is meant
  * to be: the two files are byte-identical, so there is nothing to choose
  * between them beyond leaving exactly one.
  *
- * @param {number} [schema] this copy's schema; the parameter exists for the
- *   test, and nothing that ships passes it.
+ * @param {number} schema this copy's schema number
  * @returns {() => boolean} whether this copy is the one that should report
  */
-export function claimReporter(schema = TMUX_WEB_SCHEMA) {
+export function claimReporter(schema) {
   // Identity, not a name or a number: it is the only thing two copies of this
   // same code cannot accidentally share.
   const me = {}

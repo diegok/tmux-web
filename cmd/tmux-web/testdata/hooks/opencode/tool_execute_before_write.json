@@ -1,13 +1,11 @@
 {
+  "tool": "write",
+  "sessionID": "ses_e53261071ffeu4ApUsErNOKM6P",
+  "agent": "build",
+  "messageID": "msg_1acd9efb3001afR4XtgvZs0CAK",
+  "id": "call_3fe30b07a1d54d7fac7a8ef3",
   "input": {
-    "tool": "write",
-    "sessionID": "ses_f7135fcc9ffebuJVObk3PCMWN8",
-    "callID": "call_ff3f289a6d00452eba84d266"
-  },
-  "output": {
-    "args": {
-      "content": "done\n",
-      "filePath": "/tmp/tmux-web-capture/oc/proj/out.txt"
-    }
+    "path": "hello.txt",
+    "content": "hi"
   }
 }

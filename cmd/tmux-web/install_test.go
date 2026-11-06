@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -103,7 +104,7 @@ func TestInstallOverwritesItsOwnFile(t *testing.T) {
 		if !strings.Contains(r.stderr, staleNote) {
 			t.Errorf("replacing a file written by an earlier schema did not say %q:\n%s", staleNote, r)
 		}
-		if got := installRead(t, path); !strings.Contains(got, "tmux-web-schema: 1") {
+		if got := installRead(t, path); !strings.Contains(got, fmt.Sprintf("tmux-web-schema: %d", opencodeSchema)) {
 			t.Errorf("the older file was not replaced:\n%.200q", got)
 		}
 	})
@@ -496,45 +497,45 @@ func TestEachOwnedFileIsClassifiedAgainstItsOwnSchema(t *testing.T) {
 
 // TestAGlobalInstallDoesNotWarnAboutARepositoryItIsNotIn.
 //
-// The project-scope warning -- opencode creates package.json, node_modules/ and
-// a .gitignore in the directory it loads a plugin from -- is MEASURABLY FALSE
-// for a global install. Measured on opencode 1.18.30: with only a global plugin
-// present, a fresh project directory stayed completely empty and the whole
-// bootstrap landed in $XDG_CONFIG_HOME/opencode/ instead. A warning that names
-// a repository the install does not touch is a warning that teaches the user to
-// stop reading them.
+// Through V1 the point was narrower: the footprint warning -- opencode creates
+// package.json, node_modules/ and a .gitignore where it loads a plugin from --
+// was MEASURED on 1.18.30 to be true of a project and false of a global
+// install, and this test held the note to that scope line. On 2.2.5 the
+// footprint itself is gone from BOTH scopes (re-measured: a dependency-free
+// plugin leaves the project empty and the configuration directory bare), so
+// the warning was retired and the assertion widened to "no scope prints it".
+// See install.go's projectWarning for the whole chain.
 func TestAGlobalInstallDoesNotWarnAboutARepositoryItIsNotIn(t *testing.T) {
 	globalHome(t)
 	global := installCLI(t, "n\n", "--agent", "opencode", "--global")
 	global.wantCode(t, 1)
 
-	// The forbidden strings are taken from the PROJECT warning itself rather
-	// than being words about repositories. The first version of this assertion
-	// banned "repository", which the global note's own sentence ("nothing is
-	// added to any repository") contains -- a fixture making an assertion true
-	// by accident, in the same shape as the "older"-in-the-TempDir-path bug
-	// this file already carries a comment about.
+	// The forbidden strings are the footprint warning itself, retired with the
+	// measurement it stood on. Through V1 the project-scope install warned
+	// that opencode's bootstrap (package.json, node_modules/, a .gitignore
+	// tmux-web did not write) landed in the repository -- MEASURED on 1.18.30.
+	// Re-measured on 2.2.5, global and project scope both: a dependency-free
+	// plugin leaves the project empty and adds nothing beside itself, so no
+	// scope prints a warning about files that never appear. See install.go's
+	// projectWarning and the retired TestInstallWarnsAboutOpencodesFootprint
+	// for the chain; if a future opencode restores the bootstrap, the warning
+	// comes back with a capture that shows it.
 	for _, forbidden := range []string{
 		".opencode/node_modules/",
 		"a .gitignore tmux-web did not write and does not control",
 	} {
 		if strings.Contains(global.stderr, forbidden) {
-			t.Errorf("a global install prints the project-scope footprint warning (%q), which is measurably false there:\n%s", forbidden, global)
+			t.Errorf("a global install prints the retired footprint warning (%q):\n%s", forbidden, global)
 		}
 	}
-	// What it says instead: where opencode's own bootstrap really lands. It is
-	// still a footprint and the user is still told about it -- it is just not in
-	// their repository.
-	if !strings.Contains(global.stderr, "node_modules") {
-		t.Errorf("a global install says nothing about opencode's bootstrap at all:\n%s", global)
-	}
 
-	// And the project-scope warning is still there, so the assertion above is
-	// the scope being read rather than the warning having been deleted.
+	// And the project scope is the same silence, asserted here so the absence
+	// above reads as the footprint being gone rather than the scope being
+	// unread.
 	project := installCLI(t, "n\n", "--agent", "opencode", t.TempDir())
 	project.wantCode(t, 1)
-	if !strings.Contains(project.stderr, ".opencode/node_modules/") {
-		t.Errorf("the project-scope footprint warning is gone:\n%s", project)
+	if strings.Contains(project.stderr, "node_modules") {
+		t.Errorf("the project-scope install still warns about a bootstrap 2.2.5 does not create:\n%s", project)
 	}
 }
 
@@ -844,25 +845,19 @@ func TestTheInstalledPluginIsOneSelfContainedFile(t *testing.T) {
 	}
 }
 
-// TestInstallWarnsAboutOpencodesFootprint. "Why is there a .gitignore in my
-// client's repo" is a question the user should be able to answer without
-// archaeology, and the answer has to arrive BEFORE they say yes.
-//
-// MEASURED on opencode 1.18.30: a first run with a plugin present created
-// .opencode/package.json, .opencode/package-lock.json, .opencode/node_modules/
-// and .opencode/.gitignore (listing node_modules, package.json,
-// package-lock.json, bun.lock and .gitignore itself).
-func TestInstallWarnsAboutOpencodesFootprint(t *testing.T) {
-	root := t.TempDir()
-	r := installCLI(t, "n\n", "--agent", "opencode", root)
-
-	r.wantCode(t, 1)
-	for _, want := range []string{".gitignore", "node_modules"} {
-		if !strings.Contains(r.stderr, want) {
-			t.Errorf("the warning shown before the confirmation does not mention %q:\n%s", want, r)
-		}
-	}
-}
+// TestInstallWarnsAboutOpencodesFootprint is RETIRED with its warning. Through
+// V1 the project-scope install warned that opencode's own bootstrap
+// (package.json, node_modules/ and a .gitignore) landed in the repository the
+// first time it loaded a plugin -- MEASURED on 1.18.30 (a first run with a
+// plugin present created .opencode/package.json, .opencode/package-lock.json,
+// .opencode/node_modules/ and .opencode/.gitignore), and the warning existed
+// because a file the user did not add is one they will ask about. Re-measured
+// on 2.2.5, both scopes: a dependency-free plugin leaves the project empty and
+// adds nothing beside itself in the configuration directory, so the install was
+// printing a warning about files that never appear -- and a false warning is
+// worse than none. See install.go's projectWarning for the chain. If a future
+// opencode restores the bootstrap, this warning comes back with a capture that
+// shows it.
 
 // TestInstallWarnsAboutANestedInstall. Open question 8: two integrations
 // writing one pane option is a race nobody has looked at. The instruction is to
@@ -1251,18 +1246,25 @@ func TestASchemaOneFileIsReplacedWithANote(t *testing.T) {
 }
 
 // TestASchemaOneFileOfAnAgentThatDidNotChangeIsStillCurrent is the reason the
-// schema is per agent: opencode's and pi's installs did not change shape, so a
-// schema-1 file is theirs and current, and nobody is told otherwise.
+// schema is per file: an install whose shape did not change keeps its number,
+// and nobody is told otherwise.
+//
+// pi is that case today: its file still carries the same entrypoint, hooks and
+// queue it always did, so a schema-1 file is its and current.
+//
+// opencode WAS the other case, until the V2 port made a schema-1 opencode file
+// genuinely stale -- a V1 factory function in a runtime that now requires
+// {id, setup}, forwarding events its own bus no longer sends. TestASchema-
+// OneFileIsReplacedWithANote above is what a stale file gets now: the note.
 //
 // THE SEEDED FILE SAYS 1 IN LITERAL TEXT, not whatever the constant is today. A
 // test that installs twice at the current number would pass unchanged if
-// someone bumped opencodeSchema to 2 and edited the sources to match -- which
-// is exactly the change that makes every opencode user's reinstall announce a
-// shape change that never happened.
+// someone bumped piSchema and edited the sources to match -- which is exactly
+// the change that makes every pi user's reinstall announce a shape change that
+// never happened.
 func TestASchemaOneFileOfAnAgentThatDidNotChangeIsStillCurrent(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // globalInstall looks in $HOME
 	for _, tc := range []struct{ agent, path string }{
-		{"opencode", filepath.Join(".opencode", "plugin", "tmux-web.js")},
 		{"pi", filepath.Join(".pi", "extensions", "tmux-web.ts")},
 	} {
 		t.Run(tc.agent, func(t *testing.T) {

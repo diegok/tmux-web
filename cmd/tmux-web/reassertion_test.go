@@ -284,39 +284,17 @@ func TestAReassertionDatedFromTheStandingReportWritesItsTimestamp(t *testing.T) 
 	}
 }
 
-// opencode's session.idle is the one re-assertion dated from NOW, and it needs
-// its own test because it is the exception the whole column exists to preserve.
-//
-// It can fire twice inside one resting period -- measured on opencode 1.18.30,
-// on a turn that died at the provider -- which makes it a re-assertion. But the
-// FIRST time it fires the turn really has just ended, and this event is the
-// thing that knows. Dated from the standing report its finish would carry that
-// turn's last working write, which is its last tool call: up to a minute early,
-// on every opencode turn, every time. That is the certain regression this
-// column refuses to trade for a rare race.
-func TestOpencodesTurnEndIsStillDatedNow(t *testing.T) {
-	standing := time.Now().Add(-30 * time.Second).UnixMilli()
-	before := time.Now().UnixMilli()
-
-	r := &recordingTmux{standing: "1;working;" + strconv.FormatInt(standing, 10)}
-	runReportWith(t, r, []string{"--agent", "opencode", "--event", "session.idle"},
-		withStdin(`{"type":"session.idle","properties":{"sessionID":"ses_root"}}`))
-	after := time.Now().UnixMilli()
-
-	if r.shows != 1 {
-		t.Errorf("read the standing option %d times, want 1: it is still a re-assertion", r.shows)
-	}
-	if r.sets != 1 {
-		t.Fatalf("made %d writes, want 1: the standing working disagrees and is older", r.sets)
-	}
-	rep := wroteReport(t, r)
-	if rep.Timestamp < before || rep.Timestamp > after {
-		t.Errorf("wrote timestamp %d, want one from this turn end itself (between %d and %d). "+
-			"Dated from the standing report it would read %d -- thirty seconds before the turn "+
-			"actually ended, which is a visible regression on every opencode turn",
-			rep.Timestamp, before, after, standing+1)
-	}
-}
+// opencode's turn end WAS the one re-assertion dated from NOW, and it had its
+// own test because it was the exception the whole column existed to preserve.
+// V2 removed session.idle from the public bus and split the turn end across
+// three execution events that each fire ONCE -- there is no opencode
+// re-assertion any more, and the column's remaining members are claude's and
+// pi's repairs above. What the old test protected against -- a finish dated
+// from the turn's last working write, up to a minute early -- cannot happen on
+// opencode now: an edge never reads the standing report, which
+// events_test.go's "the turn end is an edge and dates from now" asserts.
+// This file keeps no replacement case, and inventing one would be testing a
+// mutant that no longer exists.
 
 // A repair on a pane with no readable standing report is dated NOW, whatever
 // its column says, because there is nothing to date from.

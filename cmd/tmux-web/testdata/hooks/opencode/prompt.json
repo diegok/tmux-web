@@ -1,0 +1,9 @@
+{
+  "sessionID": "ses_e532855d7ffeFY8IPCSZ6Ff4xL",
+  "messageID": "msg_1acd7aa31001z1YLQJBG0NXpxX",
+  "prompt": {
+    "text": "\"Use the shell tool to run exactly: ls . then tell me the one file you see. Nothing else.\"",
+    "files": []
+  },
+  "delivery": "steer"
+}

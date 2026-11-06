@@ -1,4 +1,4 @@
-// managed by tmux-web (tmux-web-schema: 1)
+// managed by tmux-web (tmux-web-schema: 2)
 // Reinstalling or updating the integration overwrites this file.
 // It does one thing: `tmux set-option -p @tmux_web_agent`. Nothing else.
 //
@@ -9,29 +9,34 @@
 // JavaScript plugin and a settings.json the user owns. If you find yourself
 // writing the word "working" or "idle" in this file, or reducing a payload to
 // a line of text, something has gone wrong. permission.asked in particular
-// carries no question string and a `metadata` whose keys vary by permission
-// class -- one of them a whole unified diff -- and reducing that is
-// activity.go's job, per class.
+// carries a `metadata` whose keys vary by permission class -- one of them a
+// whole patch -- and reducing that is activity.go's job, per class.
 //
 // What is left is two runtime gates that only the runtime can apply: which
 // process this is, and which SESSION an event belongs to.
 //
-// NOTHING HERE IS ASYNC AND NOTHING RETURNS A VALUE. opencode awaits its hooks
-// SEQUENTIALLY ACROSS PLUGINS -- a measured 4 s stall in one hook pushed a
-// turn's status to 8956 ms -- so every handler pushes to the queue and
-// returns. The queue's push() returns undefined for the same reason: there is
-// nothing for an awaited hook to wait on even by accident.
+// THE TWO HOOKS ARE NEVER ASYNC AND NEVER RETURN A VALUE. opencode V2 awaits
+// registered hooks -- a stall in one is a stall in the turn -- so the prompt
+// and tool handlers push to the queue and return. The queue's push() returns
+// undefined for the same reason: there is nothing for an awaited hook to wait
+// on even by accident. The BUS is no longer a hook: it is a subscription over
+// the server's event stream, run in the background, and nothing opencode does
+// waits on it either. Each delivered event goes through the same sync handler
+// the hooks use.
 
+// The queue, inlined here by `tmux-web install-integration` -- one report in
+// flight per pane, and the claim that leaves exactly one of two installed
+// copies reporting. Its single source of truth is internal/integrations/queue.ts;
+// this file may not gain a second copy of any of it.
 import { claimReporter, makeQueue, spawnReport } from './queue.ts'
 
 /**
  * The bus events this plugin forwards, and the reason there is a list at all.
  *
- * opencode's `event` hook sees EVERYTHING: one `message.part.updated` per
- * streamed chunk, 45 `plugin.added` at startup, a `session.updated` on every
- * turn of the crank. Forwarding the lot would be a fork per token. The Go
- * table would ignore them all -- an event it does not know writes nothing --
- * but it would ignore them one process at a time.
+ * The V2 bus carries EVERYTHING: one delta event per streamed token, a usage
+ * update per step, an inbox event per queued message. Forwarding the lot would
+ * be a fork per token. The Go table would ignore them all -- an event it does
+ * not know writes nothing -- but it would ignore them one process at a time.
  *
  * These are exactly the bus events `rules["opencode"]` in
  * internal/report/events.go maps, and
@@ -39,14 +44,30 @@ import { claimReporter, makeQueue, spawnReport } from './queue.ts'
  * declaration and holds it to that table -- unconditionally, unlike the live
  * wiring test, which skips wherever opencode is not installed.
  *
- * `session.created` is not among them on purpose: it is this plugin's own
- * bookkeeping, the one event that establishes parentage, and not a state of the
- * pane. `session.error` is not among them either -- it is real and it does
- * fire, but a failed provider call is not a state this feature reports.
+ * MEASURED on opencode 2.2.5, and it is the largest change the V2 port made:
+ * V1's `session.status` and `session.idle` are NOT on the public event stream
+ * any more -- neither reaches a plugin subscription, with a client connected
+ * or without one -- and `todo.updated` is gone with the todo feature's own
+ * retreat from the bus. The turn lifecycle this feature used to read off
+ * status/busy and idle now arrives as `session.execution.started` (the turn
+ * start proper), `session.step.started` (busy's stand-in, one per model step),
+ * and `session.execution.succeeded` / `.failed` / `.interrupted` (the turn
+ * end, one edge each). `session.created` is not in the whitelist on purpose:
+ * it is this plugin's own bookkeeping, the one event that establishes
+ * parentage, and not a state of the pane. `session.step.failed` is not either:
+ * a failed step retried within the turn is not a state of the pane, and the
+ * turn that dies says so on `session.execution.failed`.
  *
  * @type {Set<string>}
  */
-const busEvents = new Set(['session.status', 'permission.asked', 'todo.updated', 'session.idle'])
+const busEvents = new Set([
+  'session.execution.started',
+  'session.step.started',
+  'session.execution.succeeded',
+  'session.execution.failed',
+  'session.execution.interrupted',
+  'permission.asked',
+])
 
 /**
  * sessionTree remembers which sessions are children of which.
@@ -55,12 +76,12 @@ const busEvents = new Set(['session.status', 'permission.asked', 'todo.updated',
  * same for all of them, so an unfiltered child event overwrites the root's
  * state -- and the damage that matters is a child's turn end firing while the
  * root is still working, which becomes a false `done` badge mid-turn. Measured
- * on opencode 1.18.30: a subagent's `session.idle` arrives 2.05 s before the
- * root's, while the root is still `busy`.
+ * on opencode 1.18.30 and true on 2.2.5: a subagent's turn end arrives before
+ * the root's, while the root is still working.
  *
  * WHY IT IS HERE AND NOT IN GO. Deciding whether session X is a child needs
- * memory of an earlier event -- `session.created`, whose `properties.info`
- * carries the `parentID`, and which is the only event that carries it at all.
+ * memory of an earlier event -- `session.created`, whose `data.parentID`
+ * carries the parent, and which is the only event that carries it at all.
  * Every `tmux-web report` process is fresh and has no memory of anything.
  *
  * IT IS ABSENCE-CODED AND THEREFORE FAILS OPEN: a payload that lost its
@@ -75,10 +96,10 @@ const busEvents = new Set(['session.status', 'permission.asked', 'todo.updated',
  * somebody assuming it is belt and braces. Behind it there is exactly one
  * thing: evidence rule 3, which needs a connected client, needs the pane to
  * keep churning for a whole verification window, and leaks even then -- 4 of
- * 88 captured turns went still while waiting on the model. WITH NO CLIENT
- * CONNECTED, A SUBAGENT FALSE-IDLE ON OPENCODE IS UNDEFENDED. This is not two
- * independent mechanisms; it is one mechanism that only runs when somebody is
- * watching, and this map.
+ * 88 captured turns went still while waiting on the model. WITHOUT A CLIENT
+ * CONNECTED, A SUBAGENT FALSE-TURN-END ON OPENCODE IS UNDEFENDED. This is not
+ * two independent mechanisms; it is one mechanism that only runs when somebody
+ * is watching, and this map.
  *
  * EXPORTED, and for the same reason pi.ts exports its handlers: it is the only
  * real logic in the file, and the Go wiring test that would otherwise be its
@@ -92,17 +113,22 @@ export function sessionTree() {
 
   return {
     /**
-     * note records what one payload says about parentage. Called on every bus
-     * event, BEFORE the forwarding whitelist and before the root gate --
-     * session.created is not forwarded, so a note() that ran after either gate
-     * would never see the only event that names a parent.
+     * note records what one bus event says about parentage. Called on every
+     * subscription delivery, BEFORE the forwarding whitelist and before the
+     * root gate -- session.created is not forwarded, so a note() that ran
+     * after either gate would never see the only event that names a parent.
+     *
+     * The V2 bus wraps its payload in `data`; V1 nested it under
+     * `properties.info`. Both are read here, because a V1-format copy can
+     * still be sitting beside this one in an old project and the gate may as
+     * well be right about both rather than right about one.
      *
      * @param {unknown} payload
      */
     note(payload) {
-      const info = payload?.properties?.info
-      const id = info?.id ?? payload?.properties?.sessionID
-      const parent = info?.parentID
+      const data = payload?.data ?? payload?.properties
+      const id = data?.sessionID ?? data?.info?.id
+      const parent = data?.info?.parentID ?? data?.parentID
       if (typeof id !== 'string' || typeof parent !== 'string') return
       if (id === '' || parent === '' || id === parent) return
       parents.set(id, parent)
@@ -133,7 +159,7 @@ export function sessionTree() {
 }
 
 /**
- * handlers is the hook object, minus the queue.
+ * handlers is the three delivery points, minus the queue.
  *
  * Exported for the same reason pi.ts exports its own: driven here from
  * opencode.test.ts with a fake `report`, the gates are covered on every run
@@ -144,8 +170,12 @@ export function sessionTree() {
  * one is written so that a hook argument that is not the shape it was
  * yesterday returns quietly instead of throwing on opencode's own stack.
  *
+ * The two hooks are plain sync functions: opencode awaits them. The bus
+ * handler is the same sync shape even though nothing awaits it, because the
+ * queue's discipline is the point.
+ *
  * @param {(item: { event: string, payload?: unknown }) => void} report
- * @returns {Record<string, (a?: unknown, b?: unknown) => void>}
+ * @returns {{ prompt: (a?: unknown) => void, tool: (a?: unknown) => void, bus: (a?: unknown) => void }}
  */
 export function handlers(report) {
   const tree = sessionTree()
@@ -158,64 +188,126 @@ export function handlers(report) {
     //
     // THE PROMPT IS NOT SENT. This event's mapping is rung 4 of the activity
     // ladder, a state-only report, and the only string in its payload that is
-    // not an id is `output.parts[].text` -- the user's raw prompt. pi's `input`
-    // is sent the same way and for the same reason.
-    'chat.message': (input) => {
-      if (!tree.isRoot(input?.sessionID)) return
-      report({ event: 'chat.message' })
+    // not an id is `prompt.text` -- the user's raw prompt. pi's `input` is
+    // sent the same way and for the same reason.
+    //
+    // V1's name for this hook was chat.message; V2 calls it prompt and fires
+    // it once per prompt ADMISSION -- the item name follows the runtime, and
+    // events.go's table keys on it.
+    prompt: (event) => {
+      if (!tree.isRoot(event?.sessionID)) return
+      report({ event: 'prompt' })
     },
 
-    // Both arguments, because the tool's arguments are under the SECOND of
-    // them: events.go's textOpencodeTool reads `input.tool` and `output.args`.
-    // Which keys of those mean anything, and how a path or a command becomes
-    // one line, is activity.go's decision, made against the recorded fixtures.
-    'tool.execute.before': (input, output) => {
-      if (!tree.isRoot(input?.sessionID)) return
-      report({ event: 'tool.execute.before', payload: { input, output } })
+    // The one hook with the tool's arguments under it. Forwarded WHOLE --
+    // {tool, sessionID, agent, messageID, id, input} -- because which keys of
+    // it mean anything, and how a path or a command becomes one line, is
+    // activity.go's decision, made against the recorded fixtures. V1 carried
+    // the args under a second `output` argument; V2 keeps one event with the
+    // args on `input`, and the bash tool is now named shell.
+    tool: (event) => {
+      if (!tree.isRoot(event?.sessionID)) return
+      report({ event: 'tool.execute.before', payload: event })
     },
 
-    // The bus. `session.status` (whose busy/idle discrimination is events.go's
-    // whitelist, not ours -- the turn end is `session.idle` alone, and status
-    // idle fires in the same millisecond), `permission.asked`, `todo.updated`
-    // and `session.idle` are forwarded whole and unreduced.
-    event: (arg) => {
-      const event = arg?.event
+    // The bus. `session.execution.started` and `session.step.started` are
+    // working edges (the turn start proper, and busy's stand-in -- step
+    // started fires once per model step, exactly as often as V1's status busy
+    // did), `permission.asked` is the blocked one, and the three
+    // `session.execution.*` endings are the turn end. Each is forwarded whole
+    // and unreduced, envelope and all.
+    bus: (event) => {
       tree.note(event)
       if (!busEvents.has(event?.type)) return
-      if (!tree.isRoot(event?.properties?.sessionID)) return
+      if (!tree.isRoot(event?.data?.sessionID)) return
       report({ event: event.type, payload: event })
     },
   }
 }
 
 /**
+ * TMUX_WEB_SCHEMA is the schema number of THIS copy, and it is the same number
+ * as the one in the `managed by tmux-web (tmux-web-schema: N)` header of this
+ * file. cmd/tmux-web/install.go holds its `opencodeSchema` against this
+ * constant on every run of the Go suite, because two numbers that must agree
+ * and are written down twice are two numbers that drift. It lives HERE since
+ * the opencode V2 port and not in queue.ts: pi's install did not change shape
+ * when this one did, and one shared constant would have forced a false "your
+ * file changed" note onto one of the two. pi.ts carries its own.
+ */
+const TMUX_WEB_SCHEMA = 2
+
+/**
  * What opencode loads. One tree, one queue and one claim per plugin instance.
  *
+ * THE SHAPE, because it is the one thing V2 checks before anything here runs:
+ * the default export must be an OBJECT carrying an `id` and a `setup`
+ * function -- a V1 factory function fails the schema check and the plugin
+ * never loads. The id is stable; plugin storage and the diagnostics key on it.
+ * The definition is written as a plain object literal rather than through
+ * `Plugin.define` from `@opencode/plugin` so this file stays dependency-free
+ * -- it imports nothing but `node:child_process`, and nothing in opencode's
+ * plugin bootstrap is obliged to be resolvable from here.
+ *
  * THE TMUX_PANE GUARD IS FIRST, and it is not a precaution copied from
- * somewhere. This plugin runs IN-PROCESS, as a child of the pane's shell, so
- * it normally inherits the pane's TMUX_PANE. But `opencode serve` somewhere
- * else plus a client attaching puts this same plugin in the SERVER's process,
- * where either there is no pane to report on or -- worse -- there is a stale
- * TMUX_PANE from whatever shell started the server, and this session's state
- * would be written onto somebody else's row. No pane, no plugin: an empty hook
- * object, and not one fork's worth of machinery built. It is ALSO in front of
- * the claim below, so a plugin with no pane to report on does not take the slot
- * away from a copy that has one.
+ * somewhere. This plugin runs IN-PROCESS, in opencode's background service, as
+ * a descendant of some pane's shell, so it normally inherits that pane's
+ * TMUX_PANE. But a service started by a bare shell plus clients attaching
+ * gives this same plugin either no pane to report on or -- worse -- a stale
+ * TMUX_PANE from whatever shell started the service, and every session's
+ * state would be written onto somebody else's row. No pane, no plugin: setup
+ * returns having registered nothing, and opencode never calls it again. It is
+ * ALSO in front of the claim below, so a plugin with no pane to report on
+ * does not take the slot away from a copy that has one.
  *
  * THE CLAIM IS MADE HERE AND CHECKED AT THE QUEUE, and those are deliberately
  * two moments. Since `--global`, one opencode process can hold two copies of
  * this file -- $XDG_CONFIG_HOME/opencode/plugin/ loads in every project and
  * .opencode/plugin/ loads in this one, and opencode dedupes neither -- so both
  * copies' hooks are called on every event. A copy that loses the claim cannot
- * withdraw the hook object it has already returned, so it stays registered and
- * says nothing. See queue.ts for why the winner is the newer schema rather than
- * the first to load.
+ * withdraw the hooks it has already registered, so it stays registered and
+ * says nothing. See queue.ts for why the winner is the newer schema rather
+ * than the first to load.
+ *
+ * THE SUBSCRIPTION IS THE ONE ASYNC PIECE, and it is disposed the way the
+ * runtime asks: setup returns the cleanup function, and aborting the
+ * controller ends the iteration. Everything the loop does per event is the
+ * same sync push the hooks do.
  */
-export default async function () {
-  if (!process.env.TMUX_PANE) return {}
-  const mine = claimReporter()
-  const q = makeQueue(spawnReport('opencode'))
-  return handlers((item) => {
-    if (mine()) q.push(item)
-  })
+export default {
+  id: 'tmux-web',
+  setup(ctx) {
+    if (!process.env.TMUX_PANE) return
+    const mine = claimReporter(TMUX_WEB_SCHEMA)
+    const q = makeQueue(spawnReport('opencode'))
+    const h = handlers((item) => {
+      if (mine()) q.push(item)
+    })
+
+    void ctx.session.hook('prompt', (event) => h.prompt(event))
+    void ctx.tool.hook('execute.before', (event) => h.tool(event))
+
+    const controller = new AbortController()
+    void (async () => {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+          // One delivery, one sync handler, one queue push. A throw here is a
+          // dead reporting feature -- the loop ends and takes the badge with
+          // it -- so the handler is guarded even though it is written not to
+          // throw: the event shape is the runtime's, not ours.
+          try {
+            h.bus(event)
+          } catch (err) {
+            // Swallowed: a malformed delivery is one lost badge, not a reason
+            // to stop watching the bus.
+          }
+        }
+      } catch (err) {
+        // The subscription itself failed -- aborted on unload, or the stream
+        // broke. Either way the feature is over; say nothing.
+      }
+    })()
+
+    return () => controller.abort()
+  },
 }

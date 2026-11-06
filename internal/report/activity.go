@@ -64,16 +64,17 @@ var commandKeys = []string{"command"}
 //
 // It is small on purpose, and it is small because of what it is FOR: a verb is
 // only ever used next to an object, and a tool with no path and no command has
-// no object, so an entry for it would never be reached. These four are every
+// no object, so an entry for it would never be reached. These five are every
 // tool across the three agents that takes one. A tool that is not here is its
 // own name, which is the third rule above.
 //
-// Case-folded because the same tool is spelled three ways: claude's Bash,
-// opencode's bash, pi's bash. The fold is on the LOOKUP only; the name that
-// reaches the wire when there is no object is the one the agent sent, so an
-// MCP tool keeps its own capitalisation.
+// Case-folded because the same tool is spelled four ways: claude's Bash,
+// pi's bash, opencode V1's bash and opencode V2's shell. The fold is on the
+// LOOKUP only; the name that reaches the wire when there is no object is the
+// one the agent sent, so an MCP tool keeps its own capitalisation.
 var toolVerbs = map[string]string{
 	"bash":  "run",
+	"shell": "run",
 	"read":  "read",
 	"write": "write",
 	"edit":  "edit",
@@ -230,77 +231,73 @@ func activityText(src textSource, payload []byte) string {
 		return p.Message
 
 	case textOpencodeTool:
-		// tool.execute.before takes two arguments, so the payload is
-		// {input, output} -- and the tool's arguments are under output.args,
-		// not under input.
+		// V2 hands the hook ONE event, and the tool's arguments are on its
+		// `input` -- V1 carried them on a second `output` argument, which is
+		// why this struct used to be two nested ones.
 		var p struct {
-			Input struct {
-				Tool string `json:"tool"`
-			} `json:"input"`
-			Output struct {
-				Args json.RawMessage `json:"args"`
-			} `json:"output"`
+			Tool  string          `json:"tool"`
+			Input json.RawMessage `json:"input"`
 		}
 		if json.Unmarshal(payload, &p) != nil {
 			return ""
 		}
-		return reduceToolCall(p.Input.Tool, p.Output.Args)
-
-	case textOpencodeTodo:
-		// Rung 2, and only opencode has one: the agent's own statement of
-		// intent, which beats a mechanical trace of the tool it is currently
-		// inside. "Fix the parser bug" beats "read blocked.go".
-		//
-		// How often the list is empty is open question 6 and it does not
-		// change anything here: an empty list yields no text, and the tool-call
-		// rung underneath arrives on its own events either way.
-		var p struct {
-			Properties struct {
-				Todos []struct {
-					Content string `json:"content"`
-					Status  string `json:"status"`
-				} `json:"todos"`
-			} `json:"properties"`
-		}
-		if json.Unmarshal(payload, &p) != nil {
-			return ""
-		}
-		for _, todo := range p.Properties.Todos {
-			if todo.Status == "in_progress" {
-				return todo.Content
-			}
-		}
-		return ""
+		return reduceToolCall(p.Tool, p.Input)
 
 	case textOpencodePermission:
-		// THE DESIGN IS WRONG ABOUT THIS EVENT and the recorded payload is
-		// what settles it: permission.asked carries no question string and no
-		// title. It carries the permission CLASS, `patterns`, `always`, `tool`
-		// and a `metadata` object WHOSE KEYS DEPEND ON THE CLASS -- {command}
-		// for bash, {filepath, diff} for edit. So this reduces per class rather
-		// than reading one fixed field, and the class plays the part the tool
-		// name plays everywhere else in this file.
+		// THE DESIGN IS WRONG ABOUT THIS EVENT and the recorded payloads are
+		// what settle it: permission.asked carries no question string and no
+		// title. It carries the permission CLASS (`data.action`),
+		// `data.resources` and, for some classes, a `data.metadata` object
+		// WHOSE KEYS DEPEND ON THE CLASS. Measured on opencode 2.2.5: the
+		// shell class carries NO metadata at all -- its command is
+		// resources[0], where V1's bash class sent {command} -- and the edit
+		// class sends metadata.files[0] with the filepath and a whole patch
+		// beside it, where V1 sent {filepath, diff}. So this reduces per
+		// class rather than reading one fixed field, and the class plays the
+		// part the tool name plays everywhere else in this file.
 		//
 		// THE REASON FOR REDUCING THE EDIT CLASS IS SIZE, and it is the one
-		// genuine exclusion in this file. `diff` is a whole unified diff --
+		// genuine exclusion in this file. `files[].patch` is a whole patch --
 		// unbounded, and over MaxReportBytes on its own in the single sample
 		// recorded -- so a reader that took "the biggest string in metadata"
 		// or "metadata, serialised" would write a value the daemon then
-		// refuses to parse at all, and the row would show nothing. The
-		// filepath's basename is bounded and answers the question the dialog
-		// is asking: which file. The bash class needs no such treatment and
-		// gets none -- its command goes through whole, because at a permission
-		// prompt the command IS the question.
+		// refuses to parse at all, and the row would show nothing. The file's
+		// basename is bounded and answers the question the dialog is asking:
+		// which file. The shell class needs no such treatment and gets none --
+		// its command goes through whole, because at a permission prompt the
+		// command IS the question.
 		var p struct {
-			Properties struct {
-				Permission string          `json:"permission"`
-				Metadata   json.RawMessage `json:"metadata"`
-			} `json:"properties"`
+			Data struct {
+				Action    string          `json:"action"`
+				Resources []string        `json:"resources"`
+				Metadata  json.RawMessage `json:"metadata"`
+			} `json:"data"`
 		}
 		if json.Unmarshal(payload, &p) != nil {
 			return ""
 		}
-		return reduceToolCall(p.Properties.Permission, p.Properties.Metadata)
+		// An edit-shaped metadata: the file's basename out of files[0], and
+		// the patch is not read at all. Any other shape of metadata goes to
+		// reduceToolCall, which reads the path and command keys it knows.
+		if len(p.Data.Metadata) > 0 {
+			var m struct {
+				Files []struct {
+					File string `json:"file"`
+				} `json:"files"`
+			}
+			if json.Unmarshal(p.Data.Metadata, &m) == nil && len(m.Files) > 0 && m.Files[0].File != "" {
+				return strings.TrimSpace(p.Data.Action + " " + basename(m.Files[0].File))
+			}
+			return reduceToolCall(p.Data.Action, p.Data.Metadata)
+		}
+		// A class with no metadata sends its question as resources[0]. Handed
+		// to reduceToolCall as the command it is, so the verb table applies
+		// and the command goes through whole, first line only.
+		if len(p.Data.Resources) > 0 && strings.TrimSpace(p.Data.Resources[0]) != "" {
+			cmd, _ := json.Marshal(map[string]string{"command": p.Data.Resources[0]})
+			return reduceToolCall(p.Data.Action, cmd)
+		}
+		return reduceToolCall(p.Data.Action, nil)
 
 	case textPiTool:
 		// Open question 7, answered by the capture: args is the tool's own

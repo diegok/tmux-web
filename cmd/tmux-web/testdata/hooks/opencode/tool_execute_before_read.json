@@ -1,0 +1,10 @@
+{
+  "tool": "read",
+  "sessionID": "ses_e532855d7ffeFY8IPCSZ6Ff4xL",
+  "agent": "build",
+  "messageID": "msg_1acd7b15c001utkg6mpEOfevVL",
+  "id": "call_e4fadfacae1c444abe7a2c0b",
+  "input": {
+    "path": "/tmp/opencode/tmux-web-capture-v2"
+  }
+}

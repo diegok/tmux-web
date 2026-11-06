@@ -145,12 +145,13 @@ func TestTheTextSourcesAreExactlyThese(t *testing.T) {
 		// Rung 1, the question when blocked. Claude's Notification carries a
 		// message rather than a question; pi's ui_prompt_start.title is the
 		// literal question; opencode's permission.asked carries neither and
-		// has to be reduced from its metadata, per class.
+		// has to be reduced from its metadata and resources, per class.
 		"claude/Notification(permission_prompt)": textClaudeNotification,
 		"pi/ui_prompt_start":                     textPiPrompt,
 		"opencode/permission.asked":              textOpencodePermission,
-		// Rung 2, and only opencode has one.
-		"opencode/todo.updated": textOpencodeTodo,
+		// Rung 2 has no member anywhere: opencode's todo.updated was the only
+		// one, and V2 took the todo list off the public event bus. The rung
+		// stays in the ladder comment for whatever earns it back.
 	}
 	got := map[string]textSource{}
 	for _, m := range allMappings() {
@@ -177,7 +178,7 @@ func TestTheTextSourcesAreExactlyThese(t *testing.T) {
 		}
 	}
 	// The three turn starts are where the prompt lives, on every agent.
-	for _, name := range []string{"claude/UserPromptSubmit", "opencode/chat.message", "pi/input"} {
+	for _, name := range []string{"claude/UserPromptSubmit", "opencode/prompt", "pi/input"} {
 		if _, ok := got[name]; ok {
 			t.Errorf("%s publishes text, and the only text it has is the prompt -- which is "+
 				"history by the second tool call and a sentence fragment at 128 runes", name)

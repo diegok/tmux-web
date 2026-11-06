@@ -354,6 +354,15 @@ session and are therefore shared with anyone else attached:
 - **Copy mode** — scrolling back in the browser scrolls the local view too.
 - **Active pane** — clicking a pane in the sidebar moves it for every client.
 
+**The terminal is at most 256 columns wide.** That is the renderer's grid, not a
+setting: `@wterm/core` holds the screen in a WASM buffer 256 columns across, so
+on a screen wide enough for more the extra space stays background rather than
+becoming columns. tmux is told the clamped width on purpose — it used to be told
+the whole width, and then every column past 256 was drawn where nobody could see
+it: status lines looked cut off, a redraw across the edge flickered, and a line
+took a few keystrokes too many to wrap. A bigger font is the way to use the whole
+width of a very wide screen, since fewer columns all fit.
+
 None of these bite unless you are watching the same window from two places at
 once. There is no way to scope them per client in tmux; the design document has
 the details.

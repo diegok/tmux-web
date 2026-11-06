@@ -96,6 +96,36 @@ import '@wterm/react/css'
 export const RESIZE_DEBOUNCE_MS = 150
 
 /**
+ * The widest grid the terminal can draw, and the ceiling on what tmux is told.
+ *
+ * `@wterm/core` holds the screen in a WASM grid whose row stride is a compile-
+ * time maximum -- MEASURED at 256 columns, by sweeping the viewport against a
+ * real tmux and counting the cells that actually arrived on screen:
+ *
+ *     tmux cols:  140  227  245  247  250  252  265  285
+ *     rendered:   140  227  245  247  250  252  256  256
+ *
+ * `@wterm/dom` does not clamp what it REPORTS: `onResize` carries the column
+ * count its `ResizeObserver` derived from the box, so above the cap this app is
+ * handed a number the renderer cannot draw. Sending that number on is the bug
+ * it produced, and all three of its symptoms are the same fact seen from
+ * different angles -- tmux draws a screen wider than the grid, so everything
+ * past column 256 is written where nobody can see it: a status line looks cut
+ * at the right, a TUI redrawing across the edge flickers, and the app's own
+ * wrap column sits off-screen, which reads as a line that takes a few
+ * keystrokes too many to wrap.
+ *
+ * Clamping costs the columns beyond the cap -- they stay background -- and that
+ * is the honest trade: a column the user cannot see is worse than a column that
+ * is not there. The cap is not reachable through either package's public API
+ * (`WasmBridge.maxCols` is `private`), so it is written down here with the
+ * measurement, and `e2e/sizing.spec.ts` holds the INVARIANT rather than the
+ * number: whatever tmux is told, the grid draws all of it. A wterm that raises
+ * its own cap leaves that test green and this constant merely conservative.
+ */
+export const GRID_MAX_COLS = 256
+
+/**
  * How long an arming of `noteLayoutChange` stays good for.
  *
  * The layout change it announces lands in the same frame or the next one, so
@@ -769,6 +799,10 @@ export class TerminalSession {
     // leave the pane at the server's initial 80x24. wterm reports 0 while it
     // is still laying out.
     if (this.#stopped || cols <= 0 || rows <= 0) return
+    // Clamped before it is recorded, so every path below carries a size the
+    // renderer can draw: the held size, the suppression's release, and the
+    // resize a reconnect re-sends. See GRID_MAX_COLS.
+    cols = Math.min(cols, GRID_MAX_COLS)
     this.#cols = cols
     this.#rows = rows
     // The user asked for this one, so it goes out whatever has focus -- and it

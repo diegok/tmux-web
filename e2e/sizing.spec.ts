@@ -91,6 +91,67 @@ test('the window comes back down when the viewport does', async ({ page, tmuxWeb
 })
 
 /**
+ * The owner's report: "la barra de abajo sale como cortada, como si recibiera
+ * mal el tamaño de la pantalla", plus a pi whose dialog "tiembla" and a claude
+ * that takes three or four more keystrokes than it should to wrap a line.
+ *
+ * One cause under all three. `@wterm/core`'s WASM grid is 256 COLUMNS WIDE, and
+ * `@wterm/dom` reports the column count it derived from its own box -- not the
+ * one the grid can hold -- through `onResize`. tmux-web then tells tmux that
+ * number, so tmux draws a screen wider than the terminal can hold and every
+ * column past 256 is written where nobody can see it: a status line looks cut,
+ * a TUI redrawing across the edge flickers, and the app's own wrap column sits
+ * off-screen.
+ *
+ * MEASURED here, sweeping the viewport, before the clamp existed:
+ *
+ *     tmux cols:  140  227  245  247  250  252  265  285
+ *     rendered:   140  227  245  247  250  252  256  256
+ *
+ * The assertion is the INVARIANT, not the number: whatever tmux is told, the
+ * grid draws all of it. A wterm that raises its cap keeps this test green and a
+ * tmux-web that clamps too late makes it fail, which is the right way round --
+ * 256 is wterm's number to change, not ours to depend on.
+ */
+test('tmux is never told a width the terminal cannot draw', async ({ page, tmuxWeb }) => {
+  // Wide enough to pass the cap at this font size: 285 columns on a 2560px
+  // viewport, where the grid can hold 256.
+  await page.setViewportSize({ width: 2560, height: 900 })
+  await enroll(page, tmuxWeb, 'wide')
+  const cols = dims(await stable(page, tmuxWeb)).cols
+
+  // A line exactly as wide as the pane, in the one character that cannot be
+  // confused with the shell's own output.
+  tmuxWeb.tmux('send-keys', '-t', '=e2e:', 'clear', 'Enter')
+  tmuxWeb.tmux('send-keys', '-t', '=e2e:', `printf '%${cols}s' | tr ' ' W`, 'Enter')
+
+  const drawn = async () =>
+    await page.evaluate(() => {
+      const el = document.querySelector('.wterm')
+      let widest = 0
+      for (const row of el ? [...el.querySelectorAll('.term-row')] : []) {
+        const text = (row.textContent ?? '').trim()
+        if (/^W+$/.test(text)) widest = Math.max(widest, text.length)
+      }
+      return widest
+    })
+
+  const until = Date.now() + 10_000
+  let rendered = 0
+  while (Date.now() < until) {
+    rendered = await drawn()
+    if (rendered >= cols) break
+    await page.waitForTimeout(200)
+  }
+  expect(
+    rendered,
+    `tmux drew a ${cols}-column line and the terminal rendered ${rendered} of it. ` +
+      `The columns past the end are written where nobody can see them: that is the cut ` +
+      `status bar, the flickering dialog and the late wrap, all three.`,
+  ).toBe(cols)
+})
+
+/**
  * The layout invariant the fix rests on, asserted directly so a regression says
  * *why* rather than only that some number did not come back. A shell taller
  * than the viewport is the whole defect: `flex-1 min-h-0` cannot shrink a

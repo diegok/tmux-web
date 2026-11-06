@@ -9,6 +9,7 @@ import {
   BACKOFF_BASE_MS,
   BACKOFF_MAX_MS,
   ConnectionPill,
+  GRID_MAX_COLS,
   LAYOUT_CHANGE_GRACE_MS,
   RESIZE_DEBOUNCE_MS,
   SESSION_PROBE_TIMEOUT_MS,
@@ -470,6 +471,31 @@ describe('resize', () => {
     term.noteResize(101, 40)
     vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
     expect(types(ws)).toEqual(['where', 'resize', 'resize'])
+  })
+
+  it('never tells tmux a width the grid cannot draw', () => {
+    // @wterm/core's WASM grid is GRID_MAX_COLS wide and @wterm/dom reports the
+    // column count it derived from its own box, so on a wide screen it reports
+    // more columns than it can hold. Measured: at 285 columns the renderer drew
+    // 256 of them while tmux had been told 285 -- so a status line was cut, a
+    // redraw across the edge flickered, and the wrap column was off-screen.
+    const { term } = makeSession()
+    term.start()
+    const ws = MockWebSocket.last
+    ws.open()
+
+    term.noteResize(GRID_MAX_COLS + 29, 50)
+    vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+    expect(controls(ws).map((f) => f.json)).toEqual([
+      { type: 'where' },
+      { type: 'resize', cols: GRID_MAX_COLS, rows: 50 },
+    ])
+
+    // And the clamped size is the size on record: a wider report after it is
+    // the same size once clamped, so nothing goes out at all.
+    term.noteResize(GRID_MAX_COLS + 1, 50)
+    vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+    expect(types(ws)).toEqual(['where', 'resize'])
   })
 
   it('ignores a zero size, which is a terminal that has not laid out', () => {

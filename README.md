@@ -361,7 +361,12 @@ becoming columns. tmux is told the clamped width on purpose — it used to be to
 the whole width, and then every column past 256 was drawn where nobody could see
 it: status lines looked cut off, a redraw across the edge flickered, and a line
 took a few keystrokes too many to wrap. A bigger font is the way to use the whole
-width of a very wide screen, since fewer columns all fit.
+width of a very wide screen, since fewer columns all fit: **`Terminal…` in the
+user menu** sets the terminal's font size, from 10 to 24px, and its palette —
+wterm's own dark, One Light, Solarized Dark or Monokai, or whichever of light and
+dark the interface itself is using. Both are per device and kept in the browser,
+so a phone and a desktop each keep their own; nothing about them reaches the
+daemon or the tmux server.
 
 None of these bite unless you are watching the same window from two places at
 once. There is no way to scope them per client in tmux; the design document has

@@ -462,6 +462,17 @@ export async function openReplyBox(page: Page): Promise<void> {
 }
 
 /**
+ * Open the terminal's settings from the sidebar footer menu, and wait for the
+ * dialog. The footer button is the only button down there, which is how
+ * `terminal.spec.ts` reaches `Devices…` too.
+ */
+export async function openTerminalSettings(page: Page): Promise<void> {
+  await page.locator('[data-slot="sidebar-footer"]').getByRole('button').first().click()
+  await page.getByRole('menuitem', { name: 'Terminal…' }).click()
+  await page.getByRole('dialog', { name: 'Terminal' }).waitFor()
+}
+
+/**
  * Enroll a browser: open the link the CLI printed, wait for the redeem to land
  * on the SPA, and wait for the terminal to go live.
  *

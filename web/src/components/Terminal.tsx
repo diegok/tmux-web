@@ -1529,13 +1529,20 @@ export function Terminal(props: TerminalProps) {
  * and tmux told the old column count, with the text drawn at the new one. One
  * pixel of padding is the smallest change that is a box change.
  *
- * **The revert is on the next frame, not in this one.** Reverted inside the
- * same frame the observer sees no net change between deliveries and never
- * fires at all, which is the whole mechanism gone. Two frames means two local
- * grid resizes, which `RESIZE_DEBOUNCE_MS` collapses into one `resize` on the
- * wire.
+ * **The 1px is held for a whole frame, and taken off in the one after.** This
+ * is the part that is easy to get wrong, and it was wrong first: a
+ * `ResizeObserver` is broadcast *after* every animation-frame callback of the
+ * same frame, so a padding reverted in the next frame's callback is reverted
+ * before the observer has ever seen it -- net zero change, no notification, no
+ * re-measure. MEASURED in Chromium with exactly that bug: the font reached the
+ * element (`--term-font-size: 20px`, 24px rows, a 12px cell in a 1320px box =
+ * 110 columns) and tmux stayed at 165. So the shrink gets a frame of its own to
+ * be observed in, and the restore gets the next one.
  *
- * And the arming is **inside** the frame, before the padding is cleared:
+ * Two deliveries means two local grid resizes, which `RESIZE_DEBOUNCE_MS`
+ * collapses into one `resize` on the wire.
+ *
+ * And the arming is **inside the second frame**, before the padding is cleared:
  * `noteLayoutChange` is one-shot, and of the two resizes only the restore
  * carries the true size -- the shrink is a box 1px narrower than the real one.
  * Arming on the shrink would spend the one-shot on a number that is wrong by
@@ -1552,8 +1559,10 @@ export function nudgeRemeasure(
   if (!host) return
   host.style.paddingRight = '1px'
   raf(() => {
-    session?.noteLayoutChange()
-    host.style.paddingRight = ''
+    raf(() => {
+      session?.noteLayoutChange()
+      host.style.paddingRight = ''
+    })
   })
 }
 

@@ -2468,19 +2468,30 @@ describe('nudgeRemeasure', () => {
     }
   }
 
-  it('widens the box for exactly one frame', () => {
+  it('holds the 1px for a whole frame before taking it back off', () => {
+    // MEASURED, in Chromium, with the revert one frame earlier than this: the
+    // font reached the element (--term-font-size: 20px, 24px rows, a 12px cell
+    // in a 1320px box = 110 columns) and tmux stayed at 165. A ResizeObserver
+    // is broadcast AFTER every animation-frame callback of the same frame, so
+    // a padding reverted in the next frame's callback is reverted before the
+    // observer has ever seen it: net zero change, no notification, no
+    // re-measure. The shrink needs a frame of its own to be observed in.
     const el = host()
     const f = frames()
     nudgeRemeasure(el, null, f.raf)
 
-    // A font size changes no box, so @wterm/dom's ResizeObserver never fires
-    // and the cell stays measured at the old size. This 1px is the only thing
-    // that makes it measure again.
     expect(el.style.paddingRight).toBe('1px')
     expect(f.pending).toBe(1)
 
+    // Frame one: the observer sees the narrower box. Nothing is undone yet.
+    f.run()
+    expect(el.style.paddingRight).toBe('1px')
+    expect(f.pending).toBe(1)
+
+    // Frame two: back to the real width, which the observer sees in its turn.
     f.run()
     expect(el.style.paddingRight).toBe('')
+    expect(f.pending).toBe(0)
   })
 
   it('arms the layout change on the restore, not on the shrink', () => {
@@ -2493,6 +2504,9 @@ describe('nudgeRemeasure', () => {
     const session = { noteLayoutChange: vi.fn() }
 
     nudgeRemeasure(el, session, f.raf)
+    expect(session.noteLayoutChange).not.toHaveBeenCalled()
+
+    f.run()
     expect(session.noteLayoutChange).not.toHaveBeenCalled()
 
     f.run()
@@ -2509,12 +2523,15 @@ describe('nudgeRemeasure', () => {
   })
 
   it('survives a session that is gone by the time the frame runs', () => {
-    // The terminal can unmount between the change and the frame -- the dialog
+    // The terminal can unmount between the change and the frames -- the dialog
     // is open over it, and closing the tab's session closes the socket.
     const el = host()
     const f = frames()
     nudgeRemeasure(el, null, f.raf)
-    expect(() => f.run()).not.toThrow()
+    expect(() => {
+      f.run()
+      f.run()
+    }).not.toThrow()
     expect(el.style.paddingRight).toBe('')
   })
 })

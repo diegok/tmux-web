@@ -95,7 +95,14 @@ it('nudges the box when the font size changes, and not on mount', async () => {
   expect(host.style.paddingRight).toBe('1px')
   expect(frames).toHaveLength(1)
 
-  // And it is one frame, not a pixel of padding left on the terminal forever.
+  // The shrink is held through a frame of its own -- that is the frame the
+  // ResizeObserver is broadcast in, and the reason this is two frames and not
+  // one. See `nudgeRemeasure`.
+  for (const frame of frames.splice(0)) frame()
+  expect(host.style.paddingRight).toBe('1px')
+  expect(frames).toHaveLength(1)
+
+  // And then it comes off: not a pixel of padding left on the terminal forever.
   for (const frame of frames.splice(0)) frame()
   expect(host.style.paddingRight).toBe('')
 })

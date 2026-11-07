@@ -16,6 +16,7 @@ import {
   TerminalSession,
   backoffDelay,
   isPaneId,
+  nudgeRemeasure,
   paneStorageKey,
   probeSession,
   shouldReconnect,
@@ -553,6 +554,32 @@ describe('resize', () => {
     // The resize goes out from `#opened` here, so it precedes the `where`.
     expect(controls(second).map((f) => f.json)).toEqual([
       { type: 'resize', cols: 120, rows: 50 },
+      { type: 'where' },
+    ])
+  })
+
+  it('re-sends the size chosen while the socket was down', () => {
+    // The font size is changed with no socket: the grid gets narrower, and the
+    // only record of that is the pair `noteResize` keeps. Nothing can go out
+    // until the socket returns, and what goes out then must be the size the
+    // user is looking at, not the one from before the change.
+    const { term } = makeSession()
+    term.start()
+    const first = MockWebSocket.last
+    first.open()
+    term.noteResize(120, 50)
+    vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+
+    first.emitClose(1006)
+    term.noteResize(96, 40)
+    vi.advanceTimersByTime(RESIZE_DEBOUNCE_MS)
+
+    vi.advanceTimersByTime(BACKOFF_BASE_MS)
+    const second = MockWebSocket.last
+    expect(second).not.toBe(first)
+    second.open()
+    expect(controls(second).map((f) => f.json)).toEqual([
+      { type: 'resize', cols: 96, rows: 40 },
       { type: 'where' },
     ])
   })
@@ -2416,5 +2443,78 @@ describe('input that never reached tmux', () => {
     openOn('%1')
 
     expect(lost).toEqual([])
+  })
+})
+
+// --- the nudge that makes wterm re-measure its cell -------------------------
+
+describe('nudgeRemeasure', () => {
+  /** An element whose only interesting part is the one property this touches. */
+  function host() {
+    return { style: { paddingRight: '' } } as unknown as HTMLElement
+  }
+
+  /** A `requestAnimationFrame` whose frame the test fires by hand. */
+  function frames() {
+    const queue: (() => void)[] = []
+    return {
+      raf: (cb: () => void) => void queue.push(cb),
+      get pending() {
+        return queue.length
+      },
+      run() {
+        for (const cb of queue.splice(0)) cb()
+      },
+    }
+  }
+
+  it('widens the box for exactly one frame', () => {
+    const el = host()
+    const f = frames()
+    nudgeRemeasure(el, null, f.raf)
+
+    // A font size changes no box, so @wterm/dom's ResizeObserver never fires
+    // and the cell stays measured at the old size. This 1px is the only thing
+    // that makes it measure again.
+    expect(el.style.paddingRight).toBe('1px')
+    expect(f.pending).toBe(1)
+
+    f.run()
+    expect(el.style.paddingRight).toBe('')
+  })
+
+  it('arms the layout change on the restore, not on the shrink', () => {
+    // The arming is one-shot, and of the two resizes this produces only the
+    // restore carries the true size: the shrink is 1px narrower than the box
+    // really is. Arming on the shrink would spend the one-shot on the wrong
+    // number and hand tmux a terminal one column short.
+    const el = host()
+    const f = frames()
+    const session = { noteLayoutChange: vi.fn() }
+
+    nudgeRemeasure(el, session, f.raf)
+    expect(session.noteLayoutChange).not.toHaveBeenCalled()
+
+    f.run()
+    expect(session.noteLayoutChange).toHaveBeenCalledTimes(1)
+  })
+
+  it('does nothing without a host', () => {
+    const f = frames()
+    const session = { noteLayoutChange: vi.fn() }
+    expect(() => nudgeRemeasure(null, session, f.raf)).not.toThrow()
+    // No box to nudge means no resize is coming, so the one-shot is not spent.
+    expect(f.pending).toBe(0)
+    expect(session.noteLayoutChange).not.toHaveBeenCalled()
+  })
+
+  it('survives a session that is gone by the time the frame runs', () => {
+    // The terminal can unmount between the change and the frame -- the dialog
+    // is open over it, and closing the tab's session closes the socket.
+    const el = host()
+    const f = frames()
+    nudgeRemeasure(el, null, f.raf)
+    expect(() => f.run()).not.toThrow()
+    expect(el.style.paddingRight).toBe('')
   })
 })

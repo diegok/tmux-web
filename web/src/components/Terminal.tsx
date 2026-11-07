@@ -60,6 +60,7 @@
  */
 
 import { Terminal as WTermView, useTerminal } from '@wterm/react'
+import { useTheme } from 'next-themes'
 import { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import type { CSSProperties, Ref } from 'react'
 import { toast } from 'sonner'
@@ -69,6 +70,12 @@ import { installLinkOpener } from '@/lib/links'
 import { TERM_FONT_STACK, monoFontReady } from '@/lib/monoFont'
 import type { FontLoader } from '@/lib/monoFont'
 import { Osc52Scanner } from '@/lib/osc52'
+import {
+  reportTerminalGrid,
+  rowHeightFor,
+  useTerminalSettings,
+  wtermThemeFor,
+} from '@/lib/terminalSettings'
 import { installSwipeScroll } from '@/lib/touchScroll'
 import { Transport } from '@/lib/transport'
 import type { TransportClose } from '@/lib/transport'
@@ -1512,6 +1519,50 @@ export function Terminal(props: TerminalProps) {
   return <TerminalBody {...props} />
 }
 
+/**
+ * Make `@wterm/dom` measure its cell again, by changing the one thing it
+ * watches: the size of its box.
+ *
+ * A font size is not a box. `_measureCharSize` runs at init and then only once
+ * per `ResizeObserver` delivery, and the observer watches the element's content
+ * box -- so raising `--term-font-size` leaves the cell measured at the old size
+ * and tmux told the old column count, with the text drawn at the new one. One
+ * pixel of padding is the smallest change that is a box change.
+ *
+ * **The revert is on the next frame, not in this one.** Reverted inside the
+ * same frame the observer sees no net change between deliveries and never
+ * fires at all, which is the whole mechanism gone. Two frames means two local
+ * grid resizes, which `RESIZE_DEBOUNCE_MS` collapses into one `resize` on the
+ * wire.
+ *
+ * And the arming is **inside** the frame, before the padding is cleared:
+ * `noteLayoutChange` is one-shot, and of the two resizes only the restore
+ * carries the true size -- the shrink is a box 1px narrower than the real one.
+ * Arming on the shrink would spend the one-shot on a number that is wrong by
+ * up to a column.
+ *
+ * Exported for its tests: what it does is four assertions, and none of them is
+ * reachable through the component.
+ */
+export function nudgeRemeasure(
+  host: HTMLElement | null,
+  session: { noteLayoutChange(): void } | null,
+  raf: (cb: () => void) => void = defaultRaf,
+): void {
+  if (!host) return
+  host.style.paddingRight = '1px'
+  raf(() => {
+    session?.noteLayoutChange()
+    host.style.paddingRight = ''
+  })
+}
+
+/** `requestAnimationFrame` where there is one; a timer under a test runner. */
+function defaultRaf(cb: () => void): void {
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(cb)
+  else setTimeout(cb, 16)
+}
+
 function TerminalBody({ session, label, url, className, onStatusChange, ref }: TerminalProps) {
   // `write` is bound as `paint`, and the rename is the guard: this hook's
   // `write` puts characters on the local canvas and sends nothing, while
@@ -1637,7 +1688,36 @@ function TerminalBody({ session, label, url, className, onStatusChange, ref }: T
   const handleResize = useCallback((cols: number, rows: number) => {
     size.current = { cols, rows }
     sessionRef.current?.noteResize(cols, rows)
+    // `cols` here is wterm's own count, before the clamp -- this callback is
+    // the only place both halves of the number exist, so it is the only place
+    // that can say whether the clamp is biting. The dialog reports the pair
+    // that was recorded, not the frame that was sent: a send is debounced,
+    // held under suppression, and dropped outright with the socket down.
+    reportTerminalGrid({
+      cols: Math.min(cols, GRID_MAX_COLS),
+      rows,
+      capped: cols > GRID_MAX_COLS,
+    })
   }, [])
+
+  // No terminal is attached any more, so the dialog says that rather than
+  // leaving the last size of a pane that is gone on screen.
+  useEffect(() => () => reportTerminalGrid(null), [])
+
+  const { fontSize, theme } = useTerminalSettings()
+  // The interface's own light/dark, which is what `Follow interface` follows.
+  const { resolvedTheme } = useTheme()
+
+  // Every size change but the first. The mount already measured in the right
+  // font, and a nudge there would buy a second resize frame for nothing.
+  const measured = useRef(false)
+  useEffect(() => {
+    if (!measured.current) {
+      measured.current = true
+      return
+    }
+    nudgeRemeasure(hostRef.current, sessionRef.current)
+  }, [fontSize])
 
   const live = status.phase === 'ready'
 
@@ -1669,7 +1749,17 @@ function TerminalBody({ session, label, url, className, onStatusChange, ref }: T
         // `.wterm` itself, so a rule of ours would have to out-specify it and
         // win the import order of a stylesheet pulled in from a module. An
         // inline custom property is beyond both arguments.
-        style={{ '--term-font-family': TERM_FONT_STACK } as CSSProperties}
+        // The row height travels with the font size and is never set alone:
+        // @wterm/dom draws a row as a hard pixel box that does not follow the
+        // font, so a size raised by itself is text clipped by its own row.
+        style={
+          {
+            '--term-font-family': TERM_FONT_STACK,
+            '--term-font-size': `${fontSize}px`,
+            '--term-row-height': `${rowHeightFor(fontSize)}px`,
+          } as CSSProperties
+        }
+        theme={wtermThemeFor(theme, resolvedTheme)}
       />
       <ConnectionPill
         status={status}

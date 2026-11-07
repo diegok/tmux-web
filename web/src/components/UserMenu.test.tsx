@@ -222,6 +222,34 @@ describe('<IdentityLines>', () => {
   })
 })
 
+describe('what the menu offers', () => {
+  // The items live in a Radix portal, and a portal renders to the empty string
+  // under `renderToStaticMarkup` -- the test below this one pins exactly that.
+  // So the menu's contents are read from the source, the same technique this
+  // file already uses against the Go handler, and what a real click does is
+  // `e2e/settings.spec.ts`.
+  const source = readFileSync(new URL('./UserMenu.tsx', import.meta.url), 'utf8')
+
+  it('offers Terminal settings and leaves Appearance alone', () => {
+    // BOTH, and in this order: `Appearance` is the *interface's* theme and this
+    // feature does not touch it -- a settings dialog that had swallowed it
+    // would have moved the app's light/dark into a terminal panel.
+    const devices = source.indexOf('Devices…')
+    const terminal = source.indexOf('Terminal…')
+    const appearance = source.indexOf('<AppearanceMenu />')
+    expect(devices).toBeGreaterThan(-1)
+    expect(terminal).toBeGreaterThan(devices)
+    expect(appearance).toBeGreaterThan(terminal)
+    expect(source).toContain('<TerminalSettingsDialog')
+  })
+
+  it('still has the three interface themes under Appearance', () => {
+    for (const item of ['value="system"', 'value="light"', 'value="dark"']) {
+      expect(source).toContain(item)
+    }
+  })
+})
+
 describe('<UserMenu>', () => {
   it('renders the footer button the way AppSidebar mounts it', () => {
     const markup = renderToStaticMarkup(

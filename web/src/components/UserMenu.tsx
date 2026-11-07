@@ -28,11 +28,21 @@
  * design is trying to avoid.
  */
 
-import { ChevronsUpDown, LogOut, Monitor, Moon, Smartphone, Sun, TriangleAlert } from 'lucide-react'
+import {
+  ChevronsUpDown,
+  LogOut,
+  Monitor,
+  Moon,
+  Smartphone,
+  SquareTerminal,
+  Sun,
+  TriangleAlert,
+} from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { useCallback, useEffect, useState } from 'react'
 
 import { DevicesDialog, DeviceApiError, revokeDevice } from '@/components/DevicesDialog'
+import { TerminalSettingsDialog } from '@/components/TerminalSettingsDialog'
 import type { TerminalPhase } from '@/components/Terminal'
 import {
   DropdownMenu,
@@ -197,6 +207,7 @@ export interface UserMenuProps {
 export function UserMenu({ connection, fetchImpl }: UserMenuProps) {
   const [identity, setIdentity] = useState<Identity | null>(null)
   const [devicesOpen, setDevicesOpen] = useState(false)
+  const [terminalOpen, setTerminalOpen] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
 
@@ -291,6 +302,10 @@ export function UserMenu({ connection, fetchImpl }: UserMenuProps) {
               <Smartphone aria-hidden />
               Devices…
             </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => setTerminalOpen(true)}>
+              <SquareTerminal aria-hidden />
+              Terminal…
+            </DropdownMenuItem>
             <AppearanceMenu />
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" disabled={signingOut} onSelect={() => void signOut()}>
@@ -307,6 +322,7 @@ export function UserMenu({ connection, fetchImpl }: UserMenuProps) {
         onSignOut={signOut}
         fetchImpl={fetchImpl}
       />
+      <TerminalSettingsDialog open={terminalOpen} onOpenChange={setTerminalOpen} />
     </SidebarMenu>
   )
 }
@@ -345,14 +361,17 @@ export function IdentityLines({
 }
 
 /**
- * Appearance, which is a theme and nothing else.
+ * Appearance: the **interface's** theme, and nothing else.
  *
- * The design lists "theme and font size". Font size is not here: the terminal's
- * cell size belongs to wterm's own configuration, and a control that changed
- * the app's text while leaving the terminal alone would be a setting that does
- * not do what its name says. Three radio items in the menu the user already
- * opened is also the whole feature -- a separate Appearance *panel* would be a
- * dialog with one control in it.
+ * Font size is not here, and the reason has changed. It used to be that there
+ * was nowhere sensible to put it; now there is, and it is `Terminal…` two items
+ * above, along with the terminal's own palette. What is still true is that the
+ * two are different settings: this one is the app's light/dark -- the sidebar,
+ * the dialogs, this menu -- and a control that changed the app's text while
+ * leaving the terminal alone would be a setting that does not do what its name
+ * says. Three radio items in the menu the user already opened remains the whole
+ * feature; a separate Appearance *panel* would be a dialog with one control in
+ * it.
  */
 function AppearanceMenu() {
   const { theme, setTheme } = useTheme()

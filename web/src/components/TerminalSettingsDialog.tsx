@@ -1,8 +1,8 @@
 /**
  * The terminal's settings: how big its text is, and what colours it draws in.
  *
- * Deliberately *not* the interface's theme -- that is `Appearance` in the same
- * menu, two items below, and it stays there. The two are different things: one
+ * Deliberately *not* the interface's theme -- that is `Appearance`, the next
+ * item down in the same menu, and it stays there. The two are different things: one
  * is the app's light/dark, the other is the palette of the thing drawing inside
  * the terminal, which ships its own and has exactly one light member.
  *

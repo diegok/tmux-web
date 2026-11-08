@@ -364,8 +364,8 @@ export function IdentityLines({
  * Appearance: the **interface's** theme, and nothing else.
  *
  * Font size is not here, and the reason has changed. It used to be that there
- * was nowhere sensible to put it; now there is, and it is `Terminal…` two items
- * above, along with the terminal's own palette. What is still true is that the
+ * was nowhere sensible to put it; now there is, and it is `Terminal…`, the item
+ * directly above, along with the terminal's own palette. What is still true is that the
  * two are different settings: this one is the app's light/dark -- the sidebar,
  * the dialogs, this menu -- and a control that changed the app's text while
  * leaving the terminal alone would be a setting that does not do what its name

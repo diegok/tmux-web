@@ -73,21 +73,38 @@ in the same breath.
    class of bug `GRID_MAX_COLS` was just written to kill.
 
    So, after the new size is committed: set `padding-right: 1px` on the host
-   (ours, not wterm's DOM), and clear it on the next animation frame. The
-   observer fires on the shrink, re-measures with the new font, resizes; fires
-   again on the restore and lands on the true width. Two local grid resizes,
-   one frame apart, collapsed into a single `resize` frame to tmux by the
-   150 ms debounce in `noteResize`. The revert is on the *next* frame on
-   purpose: reverted within the same frame the observer sees no net change and
-   never fires.
+   (ours, not wterm's DOM), hold it for a whole animation frame, and clear it in
+   the frame after. The observer fires on the shrink, re-measures with the new
+   font and resizes; if the 1px crossed a cell boundary it fires again on the
+   restore and lands on the true width. Two local grid resizes at most,
+   collapsed into a single `resize` frame to tmux by the 150 ms debounce in
+   `noteResize`.
 
-   The restore — not the shrink — arms `noteLayoutChange()`. The arming is
-   one-shot, and of the two resizes only the restore carries the true size; the
-   shrink is an artifact this app would rather tmux never heard. In practice
-   suppression is off while the dialog is open (`suppressesResize` fires only
-   for INPUT/TEXTAREA/contenteditable, and neither a radix select nor a radio
-   group is any of them), so this is insurance against a path that focuses a
-   text control, not the common case.
+   **Corrected while implementing, both halves measured.** The first draft of
+   this decision said "clear it on the next animation frame" and "the restore —
+   not the shrink — arms `noteLayoutChange()`". Both were wrong:
+
+   - A `ResizeObserver` is broadcast *after* every animation-frame callback of
+     the same frame, so a padding cleared in the next frame's callback is
+     cleared before the observer has ever looked: net zero change, nothing
+     fires, nothing re-measures. Measured in Chromium — the font reached the
+     element (20px, 24px rows, a 12px cell in a 1320px box = 110 columns) and
+     tmux stayed at 165. Hence the extra frame.
+   - `@wterm/dom` calls `onResize` only when the column or row count actually
+     changed. A font size moves both, so the delivery that fires is the one for
+     the *shrunk* box; by the restore the counts usually match what it already
+     has and nothing is delivered. An arming placed on the restore is therefore
+     spent on a resize that never comes and left standing for the whole
+     `LAYOUT_CHANGE_GRACE_MS` — a second in which a phone's keyboard rising
+     would be pushed to the shared window, which is the failure suppression
+     exists to prevent. The arming goes on **before the box moves at all**.
+
+   And suppression is *not* reliably off while the dialog is open: the theme
+   control is a native radio group, and `suppressesResize` treated every
+   `INPUT` as a keyboard. That predicate now excludes the input types that
+   raise no soft keyboard (radio, checkbox, button, range, …), which is the
+   more honest reading of what it is for. The arming remains the insurance for
+   any path that does focus a text control.
 
    Rejected: computing the cell ourselves and calling the public `resize()` —
    it leaves wterm's own `_charWidth`/`_rowHeight` stale, which silently breaks

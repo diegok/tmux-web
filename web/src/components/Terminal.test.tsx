@@ -613,6 +613,11 @@ function el(tagName: string, attrs: string[] = []) {
 /** The reply box, as the predicate sees it. */
 const REPLY_BOX = el('TEXTAREA')
 
+/** A focused control, with the `type` a real input element reports. */
+function input(type: string) {
+  return { tagName: 'INPUT', type, hasAttribute: () => false }
+}
+
 describe('resize suppression', () => {
   it('suppresses on a focused input outside the terminal, and not on one inside it', () => {
     // wterm's own input surface is a focusable element inside the terminal
@@ -631,6 +636,24 @@ describe('resize suppression', () => {
     expect(suppressesResize(el('BUTTON'), host)).toBe(false)
     expect(suppressesResize(el('BODY'), host)).toBe(false)
     expect(suppressesResize(null, host)).toBe(false)
+  })
+
+  it('does not suppress on a control that raises no keyboard', () => {
+    // The terminal's settings dialog is a native radio group, and the whole
+    // point of this predicate is "a soft keyboard is up and the viewport it
+    // shrank is not news for the shared window". A radio, a checkbox or a
+    // button raises no keyboard: picking a terminal palette must not hold the
+    // next genuine resize -- a rotation, a keyboard -- out of tmux.
+    const host = { contains: () => false }
+    for (const type of ['radio', 'checkbox', 'button', 'submit', 'reset', 'range', 'color', 'file']) {
+      expect(suppressesResize(input(type), host), `${type} suppressed`).toBe(false)
+    }
+    // And the ones that do raise one still suppress, including an `<input>`
+    // with no type at all, which is a text field.
+    for (const type of ['text', 'search', 'email', 'password', 'url', 'tel', 'number']) {
+      expect(suppressesResize(input(type), host), `${type} did not suppress`).toBe(true)
+    }
+    expect(suppressesResize(el('INPUT'), host)).toBe(true)
   })
 
   it('sends no resize while suppressed', () => {
@@ -2494,21 +2517,27 @@ describe('nudgeRemeasure', () => {
     expect(f.pending).toBe(0)
   })
 
-  it('arms the layout change on the restore, not on the shrink', () => {
-    // The arming is one-shot, and of the two resizes this produces only the
-    // restore carries the true size: the shrink is 1px narrower than the box
-    // really is. Arming on the shrink would spend the one-shot on the wrong
-    // number and hand tmux a terminal one column short.
+  it('arms the layout change before the first delivery, and exactly once', () => {
+    // @wterm/dom calls `onResize` only when the column or row count actually
+    // CHANGED (`wterm.js`: `if (newCols !== this.cols || newRows !== this.rows)`).
+    // A font size moves both, so the delivery that fires is the one for the
+    // SHRUNK box; by the time the padding is back the counts usually match what
+    // it already has and nothing is delivered at all.
+    //
+    // So the arming goes on before the box moves. Armed after the restore it
+    // would be spent on a resize that never comes and left standing for the
+    // whole of LAYOUT_CHANGE_GRACE_MS -- a second in which the next resize, a
+    // phone's keyboard rising, would be pushed to a window the owner's own
+    // client is attached to. That is the failure suppression exists to prevent.
     const el = host()
     const f = frames()
     const session = { noteLayoutChange: vi.fn() }
 
     nudgeRemeasure(el, session, f.raf)
-    expect(session.noteLayoutChange).not.toHaveBeenCalled()
+    expect(session.noteLayoutChange).toHaveBeenCalledTimes(1)
 
+    // And never a second time: one nudge is one layout change.
     f.run()
-    expect(session.noteLayoutChange).not.toHaveBeenCalled()
-
     f.run()
     expect(session.noteLayoutChange).toHaveBeenCalledTimes(1)
   })

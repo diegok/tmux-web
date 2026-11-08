@@ -360,6 +360,8 @@ export function parsePaneMessage(message: unknown): string | null {
  */
 export interface FocusTarget {
   tagName?: string
+  /** An `<input>`'s resolved type, which is `text` when the attribute is absent. */
+  type?: string
   hasAttribute?(name: string): boolean
 }
 
@@ -399,12 +401,34 @@ export interface FocusHost {
 export function suppressesResize(target: FocusTarget | null, host: FocusHost | null): boolean {
   if (!target) return false
   const textual =
-    target.tagName === 'INPUT' ||
+    (target.tagName === 'INPUT' && !NO_KEYBOARD_INPUTS.has(target.type ?? 'text')) ||
     target.tagName === 'TEXTAREA' ||
     (target.hasAttribute?.('contenteditable') ?? false)
   if (!textual) return false
   return !host?.contains(target)
 }
+
+/**
+ * The `<input>` types that raise no soft keyboard.
+ *
+ * The predicate above is about a keyboard covering half the viewport, not about
+ * the tag name -- and the terminal's own settings dialog is a native radio
+ * group, so without this list picking a palette would hold the next genuine
+ * resize out of tmux until focus moved. An `<input>` with no type is a text
+ * field, which is why the lookup defaults to `text` rather than to this set.
+ */
+const NO_KEYBOARD_INPUTS = new Set([
+  'button',
+  'checkbox',
+  'color',
+  'file',
+  'hidden',
+  'image',
+  'radio',
+  'range',
+  'reset',
+  'submit',
+])
 
 /**
  * The terminal socket's url for a base session.
@@ -1542,11 +1566,22 @@ export function Terminal(props: TerminalProps) {
  * Two deliveries means two local grid resizes, which `RESIZE_DEBOUNCE_MS`
  * collapses into one `resize` on the wire.
  *
- * And the arming is **inside the second frame**, before the padding is cleared:
- * `noteLayoutChange` is one-shot, and of the two resizes only the restore
- * carries the true size -- the shrink is a box 1px narrower than the real one.
- * Arming on the shrink would spend the one-shot on a number that is wrong by
- * up to a column.
+ * **The arming goes on before the box moves at all**, and that is not where it
+ * started either. `@wterm/dom` calls `onResize` only when the column or row
+ * count actually changed, and a font size moves both -- so the delivery that
+ * fires is the one for the *shrunk* box, and by the time the padding is back
+ * the counts usually match what it already has and nothing is delivered. A
+ * `noteLayoutChange` armed after the restore is therefore spent on a resize
+ * that never comes, and left standing for the whole of
+ * `LAYOUT_CHANGE_GRACE_MS`: a second in which the next resize -- a phone's
+ * keyboard rising -- would be pushed to a window the owner's own client is
+ * attached to, which is the failure suppression exists to prevent.
+ *
+ * Armed here, the shrink's delivery spends it, so the new size reaches tmux
+ * even if something in the dialog has the caret. If the restore does deliver
+ * as well (the 1px crossed a cell boundary) it is unarmed, and under
+ * suppression it is still *recorded* -- `noteResize` records before it skips --
+ * so lifting suppression sends the restored count rather than the shrunk one.
  *
  * Exported for its tests: what it does is four assertions, and none of them is
  * reachable through the component.
@@ -1557,10 +1592,10 @@ export function nudgeRemeasure(
   raf: (cb: () => void) => void = defaultRaf,
 ): void {
   if (!host) return
+  session?.noteLayoutChange()
   host.style.paddingRight = '1px'
   raf(() => {
     raf(() => {
-      session?.noteLayoutChange()
       host.style.paddingRight = ''
     })
   })

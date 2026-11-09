@@ -292,3 +292,109 @@ test('a touch stops a flick where it is touched', async ({ page, tmuxWeb }) => {
     'the pane kept gliding after it was touched',
   ).toBe(atTouch)
 })
+
+// --- the other regime --------------------------------------------------------
+//
+// Every test above runs over a shell pane at a prompt, which is the case tmux
+// handles ITSELF: it puts the pane into copy-mode and scrolls its own table, 5
+// lines per notch. That is one of two regimes, and it is not the one this app
+// exists to drive. With the pane on the alternate screen or tracking the mouse
+// -- which every coding agent does, both at once -- tmux forwards the notch to
+// the application instead, and the application scrolls by its own quantum. The
+// gesture used to assume 5 there too, so a swipe moved the content a FIFTH as
+// far as the finger.
+//
+// The receiver here is `cat -v` on the alternate screen with tracking on: a
+// program with no agent in it, whose quantum is therefore
+// DEFAULT_APP_LINES_PER_NOTCH, and which prints one visible `^[[<64;c;rM` per
+// report it is handed -- so the reports can be counted off the screen rather
+// than inferred from how far something moved.
+test('a swipe over an application sends it a notch per row times its quantum', async ({
+  page,
+  tmuxWeb,
+}) => {
+  test.setTimeout(90_000)
+  await enroll(page, tmuxWeb, 'appregime')
+
+  // stty raw -echo so `cat` is handed each report as it arrives rather than a
+  // line at a time, and so the tty does not echo the escapes back into the
+  // screen it is being counted off.
+  tmuxWeb.tmux(
+    'send-keys',
+    '-t',
+    pane,
+    String.raw`stty raw -echo; printf '\033[?1049h\033[?1003h\033[?1006h'; cat -v`,
+    'Enter',
+  )
+  await expect
+    .poll(() => ask(tmuxWeb, '#{alternate_on}#{mouse_any_flag}'), {
+      message: 'the pane never turned on the alternate screen and mouse tracking',
+      timeout: 15_000,
+    })
+    .toBe('11')
+  // `cat` is in no quantum table, so the gain is the default three.
+  expect(ask(tmuxWeb, '#{pane_current_command}')).toBe('cat')
+
+  // The facts have to reach the BROWSER before the swipe, and they ride the
+  // snapshot poll -- so this waits for the wire rather than for a timeout, and
+  // is an end-to-end check of the two fields at the same time.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(async () => {
+          const res = await fetch('/api/snapshot', { credentials: 'same-origin' })
+          const body = (await res.json()) as {
+            panes?: { alternateOn?: boolean; mouseAnyFlag?: boolean }[]
+          }
+          return (body.panes ?? []).some((p) => p.alternateOn === true && p.mouseAnyFlag === true)
+        }),
+      { message: 'the daemon never published the pane as being on the alternate screen' },
+    )
+    .toBe(true)
+
+  // Measured, not assumed: the terminal settings feature makes the row height
+  // variable, and the whole gain is a multiple of it.
+  const rowHeight = await page.evaluate(
+    () => document.querySelector('.term-row')!.getBoundingClientRect().height,
+  )
+  expect(rowHeight).toBeGreaterThan(0)
+
+  const TRAVEL_PX = 300
+  await slowDrag(page, 120, 120 + TRAVEL_PX)
+
+  // One report per notch, counted off the screen.
+  //
+  // The prediction is exact rather than approximate, and the ±1 is for a
+  // dropped sample rather than for slack: the travel buys
+  // `floor(TRAVEL / notchPx)` notches and the gesture emits ONE MORE the moment
+  // it engages -- the priming notch, which is what takes the first visible
+  // movement from 180px of travel down to 95px. At a 17px row that is 6.
+  //
+  // The band has to be tight enough to fail on the bug this exists for: tmux's
+  // own five lines a notch would buy `floor(300 / 85) + 1` = 4 here, which a
+  // looser lower bound would have let through.
+  const notchPx = rowHeight * 3
+  const expected = Math.floor(TRAVEL_PX / notchPx) + 1
+  const atFiveLines = Math.floor(TRAVEL_PX / (rowHeight * 5)) + 1
+  expect(
+    expected - 1,
+    `this fixture cannot tell the two gains apart: ${expected} notches at the ` +
+      `application's quantum against ${atFiveLines} at tmux's`,
+  ).toBeGreaterThan(atFiveLines)
+
+  const count = () => (tmuxWeb.tmux('capture-pane', '-p', '-t', pane).match(/<64;/g) ?? []).length
+  await expect
+    .poll(count, {
+      message: `a ${TRAVEL_PX}px drag should send ${expected} notches to the application`,
+      timeout: 15_000,
+    })
+    .toBeGreaterThanOrEqual(expected - 1)
+  const reports = count()
+  expect(
+    reports,
+    `the application received ${reports} notches for ${TRAVEL_PX}px of finger: at ` +
+      `${rowHeight}px a row and 3 lines a notch it should be ${expected}. Five lines a ` +
+      `notch -- tmux's quantum, which is what this assumed before the gain followed ` +
+      `the receiver -- would be ${atFiveLines}`,
+  ).toBeLessThanOrEqual(expected + 1)
+})

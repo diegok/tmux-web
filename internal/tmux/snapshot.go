@@ -252,7 +252,7 @@ var labelField = sanitizedField(LabelOption)
 // last so that the damage a raw byte can do is bounded by arithmetic rather
 // than by the sanitiser holding: a 0x1f only adds fields past the end, which
 // ParseRows rejoins, and a newline only truncates the last field, leaving the
-// twelve before it -- the whole identity of the pane -- already complete on the
+// sixteen before it -- the whole identity of the pane -- already complete on the
 // line. Any other position turns both into a shifted or unparseable record,
 // which is a pane missing from the sidebar.
 var formatFields = []string{

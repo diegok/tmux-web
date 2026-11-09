@@ -7,6 +7,7 @@ import {
   getLinesPerNotch,
   linesPerNotch,
   reportScrollTarget,
+  scrollTargetFor,
   resetScrollGain,
 } from './scrollGain'
 import type { ScrollTarget } from './scrollGain'
@@ -69,6 +70,45 @@ describe('linesPerNotch', () => {
     // reported -- including a tree-mode on top of an agent -- and the copy mode
     // this app's own button has just asked for and not yet seen confirmed.
     expect(linesPerNotch({ ...agent, inMode: true })).toBe(TMUX_LINES_PER_NOTCH)
+  })
+})
+
+describe('scrollTargetFor', () => {
+  const agentPane = {
+    command: 'claude',
+    paneMode: '',
+    alternateOn: true,
+    mouseAnyFlag: true,
+  }
+
+  it('has nothing to report for no pane', () => {
+    expect(scrollTargetFor(null, false)).toBeNull()
+  })
+
+  it('reads a pane in no mode as the application receiving', () => {
+    expect(linesPerNotch(scrollTargetFor(agentPane, false))).toBe(1)
+  })
+
+  // THE UNRECOVERABLE DIRECTION, and the reason this mapping is a function
+  // rather than four lines inside a component. `inCopyMode` is a closed set of
+  // copy-mode and view-mode, so the app's own decided value is FALSE for a
+  // tree-mode or a clock-mode -- and a tree-mode on top of an agent pane still
+  // reports alternate_on = 1. Reading only the decided value would call that
+  // pane forwarded, take the application's quantum of 1, and scroll five times
+  // too far through the one thing tmux is scrolling itself.
+  it.each(['copy-mode', 'view-mode', 'tree-mode', 'clock-mode', 'options-mode'])(
+    'reads an agent pane in %s as tmux receiving',
+    (paneMode) => {
+      expect(linesPerNotch(scrollTargetFor({ ...agentPane, paneMode }, false))).toBe(
+        TMUX_LINES_PER_NOTCH,
+      )
+    },
+  )
+
+  // The other half: the poll is up to 1.5s behind this app's own copy-mode
+  // button, so the click's answer has to count before the field carries it.
+  it('reads a pane the app has just put into copy mode as tmux receiving', () => {
+    expect(linesPerNotch(scrollTargetFor(agentPane, true))).toBe(TMUX_LINES_PER_NOTCH)
   })
 })
 

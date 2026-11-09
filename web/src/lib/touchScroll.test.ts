@@ -9,6 +9,7 @@ import {
   SWIPE_THRESHOLD_PX,
   SwipeScroller,
   TMUX_LINES_PER_NOTCH,
+  framesIn,
   pxPerNotch,
 } from './touchScroll'
 
@@ -346,6 +347,36 @@ describe('the glide\u2019s notches, capped', () => {
     // The glide, in both directions.
     expect(s.glide(5 * 17)).toBe(-1)
     expect(s.glide(-5 * 17)).toBe(1)
+  })
+
+  // The cap is per 16ms of glide, NOT per call, and this is the invariant
+  // `Glide.step` already promises in its own words: "a phone that drops frames
+  // must not scroll a different distance from one that does not". It keeps that
+  // promise in PIXELS. Counting the cap per callback would break it in NOTCHES,
+  // which is the thing the user actually sees -- measured by simulation, a
+  // 17px notch throws 44 notches at 60fps against 27 at 30fps, so a phone
+  // repainting a busy agent pane would throw a third shorter.
+  it('throws the same distance however often the frames arrive', () => {
+    const thrown = (notchPx: number, dtMs: number): number => {
+      const scroller = new SwipeScroller()
+      scroller.start(100, 100, notchPx)
+      scroller.move(100, 100 + SWIPE_THRESHOLD_PX)
+      const g = new Glide()
+      g.start(MAX_FLICK_PX_PER_MS)
+      let notches = 0
+      while (g.moving) {
+        notches += Math.abs(scroller.glide(g.step(dtMs), framesIn(dtMs)))
+      }
+      return notches
+    }
+    for (const notchPx of [17, 51, 85]) {
+      const fast = thrown(notchPx, 16)
+      const slow = thrown(notchPx, 33)
+      expect(
+        Math.abs(fast - slow),
+        `a ${notchPx}px notch throws ${fast} notches at 60fps and ${slow} at 30fps`,
+      ).toBeLessThanOrEqual(2)
+    }
   })
 })
 

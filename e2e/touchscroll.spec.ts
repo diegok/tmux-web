@@ -352,6 +352,16 @@ test('a swipe over an application sends it a notch per row times its quantum', a
     )
     .toBe(true)
 
+  // And then the last hop, which the fetch above does NOT prove: that poll read
+  // the daemon's cache, and the app runs a 1.5s poll of its own that nothing
+  // here pushes. The gain is latched once, at touchstart, off the app's own
+  // tree -- so a swipe that started between the two polls would take tmux's
+  // five lines and fail this test for a reason that is not a bug. The
+  // breadcrumb renders `located.pane.command`, and the command only becomes
+  // `cat` after the `printf` that set both facts has already run, so seeing it
+  // proves the row the gain is read from is the row with the facts in it.
+  await expect(page.getByLabel('Location')).toContainText('cat')
+
   // Measured, not assumed: the terminal settings feature makes the row height
   // variable, and the whole gain is a multiple of it.
   const rowHeight = await page.evaluate(

@@ -130,6 +130,21 @@ export const GLIDE_STOP_PX_PER_MS = 0.02
 const GLIDE_FRAME_MS = 16
 
 /**
+ * How many of those frames an elapsed interval is worth, at least one.
+ *
+ * The glide's notch cap is quoted per frame, and a frame here is a DURATION,
+ * not a callback -- the same way `GLIDE_FRICTION_PER_FRAME` is. Rounded rather
+ * than floored so a 25ms callback is worth 2 and not 1: a phone that drops
+ * frames must not throw the pane a shorter distance than one that does not,
+ * which is the invariant `Glide.step` keeps in pixels and this keeps in
+ * notches.
+ */
+export function framesIn(dtMs: number): number {
+  if (!Number.isFinite(dtMs) || dtMs <= 0) return 1
+  return Math.max(1, Math.round(dtMs / GLIDE_FRAME_MS))
+}
+
+/**
  * What is left of the speed after each 16ms of gliding. 0.94 per frame decays a
  * flick to a tenth in about 600ms, which is roughly how long a thrown list
  * takes to settle on a phone and short enough that a second swipe is never
@@ -289,7 +304,12 @@ export class SwipeScroller {
    * priming notch: the gesture has already been recognised, and a glide is its
    * continuation rather than a new gesture.
    *
-   * AT MOST ONE NOTCH, and the overflow is discarded rather than carried. The
+   * AT MOST `maxNotches`, and the overflow is discarded rather than carried.
+   * One per 16ms of glide, which the caller computes with `framesIn` -- per
+   * elapsed time and not per call, or a phone that drops frames would throw
+   * the pane a third less far than one that does not.
+   *
+   * The
    * finger's own notches are never capped -- see `move` -- and the asymmetry is
    * measured. A fast glide at a 17px notch asks for ~94 notches it cannot
    * deliver inside its own ~600ms lifetime, so carrying them would keep
@@ -301,11 +321,13 @@ export class SwipeScroller {
    * accelerator. The cap cannot bite a drag: one notch per frame at 17px is
    * 1018px/s of finger.
    */
-  glide(px: number): number {
+  glide(px: number, maxNotches = 1): number {
     if (this.#rejected) return 0
     this.#pending += px
     const notches = this.#drain()
-    return notches === 0 ? 0 : Math.sign(notches)
+    const cap = maxNotches >= 1 ? maxNotches : 1
+    if (Math.abs(notches) <= cap) return notches
+    return Math.sign(notches) * cap
   }
 
   /** Turn accumulated travel into whole notches, keeping the remainder. */
@@ -435,7 +457,9 @@ export function installSwipeScroll(
     glideAt = now
     const px = glide.step(dt)
     if (px !== 0) {
-      owed += scroller.glide(px)
+      // `framesIn(dt)`, not 1: this callback stands in for however many 16ms
+      // frames have actually passed, and the cap is quoted per frame.
+      owed += scroller.glide(px, framesIn(dt))
       flush()
     }
     if (glide.moving) glideFrame = requestAnimationFrame(stepGlide)

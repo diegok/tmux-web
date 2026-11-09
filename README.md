@@ -139,16 +139,24 @@ connections rather than only failing the next request.
   measured, a pane in no mode needed 180px of travel before one line moved,
   because tmux spends an entire five-line notch entering copy mode. A flick
   keeps going after the finger leaves and slows to a stop, bounded by the speed
-  clamp and the friction at about 94 lines; a drag of the same distance stops
-  where it is put, and a touch stops a flick in its tracks. Pinch-zoom over the
+  clamp and the friction at about 94 lines of tmux's scrollback; a drag of the
+  same distance stops where it is put, and a touch stops a flick in its tracks. Pinch-zoom over the
   terminal is given up to get any of this, deliberately: without claiming the
   vertical gesture the browser keeps it for panning a page that has nowhere to
   pan.
 
-  In a pane whose program asks for the mouse — `claude` and `pi` both do, and
-  tmux reports it as `mouse_any_flag` — tmux hands the wheel to that program
-  instead of entering copy mode, so a swipe there scrolls the agent's own view
-  and how far is the agent's decision, not this app's.
+  In a pane whose program asks for the mouse, or draws on the alternate screen —
+  every coding agent does both, and tmux reports them as `mouse_any_flag` and
+  `alternate_on` — tmux hands the wheel to that program instead of entering copy
+  mode, so a swipe there scrolls the agent's own view rather than tmux's
+  scrollback. **How far one notch goes is then the program's quantum, not
+  tmux's five lines**, and the swipe uses it: measured, one line in `claude` and
+  `pi`, three in `opencode`, three assumed for anything unmeasured. Before that
+  it assumed tmux's five everywhere, so a swipe over an agent moved the text a
+  fifth as far as the finger — smooth over a shell, heavy over the thing you
+  were actually reading. The two tmux facts ride the same poll as everything
+  else, so a pane that has just changed regime gives the previous gain for one
+  gesture.
 - **Select in a pane and it goes to your clipboard.** tmux already sends every
   copy to whatever is drawing it, as OSC 52, and the browser was throwing it
   away. Now it does not, so a mouse drag — or a copy made in copy mode, on a

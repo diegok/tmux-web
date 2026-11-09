@@ -135,6 +135,53 @@ export function linesPerNotch(target: ScrollTarget | null): number {
   return TMUX_LINES_PER_NOTCH
 }
 
+/**
+ * The pane fields this module needs, which is a subset of `PaneNode`.
+ *
+ * Structural rather than imported so that the gain does not depend on the
+ * snapshot's types -- and so this function can be tested without a tree.
+ */
+export interface ScrollTargetPane {
+  command: string
+  /** The raw `#{pane_mode}` off the poll: "" for a pane in no mode at all. */
+  paneMode: string
+  alternateOn: boolean
+  mouseAnyFlag: boolean
+}
+
+/**
+ * Turn the attached pane and the app's own copy-mode answer into a target.
+ *
+ * The `inMode` half is BOTH of its sources, and neither is redundant:
+ *
+ *   - `paneMode !== ""` is every tmux mode, not just the copy ones. A
+ *     `tree-mode` or a `clock-mode` on top of an agent is tmux's to scroll too,
+ *     and `inCopyMode` is a closed set of `copy-mode` and `view-mode`, so the
+ *     decided value is false for both of those while `alternate_on` is still 1.
+ *     Without this clause such a pane would take the application's quantum and
+ *     scroll FIVE TIMES TOO FAR -- the unrecoverable direction.
+ *   - `inCopyMode` is what this app has decided, which the field cannot know
+ *     yet: the poll is up to 1.5s behind the header's own copy-mode button, and
+ *     an agent pane put into copy mode from that button is still
+ *     `alternate_on = 1`.
+ *
+ * A lifted function rather than four lines inside the component because a rule
+ * written inside a component in this app is a rule no test in this suite can
+ * reach -- the reason `copyMode.ts` exists at all.
+ */
+export function scrollTargetFor(
+  pane: ScrollTargetPane | null,
+  inCopyMode: boolean,
+): ScrollTarget | null {
+  if (pane === null) return null
+  return {
+    command: pane.command,
+    inMode: pane.paneMode !== '' || inCopyMode,
+    alternateOn: pane.alternateOn,
+    mouseAnyFlag: pane.mouseAnyFlag,
+  }
+}
+
 // --- the store ---------------------------------------------------------------
 
 let reported: ScrollTarget | null = null

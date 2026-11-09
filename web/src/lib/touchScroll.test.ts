@@ -44,6 +44,20 @@ describe('pxPerNotch', () => {
   it.each([0, -1, Number.NaN])('falls back rather than returning zero for %s', (h) => {
     expect(pxPerNotch(h)).toBe(FALLBACK_ROW_HEIGHT_PX * TMUX_LINES_PER_NOTCH)
   })
+
+  it('sizes a notch for the receiver, and for the font', () => {
+    // Not tmux's five: a notch forwarded to an application moves that
+    // application's own lines, measured at 1 for claude and pi and 3 for
+    // opencode. See `scrollGain.ts`.
+    expect(pxPerNotch(17, 1)).toBe(17)
+    expect(pxPerNotch(17, 3)).toBe(51)
+    // The terminal settings feature makes the row variable: 20px text must
+    // move 20px rows. The two features meet here for the first time.
+    expect(pxPerNotch(20, 1)).toBe(20)
+    // Before the terminal has laid out, the fallback row times the RECEIVER's
+    // lines -- not tmux's five.
+    expect(pxPerNotch(0, 1)).toBe(FALLBACK_ROW_HEIGHT_PX)
+  })
 })
 
 describe('a tap', () => {
@@ -310,6 +324,28 @@ describe('gestures that are not a scroll', () => {
     s.reject()
     expect(s.move(100, 400 + 10 * NOTCH)).toBe(0)
     expect(s.engaged).toBe(false)
+  })
+})
+
+describe('the glide\u2019s notches, capped', () => {
+  // Once the gain can be 17px instead of 85px, the same flick asks for ~94
+  // notches instead of 19 -- more than it can deliver inside its own ~600ms
+  // lifetime, so without a cap it would go on scrolling well after the gesture
+  // visibly stopped. Capping and discarding the overflow lands every regime in
+  // the same place without modelling anybody's accelerator, and it is measured
+  // that a tight burst is worth LESS than the same notches spread over frames
+  // (16 lines against 19), so the queued ones were never worth their count.
+  it('pays the finger every notch it earns and the glide one per frame', () => {
+    const s = new SwipeScroller()
+    s.start(100, 100, 17)
+    s.move(100, 100 + SWIPE_THRESHOLD_PX)
+    // A drag that crosses four notches in one move delivers four: one notch
+    // per frame at 17px is 1018px/s of finger, past any thumb, so a cap on the
+    // finger could only ever lag a fast drag.
+    expect(Math.abs(s.move(100, 100 + SWIPE_THRESHOLD_PX + 4 * 17))).toBe(4)
+    // The glide, in both directions.
+    expect(s.glide(5 * 17)).toBe(-1)
+    expect(s.glide(-5 * 17)).toBe(1)
   })
 })
 

@@ -58,6 +58,7 @@ import { Toaster } from '@/components/ui/sonner'
 import { copyControl } from '@/lib/copyMode'
 import type { CopyFlip } from '@/lib/copyMode'
 import { newSessionPrompt, runManage } from '@/lib/manage'
+import { reportScrollTarget } from '@/lib/scrollGain'
 import type { ManageAction, MenuIntent } from '@/lib/manage'
 import { useTabBadge } from '@/lib/tabBadge'
 import {
@@ -549,6 +550,37 @@ export default function App() {
    */
   const [copyFlip, setCopyFlip] = useState<CopyFlip | null>(null)
   const copy = copyControl(located?.pane.paneMode ?? '', activePane, copyFlip, Date.now())
+
+  /**
+   * Tell the swipe how far one wheel notch goes in the attached pane.
+   *
+   * Reported from here because this is where both halves are: the pane's two
+   * tmux facts, and the mode this app has DECIDED it is in. The mode half is
+   * `copy.inCopy` and not the raw `#{pane_mode}` for one reason -- an agent
+   * pane put into copy mode from the button above is still `alternate_on = 1`,
+   * so a raw read would call it forwarded, take the application's quantum, and
+   * scroll five times too far through the one thing tmux is now scrolling
+   * itself. The poll is up to 1.5s behind the click; `copyControl` is not.
+   *
+   * `paneMode !== ''` is the other half of the same guard, and it is wider than
+   * copy mode on purpose: a `tree-mode` or a `clock-mode` on top of an agent is
+   * tmux's to scroll too, and `copy.inCopy` is false for both.
+   *
+   * `copy` is one of two frozen objects returned by reference, so `copy.inCopy`
+   * is stable from render to render and this effect runs when the pane does.
+   */
+  useEffect(() => {
+    reportScrollTarget(
+      located
+        ? {
+            command: located.pane.command,
+            inMode: located.pane.paneMode !== '' || copy.inCopy,
+            alternateOn: located.pane.alternateOn,
+            mouseAnyFlag: located.pane.mouseAnyFlag,
+          }
+        : null,
+    )
+  }, [located, copy.inCopy])
 
   /**
    * Take that action, and flip the label without waiting for the poll.

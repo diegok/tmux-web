@@ -35,6 +35,15 @@
  * `WheelUpPane` could make it anything -- and getting it wrong changes how fast
  * the content moves, never whether it moves.
  *
+ * AND IT IS NOT ALWAYS FIVE. Those five lines are tmux's copy-mode table, and
+ * tmux only scrolls that table when the pane is in a mode or has neither the
+ * alternate screen nor mouse tracking on. Otherwise it forwards the notch to
+ * the application, which scrolls by its own quantum -- 1 line in `claude` and
+ * `pi`, 3 in `opencode`, all measured -- so a swipe over an agent pane moved
+ * the content a FIFTH as far as the finger. Which of the two applies is
+ * `scrollGain.ts`'s decision; this module takes the answer as a number, through
+ * the getter `installSwipeScroll` is given, and multiplies the row by it.
+ *
  * ## The priming notch, and the dead zone it removes
  *
  * 1:1 is right in the steady state and was wrong at the start. MEASURED on a
@@ -83,10 +92,20 @@ export const SWIPE_THRESHOLD_PX = 12
 /** Row height to assume when the terminal has not laid out yet. */
 export const FALLBACK_ROW_HEIGHT_PX = 17
 
-/** One notch of content, in CSS pixels, for a row of the given height. */
-export function pxPerNotch(rowHeight: number): number {
+/**
+ * One notch of content, in CSS pixels: a row times the lines the RECEIVER
+ * scrolls for one notch.
+ *
+ * `linesPerNotch` defaults to tmux's five, which is right only while tmux is
+ * the thing handling the wheel. `installSwipeScroll` passes what
+ * `scrollGain.ts` decided for the attached pane, which is 1 in `claude` and
+ * `pi` and 3 in `opencode` -- and getting it wrong changes how fast the content
+ * moves, never whether it moves.
+ */
+export function pxPerNotch(rowHeight: number, linesPerNotch = TMUX_LINES_PER_NOTCH): number {
   const h = rowHeight > 0 ? rowHeight : FALLBACK_ROW_HEIGHT_PX
-  return h * TMUX_LINES_PER_NOTCH
+  const lines = linesPerNotch > 0 ? linesPerNotch : TMUX_LINES_PER_NOTCH
+  return h * lines
 }
 
 /**
@@ -269,11 +288,24 @@ export class SwipeScroller {
    * Feed pixels straight into the accumulator, bypassing the threshold and the
    * priming notch: the gesture has already been recognised, and a glide is its
    * continuation rather than a new gesture.
+   *
+   * AT MOST ONE NOTCH, and the overflow is discarded rather than carried. The
+   * finger's own notches are never capped -- see `move` -- and the asymmetry is
+   * measured. A fast glide at a 17px notch asks for ~94 notches it cannot
+   * deliver inside its own ~600ms lifetime, so carrying them would keep
+   * scrolling after the gesture visibly stopped; and a tight burst is worth
+   * LESS to the receiving application than the same notches spread over frames
+   * (10 notches moved 16 lines back to back against 19 at 10-30ms spacing --
+   * input coalescing), so the queued ones were never worth their count.
+   * Discarding lands every regime in the same place without modelling anybody's
+   * accelerator. The cap cannot bite a drag: one notch per frame at 17px is
+   * 1018px/s of finger.
    */
   glide(px: number): number {
     if (this.#rejected) return 0
     this.#pending += px
-    return this.#drain()
+    const notches = this.#drain()
+    return notches === 0 ? 0 : Math.sign(notches)
   }
 
   /** Turn accumulated travel into whole notches, keeping the remainder. */
@@ -334,7 +366,10 @@ export class SwipeScroller {
  * `touch-action` is set too: a listener that leaves the gesture alone does not
  * get it, because the browser takes it for panning.
  */
-export function installSwipeScroll(host: HTMLElement): () => void {
+export function installSwipeScroll(
+  host: HTMLElement,
+  linesPerNotch: () => number,
+): () => void {
   const scroller = new SwipeScroller()
 
   /** The element @wterm listens on, looked up per use: it is remounted. */
@@ -447,7 +482,11 @@ export function installSwipeScroll(host: HTMLElement): () => void {
     }
     active = event.pointerId
     host.setPointerCapture(event.pointerId)
-    scroller.start(event.clientX, event.clientY, pxPerNotch(rowHeight()))
+    // Both read HERE, at the start of the gesture, so one swipe keeps one gain
+    // from beginning to end -- and a getter rather than a number because these
+    // listeners are installed once, with no deps, and must not be torn down
+    // mid-gesture to learn that the attached pane changed.
+    scroller.start(event.clientX, event.clientY, pxPerNotch(rowHeight(), linesPerNotch()))
     lastY = event.clientY
     prevY = event.clientY
     lastT = event.timeStamp

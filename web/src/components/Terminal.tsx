@@ -76,6 +76,7 @@ import {
   useTerminalSettings,
   wtermThemeFor,
 } from '@/lib/terminalSettings'
+import { getLinesPerNotch } from '@/lib/scrollGain'
 import { installSwipeScroll } from '@/lib/touchScroll'
 import { Transport } from '@/lib/transport'
 import type { TransportClose } from '@/lib/transport'
@@ -1645,7 +1646,10 @@ function TerminalBody({ session, label, url, className, onStatusChange, ref }: T
   // event that entered copy-mode immediately. See lib/touchScroll.ts.
   useEffect(() => {
     const el = hostRef.current
-    return el ? installSwipeScroll(el) : undefined
+    // The gain comes through a getter, not a dep: these listeners are installed
+    // once and must survive the attached pane changing regime mid-gesture. What
+    // decides the number is `scrollGain.ts`, from what `App` reports.
+    return el ? installSwipeScroll(el, getLinesPerNotch) : undefined
   }, [])
 
   const socketUrl = url ?? terminalUrl(session)

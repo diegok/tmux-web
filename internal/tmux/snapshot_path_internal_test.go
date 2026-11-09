@@ -417,7 +417,7 @@ func TestSnapshotHostilePaneDirectoryCannotRemoveAPane(t *testing.T) {
 	// stops covering the newline, this is the shape that puts a pane in the
 	// sidebar that does not exist.
 	forged := "\n" + strings.Join([]string{
-		snapshotTag, "grp", "$9", "sess", "%99", "0", "", "@9", "0", "w", "1", "sh", "t", "x",
+		snapshotTag, "grp", "$9", "sess", "%99", "0", "", "@9", "0", "w", "1", "sh", "t", "", "0", "0", "forged",
 	}, Sep)
 
 	for _, tc := range []struct{ name, dir string }{

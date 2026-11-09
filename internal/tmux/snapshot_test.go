@@ -28,12 +28,12 @@ func rec(fields ...string) string {
 // every caller varies the pane, and two panes reported with the same window
 // index are in the same window, so they must carry the same id.
 func goodRow(paneID, paneIndex, windowIndex string) string {
-	return rec("work", "$0", "work", paneID, paneIndex, "", "@"+windowIndex, windowIndex, "api", "1", "claude", "a title", "", "")
+	return rec("work", "$0", "work", paneID, paneIndex, "", "@"+windowIndex, windowIndex, "api", "1", "claude", "a title", "", "0", "0", "")
 }
 
 func TestParseRows(t *testing.T) {
 	t.Run("one well formed row", func(t *testing.T) {
-		got, dropped, err := ParseRows(rec("work", "$0", "work", "%3", "0", "", "@1", "1", "api", "1", "claude", "a title", "", ""))
+		got, dropped, err := ParseRows(rec("work", "$0", "work", "%3", "0", "", "@1", "1", "api", "1", "claude", "a title", "", "0", "0", ""))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -58,7 +58,7 @@ func TestParseRows(t *testing.T) {
 	// Pins the false side of both booleans: a parser hardcoding either to true
 	// passes every other subtest.
 	t.Run("app owned row with an inactive pane", func(t *testing.T) {
-		got, dropped, err := ParseRows(rec("work", "$0", "work", "%3", "2", "1", "@0", "0", "w", "0", "zsh", "t", "", ""))
+		got, dropped, err := ParseRows(rec("work", "$0", "work", "%3", "2", "1", "@0", "0", "w", "0", "zsh", "t", "", "0", "0", ""))
 		if err != nil || dropped != 0 || len(got) != 1 {
 			t.Fatalf("ParseRows = %+v, %d, %v", got, dropped, err)
 		}
@@ -114,8 +114,8 @@ func TestParseRows(t *testing.T) {
 			// record takes when a newline elsewhere splits it.
 			rec("work", "$0", "work", "%6", "0", "", "@0", "0", "w", "1", "zsh"),
 			// Numeric indices, so that only the field count can reject it.
-			rec("work", "$0", "work", "%9", "0", "", "@0", "notanint", "w", "1", "zsh", "t", "", ""), // bad window index
-			rec("work", "$0", "work", "%8", "notanint", "", "@0", "0", "w", "1", "zsh", "t", "", ""), // bad pane index
+			rec("work", "$0", "work", "%9", "0", "", "@0", "notanint", "w", "1", "zsh", "t", "", "0", "0", ""), // bad window index
+			rec("work", "$0", "work", "%8", "notanint", "", "@0", "0", "w", "1", "zsh", "t", "", "0", "0", ""), // bad pane index
 			goodRow("%2", "1", "0"),
 		}, "\n")
 		got, dropped, err := ParseRows(out)
@@ -166,7 +166,7 @@ func TestParseRows(t *testing.T) {
 		// tmux keeps the pre-rename name in session_group, so a fixture where they
 		// match would pass against an implementation that reads the group key --
 		// which is exactly the bug this field exists to fix.
-		line := rec("work3", "$3", "api", "%1", "0", "", "@7", "1", "win", "1", "claude", "✳ writing tests", "", "reviewer")
+		line := rec("work3", "$3", "api", "%1", "0", "", "@7", "1", "win", "1", "claude", "✳ writing tests", "", "0", "0", "reviewer")
 		got, dropped, err := ParseRows(line)
 		if err != nil || dropped != 0 || len(got) != 1 {
 			t.Fatalf("got %+v dropped=%d err=%v", got, dropped, err)
@@ -203,7 +203,7 @@ func TestParseRows(t *testing.T) {
 	// boolean). Here no two values are equal, so any misread lands a value the
 	// assertion names.
 	t.Run("every field lands in its own slot", func(t *testing.T) {
-		line := rec("grp", "$1", "sess", "%2", "5", "1", "@3", "9", "winname", "1", "cmd", "the title", "copy-mode", "lbl")
+		line := rec("grp", "$1", "sess", "%2", "5", "1", "@3", "9", "winname", "1", "cmd", "the title", "copy-mode", "0", "0", "lbl")
 		got, dropped, err := ParseRows(line)
 		if err != nil || dropped != 0 || len(got) != 1 {
 			t.Fatalf("ParseRows = %+v, %d, %v", got, dropped, err)
@@ -231,7 +231,7 @@ func TestParseRows(t *testing.T) {
 		// also what Claude Code actually puts at the head of a title.
 		for _, r := range []string{"é", "✳"} {
 			huge := strings.Repeat(r, 4000)
-			line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", huge, "", "")
+			line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", huge, "", "0", "0", "")
 			got, _, _ := ParseRows(line)
 			if len(got[0].Title) > MaxTitle {
 				t.Fatalf("%q title kept %d bytes, want <= %d", r, len(got[0].Title), MaxTitle)
@@ -249,7 +249,7 @@ func TestParseRows(t *testing.T) {
 
 	t.Run("a title that fits is not touched", func(t *testing.T) {
 		title := "✳ writing tests"
-		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", title, "", "")
+		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", title, "", "0", "0", "")
 		got, _, _ := ParseRows(line)
 		if got[0].Title != title {
 			t.Fatalf("Title = %q, want %q unchanged", got[0].Title, title)
@@ -263,7 +263,7 @@ func TestParseRows(t *testing.T) {
 	// TestSnapshotHostileLabelCannotRemoveAPane pins the whole stack against a
 	// real server.
 	t.Run("a separator inside the label does not remove the pane", func(t *testing.T) {
-		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "", "EV"+Sep+"IL")
+		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "", "0", "0", "EV"+Sep+"IL")
 		got, dropped, _ := ParseRows(line)
 		if dropped != 0 {
 			t.Fatalf("dropped = %d, want 0: a surplus field is the label's, not a broken record", dropped)
@@ -285,7 +285,7 @@ func TestParseRows(t *testing.T) {
 	t.Run("several separators inside the label are all rejoined", func(t *testing.T) {
 		// One surplus field could be absorbed by a parser that takes
 		// fields[12] and fields[13] and forgets the rest.
-		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "",
+		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "", "0", "0",
 			"a"+Sep+"b"+Sep+"c"+Sep+"d")
 		got, dropped, _ := ParseRows(line)
 		if dropped != 0 || len(got) != 1 {
@@ -301,7 +301,7 @@ func TestParseRows(t *testing.T) {
 	// still carries the whole pane, because every field except the label
 	// precedes it.
 	t.Run("a newline inside the label leaves the pane intact on the first line", func(t *testing.T) {
-		out := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "", "EV") +
+		out := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "", "0", "0", "EV") +
 			"\nIL" + Sep + "trailing garbage\n" + goodRow("%2", "1", "0")
 		got, dropped, _ := ParseRows(out)
 		if dropped != 1 {
@@ -319,7 +319,7 @@ func TestParseRows(t *testing.T) {
 	})
 
 	t.Run("a label of nothing but dangerous bytes degrades to no label", func(t *testing.T) {
-		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "",
+		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "", "0", "0",
 			Sep+Sep+"\t"+Sep)
 		got, dropped, _ := ParseRows(line)
 		if dropped != 0 || len(got) != 1 {
@@ -334,7 +334,7 @@ func TestParseRows(t *testing.T) {
 	// is downstream of it. tmux's own check is byte-oriented and lets both
 	// through, and encoding/json rewrites the second silently.
 	t.Run("a label is repaired, not just split-proofed", func(t *testing.T) {
-		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "",
+		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "", "0", "0",
 			"a\u009fb\x7fc"+string([]byte{0xff})+"d")
 		got, _, _ := ParseRows(line)
 		if got[0].Label != "a b c\ufffdd" {
@@ -352,7 +352,7 @@ func TestParseRows(t *testing.T) {
 		// is the vacuous version of this test.
 		for _, r := range []string{"🌍", "✳", "é"} {
 			huge := strings.Repeat(r, 4000)
-			line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "", huge)
+			line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "", "0", "0", huge)
 			got, dropped, _ := ParseRows(line)
 			if dropped != 0 || len(got) != 1 {
 				t.Fatalf("%q: ParseRows = %+v, dropped %d", r, got, dropped)
@@ -370,12 +370,34 @@ func TestParseRows(t *testing.T) {
 		// Not merely "unchanged": a sanitiser that dropped every non-ASCII
 		// rune, or collapsed inner spaces, would still pass the hostile cases.
 		label := "reviewer #2 — ñ/é (main)"
-		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "", label)
+		line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "", "0", "0", label)
 		got, _, _ := ParseRows(line)
 		if got[0].Label != label {
 			t.Errorf("Label = %q, want %q unchanged", got[0].Label, label)
 		}
 	})
+}
+
+// The two facts that decide who receives a wheel notch, read off the record.
+//
+// tmux's own WheelUpPane fork turns on exactly these: with the pane in no mode
+// and either the alternate screen or mouse tracking on, tmux forwards the notch
+// to the application instead of scrolling its own copy-mode -- and the
+// application's quantum is not tmux's five lines. The browser decides the
+// gesture's gain from them; see lib/scrollGain.ts.
+func TestParseRowsReadsTheWheelFacts(t *testing.T) {
+	line := rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "", "1", "0", "lbl")
+	got, dropped, _ := ParseRows(line)
+	if len(got) != 1 || !got[0].AlternateOn || got[0].MouseAnyFlag {
+		t.Fatalf("rows = %+v, dropped = %d", got, dropped)
+	}
+	if got[0].Label != "lbl" {
+		t.Errorf("Label = %q: the label must still be the last field", got[0].Label)
+	}
+	// A record one field short is dropped, not read with the fields shifted.
+	if _, d, _ := ParseRows(rec("w", "$0", "w", "%1", "0", "", "@1", "1", "win", "1", "claude", "t", "", "1", "0")); d != 1 {
+		t.Errorf("a short record was accepted")
+	}
 }
 
 // Format and fieldCount must agree, or every record is dropped at runtime while
@@ -415,6 +437,17 @@ func TestFormatFieldCount(t *testing.T) {
 	if i := slices.Index(formatFields, "#{pane_mode}"); i < 0 || i >= fieldCount-1 {
 		t.Fatalf("#{pane_mode} is at index %d of %d fields: it belongs in this "+
 			"record, before the label", i, len(formatFields))
+	}
+	// The two wheel facts ride the same record for the same reason the mode
+	// does, and are subject to the same rule: tmux generates them, so they can
+	// sit anywhere that is not the label's slot. A record that lost one would
+	// leave the browser's gesture assuming tmux's five lines for every pane --
+	// which is the bug they exist to fix, back again and invisible.
+	for _, f := range []string{"#{alternate_on}", "#{mouse_any_flag}"} {
+		if i := slices.Index(formatFields, f); i < 0 || i >= fieldCount-1 {
+			t.Fatalf("%s is at index %d of %d fields: it belongs in this record, "+
+				"before the label", f, i, len(formatFields))
+		}
 	}
 	if !strings.Contains(labelField, LabelOption) {
 		t.Fatalf("labelField %q no longer reads %s", labelField, LabelOption)

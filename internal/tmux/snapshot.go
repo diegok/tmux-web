@@ -35,9 +35,9 @@ const (
 // minimum, not an equality: the label is the last field and may contain the
 // separator, so a record can legitimately arrive with more. See ParseRows.
 //
-// Fifteen rather than fourteen since the pane's mode joined the record: the
-// block tag is field 0, which every positional index below is offset by.
-const fieldCount = 15
+// Seventeen since the pane's mode and the two wheel facts joined the record:
+// the block tag is field 0, which every positional index below is offset by.
+const fieldCount = 17
 
 // MaxTitle bounds a pane title. tmux normalises control bytes out of titles but
 // does not cap length; an 8KB title was observed stored and reported in full,
@@ -93,6 +93,30 @@ type Row struct {
 	// compiled into tmux, so it needs none of the sanitising the label gets and
 	// does not compete for the last slot in the record.
 	PaneMode string `json:"paneMode"`
+	// AlternateOn and MouseAnyFlag are #{alternate_on} and #{mouse_any_flag}:
+	// the two facts that decide, together with PaneMode, whether a wheel notch
+	// is tmux's to handle or the application's to receive.
+	//
+	// They are here because the browser's swipe has to know how far one notch
+	// goes, and that is a property of the RECEIVER. tmux's own WheelUpPane
+	// binding reads exactly these:
+	//
+	//	if-shell -F "#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}" \
+	//	  { send-keys -M } { copy-mode -e }
+	//
+	// So with the pane in no mode and either of these set, tmux forwards the
+	// notch (`send -M`) and the application scrolls by its own quantum --
+	// measured on 3.7b: 1 line for claude and pi, 3 for opencode, against
+	// tmux's own `-N 5` in the copy-mode table. Every coding agent sets BOTH,
+	// so the forwarding is doubly determined: an agent that turned tracking off
+	// would still be forwarded for being on the alternate screen, where tmux
+	// has no scrollback to show anyway.
+	//
+	// Nothing but tmux can write either, and both are its own `0`/`1`, so they
+	// need none of the label's sanitising and do not compete for the last slot
+	// in the record. What the browser does with them is lib/scrollGain.ts.
+	AlternateOn  bool `json:"alternateOn"`
+	MouseAnyFlag bool `json:"mouseAnyFlag"`
 	// Activity is what the agent's own integration says it is doing. "" when no
 	// integration is installed, when its report is stale, and for every pane
 	// that is not an agent. Sanitised and capped on write and again on read.
@@ -250,6 +274,12 @@ var formatFields = []string{
 	// sanitise. This one tmux generates itself -- a mode name out of a fixed
 	// set, never a user option -- so it can sit anywhere that is not last.
 	"#{pane_mode}",
+	// Beside the mode, and before the label, for the same two reasons: tmux
+	// generates both out of its own state (never a user option), and the last
+	// slot belongs to the one field tmux hands over exactly as written. See
+	// Row.AlternateOn for what they decide.
+	"#{alternate_on}",
+	"#{mouse_any_flag}",
 	labelField,
 }
 
@@ -381,6 +411,13 @@ func ParseRows(out string) (rows []Row, dropped int, err error) {
 			Command:     fields[11],
 			Title:       truncateAtRuneBoundary(fields[12], MaxTitle),
 			PaneMode:    fields[13],
+			// tmux's own 0/1, so a bare comparison is the whole parse. An
+			// older tmux that did not know the variable would expand it to
+			// EMPTY rather than drop the field (measured on 3.7b), which reads
+			// as false here -- the tmux quantum, which is what the gesture
+			// assumed before these existed.
+			AlternateOn:  fields[14] == "1",
+			MouseAnyFlag: fields[15] == "1",
 			// Rejoined with the separator it was split on, so a label that
 			// arrived with a raw 0x1f in it is reconstructed rather than
 			// silently reassembled into something else.

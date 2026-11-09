@@ -164,7 +164,9 @@ func TestParseServerStart(t *testing.T) {
 	line := func(tag string, fields ...string) string {
 		return strings.Join(append([]string{tag}, fields...), Sep)
 	}
-	snapshot := line(snapshotTag, "work", "$0", "work", "%0", "0", "", "@0", "0", "win", "1", "zsh", "title", "label")
+	// A full-width record, so this line is the noise ParseServerStart has to
+	// look past rather than a record it could never have parsed anyway.
+	snapshot := line(snapshotTag, "work", "$0", "work", "%0", "0", "", "@0", "0", "win", "1", "zsh", "title", "", "0", "0", "label")
 
 	t.Run("the generation among the other blocks", func(t *testing.T) {
 		out := strings.Join([]string{
@@ -208,7 +210,7 @@ func TestParseServerStart(t *testing.T) {
 // day a pane really does go missing.
 func TestParseRowsSkipsTheGenerationLine(t *testing.T) {
 	fields := []string{
-		snapshotTag, "work", "$0", "work", "%0", "0", "", "@0", "0", "win", "1", "zsh", "title", "", "label",
+		snapshotTag, "work", "$0", "work", "%0", "0", "", "@0", "0", "win", "1", "zsh", "title", "", "0", "0", "label",
 	}
 	out := strings.Join([]string{
 		strings.Join(fields, Sep),

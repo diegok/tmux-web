@@ -87,6 +87,8 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     // No mode: where most panes are, and what the copy-mode control offers
     // to enter from.
     paneMode: '',
+    alternateOn: false,
+    mouseAnyFlag: false,
     path: '/srv/work',
     branch: '',
     agentState: '',

@@ -62,6 +62,10 @@ function row(over: Partial<SnapshotRow> = {}): SnapshotRow {
     // No mode: where most panes are, and what the copy-mode control offers
     // to enter from.
     paneMode: '',
+    // The two facts that decide how far one wheel notch scrolls: a plain shell
+    // pane has neither, which is the case tmux's own five lines are right for.
+    alternateOn: false,
+    mouseAnyFlag: false,
     // The pane's working directory, as of the poll. On the wire and in the
     // tree; nothing renders it yet.
     path: '/srv/work',
@@ -135,7 +139,7 @@ describe('contract with the daemon', () => {
     // A literal, never `Object.keys(row()).length`: the count is here to make a
     // field added on one side only fail, and a count derived from the
     // TypeScript side would agree with itself forever.
-    expect(tags).toHaveLength(21)
+    expect(tags).toHaveLength(23)
     expect(Object.keys(row()).sort()).toEqual(tags.sort())
   })
 })
@@ -268,6 +272,29 @@ describe('groupRows', () => {
     // comparing it.
     const [plain] = groupRows([row({ paneMode: '' })])
     expect(plain.windows[0].panes[0]).toHaveProperty('paneMode', '')
+  })
+
+  // The same thing one feature later: the swipe's gain is decided from these
+  // two, and a field that stops at `groupRows` is a field the gesture cannot
+  // see -- so every pane would go on being scrolled at tmux's five lines.
+  it('carries the wheel facts onto the pane', () => {
+    const [session] = groupRows([row({ alternateOn: true, mouseAnyFlag: true })])
+    expect(session.windows[0].panes[0].alternateOn).toBe(true)
+    expect(session.windows[0].panes[0].mouseAnyFlag).toBe(true)
+  })
+
+  it('reads a daemon too old to send them as neither', () => {
+    // The `windowId === ""` case, one type later: a row is cast rather than
+    // validated, so a key the daemon never sent arrives as `undefined` -- and
+    // `undefined` reaching the gesture is `NaN` pixels per notch, not five
+    // lines. A daemon that predates these fields must scroll the way it did
+    // before they existed.
+    const older: SnapshotRow = { ...row() }
+    delete (older as Partial<SnapshotRow>).alternateOn
+    delete (older as Partial<SnapshotRow>).mouseAnyFlag
+    const [session] = groupRows([older])
+    expect(session.windows[0].panes[0].alternateOn).toBe(false)
+    expect(session.windows[0].panes[0].mouseAnyFlag).toBe(false)
   })
 
   it('carries the agent fields onto the pane, since the dot is made of them', () => {

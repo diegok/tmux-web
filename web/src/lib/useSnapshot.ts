@@ -173,6 +173,24 @@ export interface SnapshotRow {
    */
   paneMode: string
   /**
+   * `#{alternate_on}` and `#{mouse_any_flag}`: the two facts that decide, with
+   * `paneMode`, whether a wheel notch is tmux's to handle or the application's
+   * to receive.
+   *
+   * tmux's own `WheelUpPane` binding reads exactly these, and with the pane in
+   * no mode and either of them set it forwards the notch to the application --
+   * which scrolls by its own quantum, measured at 1 line for `claude` and `pi`
+   * and 3 for `opencode` against tmux's own 5. Every coding agent sets both.
+   * `linesPerNotch` in `scrollGain.ts` is the rule; nothing else should read
+   * these directly.
+   *
+   * `undefined` from a daemon too old to send them, which `groupRows` reads as
+   * `false` -- the tmux quantum, which is what the gesture assumed before they
+   * existed. The precedent is `windowId` being `""`.
+   */
+  alternateOn: boolean
+  mouseAnyFlag: boolean
+  /**
    * The pane's working directory, as of the poll that produced this row.
    *
    * It rides a tagged block of its own in the daemon's one tmux invocation,
@@ -380,6 +398,13 @@ export interface PaneNode {
    */
   paneMode: string
   /**
+   * `SnapshotRow.alternateOn` / `.mouseAnyFlag`, carried onto the node because
+   * the swipe's gain is decided from them for the pane the tab is attached to,
+   * and `findPane` is how it gets there -- the same reason `paneMode` is here.
+   */
+  alternateOn: boolean
+  mouseAnyFlag: boolean
+  /**
    * `SnapshotRow.path`: the pane's working directory as of the poll, or "".
    *
    * Carried through the tree though nothing renders it, so that the first
@@ -547,6 +572,12 @@ export function groupRows(rows: readonly SnapshotRow[]): SessionNode[] {
       title: row.title,
       label: row.label,
       paneMode: row.paneMode,
+      // `=== true` rather than carried through: a row is cast, not validated,
+      // so a daemon too old to send these keys yields `undefined` -- and
+      // `undefined` reaching `pxPerNotch` is `NaN` pixels per notch, which is
+      // a gesture that scrolls nothing at all. False is the tmux quantum.
+      alternateOn: row.alternateOn === true,
+      mouseAnyFlag: row.mouseAnyFlag === true,
       path: row.path,
       branch: row.branch,
       active: row.paneActive,
@@ -1161,6 +1192,13 @@ function rowsEqual(a: readonly SnapshotRow[], b: readonly SnapshotRow[]): boolea
       // this keeps the previous tree object, React reconciles nothing, and the
       // button goes on offering the action the pane is already past.
       x.paneMode === y.paneMode &&
+      // The pane's regime, which moves with the command and nothing else: an
+      // agent started or exited in a pane the tab is attached to changes these
+      // two and its title, and a comparison that skips them keeps the previous
+      // tree object -- so the gesture goes on using the gain of the program
+      // that is no longer there.
+      x.alternateOn === y.alternateOn &&
+      x.mouseAnyFlag === y.mouseAnyFlag &&
       // Compared though nothing renders it, and for the reason this function's
       // header gives: "every field the wire carries, not only the ones
       // something renders today". A pane that `cd`s somewhere else moves this

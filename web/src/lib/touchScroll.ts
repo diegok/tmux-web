@@ -228,7 +228,18 @@ export class SwipeScroller {
   #startX = 0
   #startY = 0
   #lastY = 0
-  #pxPerNotch = pxPerNotch(FALLBACK_ROW_HEIGHT_PX)
+  /**
+   * One notch, in pixels, as the caller sized it -- and ONE ROW until one has.
+   *
+   * The only job of that default, and of `start`'s guard, is to keep `#drain`
+   * from looping forever on a notch of 0; it is not a claim about what any
+   * receiver scrolls, because this class does not know. `pxPerNotch` is the
+   * thing that knows, and it can no longer return <= 0, so neither net is
+   * reachable through `installSwipeScroll`. It used to be 85px -- tmux's five
+   * lines -- which was the last copy of the assumption the gain exists to
+   * remove, in the one place a reader would look for a default.
+   */
+  #pxPerNotch = FALLBACK_ROW_HEIGHT_PX
   /** Signed finger travel not yet turned into notches; positive is downward. */
   #pending = 0
   #engaged = false
@@ -253,7 +264,7 @@ export class SwipeScroller {
     this.#startX = x
     this.#startY = y
     this.#lastY = y
-    this.#pxPerNotch = notchPx > 0 ? notchPx : pxPerNotch(FALLBACK_ROW_HEIGHT_PX)
+    this.#pxPerNotch = notchPx > 0 ? notchPx : FALLBACK_ROW_HEIGHT_PX
     this.#pending = 0
     this.#engaged = false
     this.#rejected = false

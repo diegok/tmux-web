@@ -328,6 +328,27 @@ describe('gestures that are not a scroll', () => {
   })
 })
 
+describe('a notch the caller did not size', () => {
+  // The class needs a positive notch or `#drain` loops forever, so it keeps a
+  // net -- and that net used to be `pxPerNotch(FALLBACK_ROW_HEIGHT_PX)`, i.e.
+  // 85px, i.e. TMUX'S FIVE LINES. It was the last copy of the assumption this
+  // whole feature exists to remove: unreachable through `installSwipeScroll`,
+  // since `pxPerNotch` can no longer return <= 0, but wrong in the one place a
+  // reader would go looking for what a notch is worth by default.
+  //
+  // One row is the net now, which claims nothing about any receiver: whoever
+  // knows the quantum is `pxPerNotch`, and the caller has already been through
+  // it.
+  it('falls back to one row, not to tmux\u2019s five', () => {
+    const s = new SwipeScroller()
+    s.start(100, 100, 0)
+    // Engages, and pays the priming notch.
+    expect(s.move(100, 100 + SWIPE_THRESHOLD_PX)).toBe(-1)
+    // One row further is one more notch. At the old 85px net it was none.
+    expect(s.move(100, 100 + SWIPE_THRESHOLD_PX + FALLBACK_ROW_HEIGHT_PX)).toBe(-1)
+  })
+})
+
 describe('the glide\u2019s notches, capped', () => {
   // Once the gain can be 17px instead of 85px, the same flick asks for ~94
   // notches instead of 19 -- more than it can deliver inside its own ~600ms

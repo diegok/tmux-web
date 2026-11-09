@@ -279,6 +279,13 @@ test('a touch stops a flick where it is touched', async ({ page, tmuxWeb }) => {
   // Mid-flight, a tap. MEASURED: the same flick left alone settles at line
   // 110, so a position well short of that is proof this landed while the pane
   // was still moving rather than after it had stopped on its own.
+  //
+  // Re-measured after the glide's notches were capped, because a cap could only
+  // have made it shorter: still 110, with the finger's own drag 15 of it. The
+  // cap does not bite in this regime -- 1600px of travel at an 85px notch is 19
+  // notches, spread over the ~92 frames the friction takes to give up, so it
+  // never asks for two in one frame. It bites at a 17px notch, where the same
+  // travel wants 94.
   await tap(page, 195, 400)
   const atTouch = Number(ask(tmuxWeb, '#{scroll_position}'))
   expect(
@@ -392,7 +399,11 @@ test('a swipe over an application sends it a notch per row times its quantum', a
       `application's quantum against ${atFiveLines} at tmux's`,
   ).toBeGreaterThan(atFiveLines)
 
-  const count = () => (tmuxWeb.tmux('capture-pane', '-p', '-t', pane).match(/<64;/g) ?? []).length
+  // `-J` joins wrapped lines: a report that straddled the last column would
+  // otherwise be split by a newline mid-token and not be counted, which errs
+  // toward passing a swipe that sent too many.
+  const count = () =>
+    (tmuxWeb.tmux('capture-pane', '-p', '-J', '-t', pane).match(/<64;/g) ?? []).length
   await expect
     .poll(count, {
       message: `a ${TRAVEL_PX}px drag should send ${expected} notches to the application`,

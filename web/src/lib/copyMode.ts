@@ -51,6 +51,40 @@ export function inCopyMode(paneMode: string): boolean {
   return COPY_MODES.includes(paneMode)
 }
 
+/** What the header does with the copy control: all three of its states. */
+export type CopyControlState = 'absent' | 'disabled' | 'live'
+
+/**
+ * Which of the three the header shows, from the control's mode and its socket.
+ *
+ * The header carries only the way *out* of copy mode. The way in is not worth
+ * its width: in a shell pane the wheel and the swipe already enter copy mode
+ * through the owner's own binding, and in an agent pane the wheel goes to the
+ * application instead -- so tmux is not scrolling, and there is no scrollback
+ * behind an alternate screen to enter for. The deliberate way in is the
+ * palette's row, which still shows whichever direction applies.
+ *
+ * `inCopy` is the flip-aware value from `copyControl`, not a raw `pane_mode`:
+ * presence inherits the whole argument behind `COPY_FLIP_MS`, because a
+ * control that waited for the poll would linger for up to two intervals after
+ * the click that dismissed it -- which reads as a button that did nothing and
+ * then did something on its own.
+ *
+ * `disabled` is the state that earns this a function. The pane's mode comes
+ * from the daemon's poll and this tab's socket is a different thing, so "in
+ * copy mode with a socket that is not ready" is reachable, and there `endMode`
+ * fails and the click does nothing at all. Reaching it from a browser means
+ * entering copy mode and then killing the socket -- an expensive fixture for
+ * one attribute -- so the decision lives out here where a unit test can ask
+ * for it directly. Same reason the rest of this module exists:
+ * `renderToStaticMarkup` fires no handlers, and a rule written inside the JSX
+ * is a rule no test in this suite can reach.
+ */
+export function copyControlState(inCopy: boolean, ready: boolean): CopyControlState {
+  if (!inCopy) return 'absent'
+  return ready ? 'live' : 'disabled'
+}
+
 /**
  * How long the browser trusts its own click over the snapshot.
  *

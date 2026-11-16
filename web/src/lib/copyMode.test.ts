@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { COPY_FLIP_MS, copyControl, inCopyMode, type CopyFlip } from './copyMode'
+import { COPY_FLIP_MS, copyControl, copyControlState, inCopyMode, type CopyFlip } from './copyMode'
 
 /** The pane the control is aimed at in every case below. */
 const PANE = '%3'
@@ -122,5 +122,35 @@ describe('copyControl', () => {
       expect(copyControl('copy-mode', PANE, flip(true), NOW).label).toBe('Exit copy')
       expect(copyControl('copy-mode', PANE, flip(true, COPY_FLIP_MS), NOW).label).toBe('Exit copy')
     })
+  })
+})
+
+describe('copyControlState', () => {
+  it('is absent on a pane that is not in a copy mode', () => {
+    expect(copyControlState(false, true)).toBe('absent')
+  })
+
+  it('is live on a pane in a copy mode with a ready socket', () => {
+    expect(copyControlState(true, true)).toBe('live')
+  })
+
+  // The state the browser cannot reach cheaply: the mode comes from the
+  // daemon's poll, so it outlives this tab's socket, and `endMode` would fail
+  // silently on a button that still looked pressable.
+  it('is disabled on a pane in a copy mode with a socket that is not ready', () => {
+    expect(copyControlState(true, false)).toBe('disabled')
+  })
+
+  it('is absent on a pane that is not in a copy mode and has no socket', () => {
+    expect(copyControlState(false, false)).toBe('absent')
+  })
+
+  // The header is only ever offered the way *out*, and `cancel` can only pop
+  // the copy family -- so every other mode tmux can put a pane in must come
+  // out of this pair of calls as nothing to show.
+  it('is absent for every mode cancel cannot pop', () => {
+    for (const mode of ['tree-mode', 'clock-mode', 'options-mode', 'client-mode', '']) {
+      expect(copyControlState(inCopyMode(mode), true)).toBe('absent')
+    }
   })
 })

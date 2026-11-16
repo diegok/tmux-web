@@ -245,3 +245,36 @@ test('the toggle s resize goes out and the keyboard s does not', async ({ page, 
     withBox.rows,
   )
 })
+
+// Padding is space the grid does not get, and `@wterm/dom`'s own stylesheet
+// ships `.wterm { padding: 12px }` -- a frame of the page's background around
+// a terminal that draws its own, which after a few days of use the owner asked
+// to have back: "quita espacio y al ser otro color que la terminal, queda
+// raro." On a phone 24px of width is a column and a half of an 80-column pane.
+//
+// Asserted in a browser because it is the one place the override is decided:
+// the rule it has to beat is in a stylesheet imported from inside a module, so
+// what makes ours win is that it is INLINE on the element, not a selector of
+// ours out-specifying theirs. A stylesheet of our own would be back to arguing
+// about import order -- the same argument `Terminal.tsx` already makes for
+// `--term-font-family`.
+test('the terminal draws to its own edge, not inside wterm’s 12px frame', async ({
+  page,
+  tmuxWeb,
+}) => {
+  await enroll(page, tmuxWeb, 'padding')
+
+  const padding = await page.evaluate(() => {
+    const el = document.querySelector('.wterm')
+    if (!el) throw new Error('no .wterm element')
+    const s = getComputedStyle(el)
+    return [s.paddingTop, s.paddingRight, s.paddingBottom, s.paddingLeft]
+  })
+
+  expect(padding, 'the terminal is still sitting inside a 12px frame').toEqual([
+    '1px',
+    '1px',
+    '1px',
+    '1px',
+  ])
+})

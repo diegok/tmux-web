@@ -1800,11 +1800,26 @@ function TerminalBody({ session, label, url, className, onStatusChange, ref }: T
         // The row height travels with the font size and is never set alone:
         // @wterm/dom draws a row as a hard pixel box that does not follow the
         // font, so a size raised by itself is text clipped by its own row.
+        //
+        // The padding is here for the same reason the font family is, and it is
+        // not a custom property: `@wterm/dom/src/terminal.css` sets
+        // `.wterm { padding: 12px }`, so beating it from a stylesheet of ours
+        // would mean out-specifying a selector AND winning the import order of
+        // a sheet pulled in from a module. Inline is beyond both arguments.
+        //
+        // 1px rather than 0 because it is the terminal's own border box that
+        // the grid is measured inside, and a hair of it is what keeps a glyph
+        // off the very edge; wterm subtracts whatever is here before it works
+        // out the columns, so the grid simply gets the 11px back on each side.
+        // The owner asked for this after a few days of use: the frame was the
+        // page's background colour around something that draws its own, and on
+        // a phone 24px of width is a column and a half.
         style={
           {
             '--term-font-family': TERM_FONT_STACK,
             '--term-font-size': `${fontSize}px`,
             '--term-row-height': `${rowHeightFor(fontSize)}px`,
+            padding: '1px',
           } as CSSProperties
         }
         theme={wtermThemeFor(theme, resolvedTheme)}

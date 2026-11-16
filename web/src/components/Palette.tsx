@@ -30,7 +30,15 @@
  * what the pane is doing, or changes how you talk to it.
  */
 
-import { Columns2, Copy, CopySlash, MessageSquare, SquareTerminal, Wrench } from 'lucide-react'
+import {
+  Columns2,
+  Copy,
+  CopySlash,
+  MessageSquare,
+  ScrollText,
+  SquareTerminal,
+  Wrench,
+} from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { Badge } from '@/components/ui/badge'
@@ -98,6 +106,9 @@ export type PaletteAction =
   // the owner could not tell what "End mode" meant next to "Copy mode".
   | { kind: 'toggle-copy' }
   | { kind: 'toggle-reply' }
+  // Scrollback's only door. It was a header button until it became clear it was
+  // paying phone width for something reached once a week.
+  | { kind: 'open-capture' }
 
 /** One row. */
 export interface PaletteEntry {
@@ -269,6 +280,11 @@ export interface PaletteProps {
    */
   onFocusReply: () => void
   /**
+   * Open the scrollback panel on the pane this tab is on. The panel names no
+   * pane of its own, so there is nothing to pass: see `handleSelectPane`.
+   */
+  onOpenCapture: () => void
+  /**
    * A management entry was chosen. The palette closes and App takes it from
    * there -- a prompt or the kill dialog, or straight to the daemon.
    */
@@ -287,12 +303,22 @@ export function Palette({
   replyOpen,
   onToggleReply,
   onFocusReply,
+  onOpenCapture,
   onIntent,
 }: PaletteProps) {
   const [failure, setFailure] = useState<string | null>(null)
 
-  /** The row that just ran placed the caret itself; let Radix's restore pass. */
-  const keepFocus = useRef(false)
+  /** See `AfterClose`. Cleared as it is read, so it can never fire twice. */
+  const afterClose = useRef<AfterClose | null>(null)
+
+/**
+ * What a row asked to happen once this dialog's focus scope lets go.
+ *
+ * Two rows need that moment, and for opposite reasons -- one wants the caret
+ * placed, the other wants it left alone -- so the ref carries which, not a
+ * boolean. `null` is every other row: Radix's own restore, untouched.
+ */
+type AfterClose = 'focus-reply' | 'open-capture'
 
   // The chord toggles, so the same keystroke closes what it opened. Held in a
   // ref so the listener is installed once rather than re-installed on every
@@ -350,8 +376,23 @@ export function Palette({
         // one row whose entire purpose is handing the user something to type
         // in would open a box and leave the caret nowhere. Only this row opts
         // out; every other row's focus behaviour is left exactly as it was.
-        keepFocus.current = true
+        afterClose.current = 'focus-reply'
         onToggleReply()
+        break
+      case 'open-capture':
+        // Nothing to refuse: the capture is an HTTP read of the pane, not
+        // something sent down this tab's socket.
+        //
+        // Opened *after* this dialog's scope lets go, which is the opposite
+        // request to the row above and the same mechanism. Opened inline, the
+        // panel would mount while this dialog is still restoring focus, and
+        // the panel's own trap reclaims a focus that lands outside it -- so the
+        // caret ends up on the panel's first control, which the panel spends
+        // `preventAutoFocus` and a paragraph of its header avoiding: on a phone
+        // a control in there is the soft keyboard rising over the very thing
+        // you opened to read. Measured, not predicted: `e2e/capture.spec.ts`
+        // caught it the first time this row existed.
+        afterClose.current = 'open-capture'
         break
     }
     change(false)
@@ -364,8 +405,19 @@ export function Palette({
       title="Command palette"
       description="Jump to a pane, or run a terminal command"
       onCloseAutoFocus={(event) => {
-        if (!keepFocus.current) return
-        keepFocus.current = false
+        const after = afterClose.current
+        afterClose.current = null
+        if (after === null) return
+        if (after === 'open-capture') {
+          // Prevented for the same reason as below -- Radix would put the caret
+          // on `<body>` either way, but it does it *after* the panel has
+          // mounted, which is late enough for the panel's trap to pull it
+          // inside. Nothing is focused here: focus nowhere is what the panel
+          // wants, and what its own open-focus prevention produces.
+          event.preventDefault()
+          onOpenCapture()
+          return
+        }
         // Both halves are needed and neither is enough. Preventing the restore
         // stops Radix putting the caret back on `<body>`; focusing here rather
         // than letting the box's own `autoFocus` do it is because that fires
@@ -382,6 +434,9 @@ export function Palette({
         failure={failure}
         replyOpen={replyOpen}
         copy={copy}
+        // Derived, not passed: App already says which pane this tab is on, and
+        // two spellings of that is one more than can ever disagree.
+        hasPane={activePane !== null}
         onRun={run}
         onIntent={(intent) => {
           onIntent(intent)
@@ -403,6 +458,11 @@ export interface PaletteBodyProps {
   replyOpen: boolean
   /** The copy-mode control: one row, pointing whichever way the pane needs. */
   copy: CopyControl
+  /**
+   * Whether the tab is on a pane at all, which is the whole of what the
+   * scrollback row needs: the panel captures the pane App already named.
+   */
+  hasPane: boolean
   onRun: (action: PaletteAction) => void
   onIntent: (intent: MenuIntent) => void
 }
@@ -421,6 +481,7 @@ export function PaletteBody({
   failure,
   replyOpen,
   copy,
+  hasPane,
   onRun,
   onIntent,
 }: PaletteBodyProps) {
@@ -512,6 +573,16 @@ export function PaletteBody({
             {replyToggleLabel(replyOpen)}
             <CommandShortcut>{replyOpen ? 'gives the rows back' : 'costs two rows'}</CommandShortcut>
           </CommandItem>
+          {hasPane && (
+            <CommandItem
+              value="scrollback capture history read output copy text"
+              onSelect={() => onRun({ kind: 'open-capture' })}
+            >
+              <ScrollText aria-hidden />
+              Scrollback
+              <CommandShortcut>read-only, no copy mode</CommandShortcut>
+            </CommandItem>
+          )}
         </CommandGroup>
       </CommandList>
     </Command>

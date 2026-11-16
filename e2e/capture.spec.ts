@@ -146,9 +146,14 @@ async function tripleClickOn(page: Page, marker: string): Promise<void> {
   await page.mouse.click(spot.x, spot.y, { clickCount: 3 })
 }
 
-/** Open the panel on the pane the tab is on. */
+/**
+ * Open the panel on the pane the tab is on, through the palette -- its only
+ * door since the header stopped paying phone width for a button reached about
+ * once a week.
+ */
 async function openPanel(page: Page): Promise<void> {
-  await page.getByRole('button', { name: 'Scrollback' }).click()
+  await page.getByRole('button', { name: /Jump to/ }).click()
+  await page.getByRole('option', { name: /Scrollback/ }).click()
   await pre(page).waitFor()
 }
 
@@ -185,26 +190,29 @@ test('the capture is selectable and copy-all reaches the clipboard', async ({ pa
   // MEASURED, and it is not what the plan predicted. With the auto-focus
   // prevented, Radix moves focus nowhere at all -- its focus scope only focuses
   // the container when the mount event is *not* prevented -- so focus stays
-  // where the click left it, on the header button that opened the panel. It is
-  // outside the dialog rather than on the dialog container. The property that
-  // matters is the same either way and is the one asserted: nothing inside the
-  // panel has the keyboard, which on a phone is the soft keyboard not rising.
+  // where the palette's own close left it, which is `<body>`: this door used to
+  // be a header button, and then focus stayed on the button. Asserted as the
+  // property rather than as whichever element happens to hold the caret,
+  // because the element changed with the door and the property did not:
+  // nothing inside the panel has the keyboard, which on a phone is the soft
+  // keyboard not rising.
   const onOpen = await focusReport(page)
   expect(
     onOpen,
     'the panel opened with focus on a control inside it: on a phone that is the ' +
       'soft keyboard rising over the panel that exists to be read without one',
-  ).toContain('outside the dialog')
+  ).not.toContain('inside the dialog')
 
   // Focus stays out after the capture lands, which is a second render of the
   // body and of the selector inside it.
   await expect(pre(page)).toContainText(ALPHA)
-  expect(await focusReport(page)).toContain('outside the dialog')
+  expect(await focusReport(page)).not.toContain('inside the dialog')
 
   // What focus outside the dialog puts at risk, and the reason the decision
-  // records it as safe: Escape still closes the panel, because the key reaches
-  // the document from the button that has it. (It does not from the terminal's
-  // textarea, which swallows keys -- but nothing here leaves focus there.)
+  // records it as safe: Escape still closes the panel, because Radix's dismiss
+  // layer listens on the document and the caret is on `<body>`, not in anything
+  // that swallows keys. (The terminal's textarea does -- but nothing here
+  // leaves focus there.)
   await page.keyboard.press('Escape')
   await expect(panel(page), 'Escape does not close the panel').toHaveCount(0)
   await openPanel(page)

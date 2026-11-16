@@ -326,6 +326,7 @@ describe('<Palette>', () => {
         replyOpen={false}
         onToggleReply={() => {}}
         onFocusReply={() => {}}
+        onOpenCapture={() => {}}
         onIntent={() => {}}
       />,
     )
@@ -365,6 +366,7 @@ describe('<PaletteBody>', () => {
         failure={null}
         replyOpen={over.replyOpen ?? false}
         copy={copyControl(over.paneMode ?? '', activePane, null, 0)}
+        hasPane={activePane !== null}
         onRun={() => {}}
         onIntent={() => {}}
       />,
@@ -382,6 +384,18 @@ describe('<PaletteBody>', () => {
     const markup = render()
     expect(markup).toContain('Copy mode')
     expect(markup).toContain(replyToggleLabel(false))
+  })
+
+  // Its only door, as of this change: the header button is gone, and nothing
+  // else in the app opens the capture panel.
+  it('offers the scrollback row when a pane is attached', () => {
+    expect(render()).toContain('Scrollback')
+  })
+
+  // Absent, not disabled -- this group's own rule. A capture needs a pane to
+  // name, and a greyed row in a fuzzy list is still something to read past.
+  it('leaves the scrollback row out when there is no pane', () => {
+    expect(render({ activePane: null })).not.toContain('Scrollback')
   })
 
   // The defect that merged the two header buttons, and the reason it has to be

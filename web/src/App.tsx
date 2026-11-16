@@ -749,15 +749,6 @@ export default function App() {
               >
                 Reply box
               </button>
-              <button
-                type="button"
-                onClick={() => setCaptureOpen(true)}
-                disabled={!activePane}
-                className="hover:bg-accent hover:text-accent-foreground rounded-md border px-2 py-1 text-xs font-medium disabled:opacity-50"
-                title="Read this pane's scrollback, without putting it in copy mode"
-              >
-                Scrollback
-              </button>
               <ConnectionDot status={status} />
             </div>
           </header>
@@ -831,6 +822,7 @@ export default function App() {
           replyOpen={replyOpen}
           onToggleReply={() => showReply(!replyOpen)}
           onFocusReply={focusReply}
+          onOpenCapture={() => setCaptureOpen(true)}
           onIntent={handleIntent}
         />
 

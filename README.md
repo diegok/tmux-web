@@ -106,7 +106,18 @@ connections rather than only failing the next request.
 
 - Click a pane in the sidebar to jump to it, or press `Ctrl+Alt+K` for a fuzzy
   palette (the "Jump to…" button does the same, which matters on layouts where
-  that chord is AltGr+K).
+  that chord is AltGr+K, and on a phone, where there is no chord at all).
+- The palette also carries the things the header stopped paying width for:
+  **Scrollback**, which reads the pane's history into a panel you can select
+  and copy out of without putting the pane into copy mode, and the way *into*
+  copy mode.
+- **Two header buttons are optional**, under `Header` in the menu at the bottom
+  of the sidebar: `Jump to…` and `Reply box`. Both start on, and each browser
+  remembers its own answer — the phone keeps what it needs, the laptop drops
+  the one it never presses. Below 640px every header button is its glyph alone,
+  so the breadcrumb keeps the width it needs to say which pane you are looking
+  at. There is no connection light: the pill over the terminal says when the
+  socket is unhappy, and the sidebar's footer says it in words.
 - A window tmux named after a shell (`zsh`, `bash`, `fish`, and five more)
   shows what it is running instead — the command of the pane a click on that
   row selects. `automatic-rename off` is a deliberate setting, since it is what
@@ -169,23 +180,29 @@ connections rather than only failing the next request.
   `copy-pipe-and-cancel "xclip …"` does, that still happens — and it still
   writes the clipboard of the machine tmux runs on, which is nowhere near your
   phone. The two do not conflict: tmux emits the OSC 52 as well.
-- **One button for copy mode, which says which way it goes.** The header control
-  reads **Copy mode** on a pane that is not in one and **Exit copy** on a pane
-  that is, and the palette offers whichever of the two applies. It follows the
-  pane rather than the click, so it also says *Exit copy* for a copy mode you
-  entered at your own terminal — panes are shared, and so is their mode. It used
-  to be two buttons, and nobody could say what the second one meant.
+- **The header offers the way *out* of copy mode, and only that.** An **Exit
+  copy** button appears when the pane is in a copy mode and is not there
+  otherwise. Getting *in* is already free where it is worth having: in a shell
+  pane the wheel and a swipe enter copy mode through your own `~/.tmux.conf`
+  binding, and in a pane running an agent the wheel goes to the agent instead,
+  where tmux keeps no scrollback behind the alternate screen anyway. The
+  deliberate way in is the palette, which offers whichever of the two applies.
+  The control follows the pane rather than the click, so it is also there for a
+  copy mode you entered at your own terminal — panes are shared, and so is
+  their mode. It was two buttons once, and nobody could say what the second one
+  meant; then one button with two names; now one direction with one name.
 
   A pane can be in more than one mode at once: scrolling up inside tmux's
-  session tree leaves the tree open underneath. The button reads the top layer
+  session tree leaves the tree open underneath. The control reads the top layer
   only, so leaving copy mode there puts you back in the tree rather than out of
-  everything — and a pane sitting in the tree, or in the clock, is still offered
-  the way *in*.
+  everything — and a pane sitting in the tree, or in the clock, is offered
+  nothing, because `cancel` cannot pop either of those.
 - `Shift+click` or `Ctrl+click` a URL to open it. Real hyperlinks (`gh`, `delta`,
   `eza`) and bare URLs both work; a plain click still goes to tmux.
 - **Answer an agent from a box under the terminal, when you ask for one.** The
   **Reply box** button in the header shows it, and so does the palette; Escape
-  puts it away again. It is off until you ask, on every device: in a terminal
+  puts it away again. Switching the button off under `Header` closes the box
+  with it, and leaves the palette's row as the way back in. It is off until you ask, on every device: in a terminal
   you already type into the pane, and a second text box costs rows of a window
   your own tmux client shares. Each browser remembers its own answer, so a phone
   can keep the box open while the laptop keeps it shut. When it is open the

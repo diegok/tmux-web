@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/creack/pty"
@@ -75,6 +76,12 @@ type Session struct {
 	pty  *os.File
 	out  chan []byte
 	tm   *tmux.Client
+
+	// Set by the pump, before it closes the session, when the reader fell
+	// behind. See Overflowed: the two ways this stream can end want opposite
+	// things from the browser, and the closed channel alone cannot tell them
+	// apart.
+	overflow atomic.Bool
 
 	closeOnce sync.Once
 }
@@ -170,6 +177,7 @@ func (s *Session) pump() {
 			select {
 			case s.out <- b:
 			default:
+				s.overflow.Store(true)
 				s.Close()
 				return
 			}
@@ -181,6 +189,19 @@ func (s *Session) pump() {
 		}
 	}
 }
+
+// Overflowed reports why the output stream ended: true when the pump closed
+// the session because the reader fell behind, false for every other ending --
+// the PTY reaching EOF because the user typed `exit`, the base session being
+// killed, a caller's own Close.
+//
+// Read it after Output() has closed; before that it is only ever false, and the
+// answer it would give is "not yet". The distinction exists because the two
+// endings want opposite things from the browser: a session that ended is done
+// and must not be retried, while a tab that fell behind is one reconnect and a
+// repaint away from being fine. The write loop in internal/front/ws.go is the
+// one caller, and the daemon's own log is where the difference gets counted.
+func (s *Session) Overflowed() bool { return s.overflow.Load() }
 
 // Write sends keystrokes to the tmux client.
 func (s *Session) Write(b []byte) (int, error) { return s.pty.Write(b) }

@@ -3,6 +3,7 @@ package front
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
@@ -27,6 +28,26 @@ import (
 const (
 	wsPingInterval = 20 * time.Second
 	wsPingTimeout  = 10 * time.Second
+
+	// How many keepalives in a row must fail before the connection is
+	// collected.
+	//
+	// One used to be enough, and one is wrong. A ping fails for two reasons
+	// that look identical from here: the peer is gone, or the peer is simply
+	// slow -- a 113ms-RTT WireGuard link with a redraw burst queued ahead of
+	// the ping, which cannot even take the write lock while a data frame is
+	// parked on it. The owner's log for one week: 153 of 193 disconnects were
+	// this check firing, 141 on a missing pong and 12 on that lock. Every one
+	// of them cost a reattach and a full repaint, which is what a person feels
+	// as a freeze.
+	//
+	// Three, so a stall has to last past three whole cycles -- about a minute
+	// at the production timings -- before it is read as death. What that costs
+	// when the peer really is gone is a leaked `tmux attach` for up to a
+	// minute instead of up to thirty seconds, which nothing but
+	// destroy-unattached is waiting on. Worth it: the common case is a live
+	// person on a slow link, not a dead peer.
+	wsPingStrikes = 3
 )
 
 // wsReadLimit bounds one inbound message. Keystrokes are a few bytes, but a
@@ -350,6 +371,14 @@ type wsStats struct {
 
 	// The longest single conn.Write, in nanoseconds.
 	slowestWrite atomic.Int64
+
+	// Keepalives that failed and were tolerated rather than collected. The
+	// count a connection ends with is how close this link came to being torn
+	// down for being slow; see wsPingStrikes.
+	pingsMissed atomic.Int64
+
+	// The slowest answered keepalive, in nanoseconds. See notePing.
+	slowestPing atomic.Int64
 }
 
 // noteRead counts one inbound frame. n is the frame as it arrived, prefix byte
@@ -367,6 +396,23 @@ func (s *wsStats) noteWrite(n int, took time.Duration) {
 	for {
 		prev := s.slowestWrite.Load()
 		if int64(took) <= prev || s.slowestWrite.CompareAndSwap(prev, int64(took)) {
+			return
+		}
+	}
+}
+
+// notePingMiss counts one tolerated keepalive failure.
+func (s *wsStats) notePingMiss() { s.pingsMissed.Add(1) }
+
+// notePing keeps the slowest answered keepalive seen. This is the one
+// round-trip measurement this side can make that includes everything the link
+// and the browser are doing: a pong queues behind whatever is already on the
+// socket, so a redraw burst shows up here as seconds. It is the number to read
+// when asking how far from fluid a connection was while it was still working.
+func (s *wsStats) notePing(took time.Duration) {
+	for {
+		prev := s.slowestPing.Load()
+		if int64(took) <= prev || s.slowestPing.CompareAndSwap(prev, int64(took)) {
 			return
 		}
 	}
@@ -427,6 +473,8 @@ func (h *TerminalHandler) serve(ctx context.Context, conn *websocket.Conn, targe
 			"bytes_out", stats.bytesOut.Load(),
 			"since_last_read", now.Sub(time.Unix(0, stats.lastReadAt.Load())).Round(time.Millisecond),
 			"slowest_write", time.Duration(stats.slowestWrite.Load()).Round(time.Millisecond),
+			"pings_missed", stats.pingsMissed.Load(),
+			"slowest_ping", time.Duration(stats.slowestPing.Load()).Round(time.Millisecond),
 		}
 		// Only when there is one, so that its presence is itself information:
 		// a cause means the connection ended by failing rather than by asking.
@@ -454,8 +502,11 @@ func (h *TerminalHandler) serve(ctx context.Context, conn *websocket.Conn, targe
 	var wg sync.WaitGroup
 	wg.Add(3)
 	go func() { defer wg.Done(); done <- h.readLoop(ctx, conn, sess, ctrl, stats) }()
-	go func() { defer wg.Done(); done <- wsWriteLoop(ctx, conn, sess.Output(), ctrl, stats) }()
-	go func() { defer wg.Done(); done <- h.pingLoop(ctx, conn) }()
+	go func() {
+		defer wg.Done()
+		done <- wsWriteLoop(ctx, conn, sess.Output(), ctrl, stats, sess.Overflowed)
+	}()
+	go func() { defer wg.Done(); done <- h.pingLoop(ctx, conn, stats) }()
 
 	exit = <-done
 
@@ -822,7 +873,14 @@ func (h *TerminalHandler) endMode(ctx context.Context, pane string) error {
 // that produced them because coder/websocket supports one writer at a time, and
 // two goroutines writing frames onto the same socket is a corrupted stream
 // rather than a race that shows up as a test failure.
-func wsWriteLoop(ctx context.Context, conn *websocket.Conn, out <-chan []byte, ctrl <-chan []byte, stats *wsStats) wsExit {
+func wsWriteLoop(
+	ctx context.Context,
+	conn *websocket.Conn,
+	out <-chan []byte,
+	ctrl <-chan []byte,
+	stats *wsStats,
+	overflowed func() bool,
+) wsExit {
 	for {
 		select {
 		case <-ctx.Done():
@@ -833,9 +891,22 @@ func wsWriteLoop(ctx context.Context, conn *websocket.Conn, out <-chan []byte, c
 			}
 		case b, ok := <-out:
 			if !ok {
-				// The session ended: the user typed exit, the base session was
-				// killed, or the bridge closed itself. Say so, so the browser
-				// can tell this from a network fault it should reconnect after.
+				// Two endings arrive through the same closed channel, and they
+				// want opposite things from the browser.
+				//
+				// The bridge closes a session whose reader cannot keep up: a
+				// tab that stopped draining for long enough to fill 8MB of
+				// slack. Its tmux session is alive and the right answer is one
+				// reconnect and a repaint, so it gets RFC 6455's "try again
+				// later" -- anything but 1000, which is the one code the
+				// browser treats as "do not retry" (`shouldReconnect` in
+				// components/Terminal.tsx).
+				if overflowed != nil && overflowed() {
+					return wsExit{status: websocket.StatusTryAgainLater, reason: "tab fell behind", graceful: true}
+				}
+				// A session that really ended: the user typed exit, or the base
+				// session was killed. Reconnecting to it is pointless, and 1000
+				// is what says so.
 				return wsExit{status: websocket.StatusNormalClosure, reason: "session ended", graceful: true}
 			}
 			if err := wsSend(ctx, conn, ptybridge.EncodeData(b), stats); err != nil {
@@ -858,7 +929,7 @@ func wsSend(ctx context.Context, conn *websocket.Conn, frame []byte, stats *wsSt
 // pingLoop is the only thing that can tell a quiet terminal from a dead peer.
 // See wsPingInterval for why that distinction is load-bearing rather than
 // hygienic.
-func (h *TerminalHandler) pingLoop(ctx context.Context, conn *websocket.Conn) wsExit {
+func (h *TerminalHandler) pingLoop(ctx context.Context, conn *websocket.Conn, stats *wsStats) wsExit {
 	interval, timeout := h.cfg.PingInterval, h.cfg.PingTimeout
 	if interval <= 0 {
 		interval = wsPingInterval
@@ -869,19 +940,55 @@ func (h *TerminalHandler) pingLoop(ctx context.Context, conn *websocket.Conn) ws
 
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	strikes := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return wsExit{}
 		case <-t.C:
 			pctx, cancel := context.WithTimeout(ctx, timeout)
+			started := time.Now()
 			err := conn.Ping(pctx)
 			cancel()
-			if err != nil {
-				// Not graceful: a close handshake with a peer that just failed
-				// to answer a ping would only wait out its own timeout.
-				return wsExit{cause: err}
+			if err == nil {
+				stats.notePing(time.Since(started))
 			}
+			collect, next := pingVerdict(err, strikes)
+			strikes = next
+			if !collect {
+				if err != nil {
+					stats.notePingMiss()
+				}
+				continue
+			}
+			// Not graceful: a close handshake with a peer that just failed to
+			// answer wsPingStrikes pings in a row would only wait out its own
+			// timeout. The count travels in the cause because it is the
+			// difference between "this peer vanished" and "this link is bad".
+			return wsExit{cause: fmt.Errorf("%d keepalives in a row failed, last: %w", strikes, err)}
 		}
 	}
+}
+
+// pingVerdict folds one keepalive result into the strike count: whether to
+// collect the connection, and the count to carry forward.
+//
+// Separate from the loop because the rule, not the timing, is what has to be
+// right: strikes must be CONSECUTIVE. A tab open all afternoon on a link that
+// drops one ping an hour has to live, and a counter that only ever climbed
+// would collect it on the third hour -- the tolerance would be a delay rather
+// than a policy. Any answered ping is proof of life and resets it.
+//
+// Neither flavour of failure is safe to act on alone, and both are safe to
+// tolerate. A pong that never came leaves the connection untouched
+// (coder/websocket's ping() returns the error and closes nothing), and a ping
+// that could not take the write lock -- which is what a data frame parked on it
+// for more than writeControl's own five-second cap looks like -- returns before
+// a byte is written, so the stream is not corrupted either.
+func pingVerdict(err error, strikes int) (collect bool, next int) {
+	if err == nil {
+		return false, 0
+	}
+	strikes++
+	return strikes >= wsPingStrikes, strikes
 }

@@ -971,3 +971,48 @@ func (d *wsRecordingDialer) closeAll(t *testing.T) {
 		_ = c.Close()
 	}
 }
+
+// A link with a 113ms RTT and a browser that just took a second to come back
+// is not a dead peer, and the owner's own log is what says this matters: 153 of
+// 193 disconnects in one week were the keepalive collecting a connection --
+// 141 "the pong did not come" and 12 that could not even take the write lock
+// to send the ping, because a 4KB data frame was parked on it for seconds.
+// Each collection costs a reattach and a full repaint, which is what he feels
+// as "it hangs for a while and then comes back".
+//
+// So one miss must not be fatal. The client below stops reading for longer
+// than a whole pong timeout -- coder/websocket answers pings from inside Read,
+// so that is exactly a missed pong -- and then comes back. Its session has to
+// still be there.
+func TestOneMissedPingDoesNotCollectALiveConnection(t *testing.T) {
+	cfg := fastPing
+	cfg.AllowedOrigin = wsCanonical
+	f := newWSFixture(t, cfg)
+
+	c := f.dial(t, wsCanonical, "?session=work")
+	c.SetReadLimit(1 << 20)
+	tab := f.tabSession(t)
+
+	// Nothing reads for longer than the 1s pong timeout: one ping goes
+	// unanswered while the TCP connection stays perfectly healthy.
+	time.Sleep(1500 * time.Millisecond)
+
+	// Back on the air. Read in the background so pings are answered again.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		for {
+			if _, _, err := c.Read(ctx); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Several ping cycles later the session must still be attached. Read from
+	// tmux rather than from the socket: the question is whether the daemon tore
+	// the tmux client down, and a socket that is still open would not say.
+	time.Sleep(1500 * time.Millisecond)
+	if got := f.sessions(t); !strings.Contains(got, tab) {
+		t.Fatalf("session %q was collected after one missed ping on a live connection", tab)
+	}
+}

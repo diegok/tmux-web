@@ -100,6 +100,13 @@ func TestCloseEndsTheOutputStream(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Output() never closed after Close; a reader would hang forever")
 	}
+
+	// The other half of Overflowed's contract: a session the caller ended is
+	// not a tab that fell behind, and the write loop reports the two with
+	// different close codes.
+	if s.Overflowed() {
+		t.Error("Overflowed() = true after a plain Close; the browser would be told to reconnect to a session that is gone")
+	}
 }
 
 // A browser tab that stops reading must cost the tab, not the tmux server.
@@ -127,6 +134,12 @@ func TestSlowClientClosesTheSessionInsteadOfBlocking(t *testing.T) {
 		select {
 		case _, ok := <-s.Output():
 			if !ok {
+				// Why the close code differs from the one a real `exit` gets:
+				// this session is alive from tmux's point of view and the tab
+				// only needs to come back. See Session.Overflowed.
+				if !s.Overflowed() {
+					t.Error("Overflowed() = false after the pump closed a flooded session; the browser would be told the session ended")
+				}
 				return
 			}
 		case <-deadline:

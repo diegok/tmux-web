@@ -381,6 +381,13 @@ describe('pure helpers', () => {
     expect(shouldReconnect(close(1001, 'going away', true))).toBe(true)
     expect(shouldReconnect(close(1005))).toBe(true)
     expect(shouldReconnect(close(1003, 'malformed frame', true))).toBe(true)
+    // wsWriteLoop again: a tab that fell behind far enough that the bridge
+    // closed its session. tmux is alive, so this one MUST reconnect -- it is
+    // the case that used to arrive as 1000 and leave the owner pressing "New
+    // session" with his session working. Pinned here because the code is a
+    // cross-language contract: internal/front/ws.go picks it, this decides
+    // what it means.
+    expect(shouldReconnect(close(1013, 'tab fell behind', true))).toBe(true)
   })
 })
 

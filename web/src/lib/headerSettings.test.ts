@@ -89,6 +89,28 @@ describe('setHeaderSettings', () => {
     expect(seen).toHaveLength(1)
   })
 
+  // The listener has to be able to tell a flag that *went* false from one that
+  // was already false: the only caller closes the reply box, and closing it on
+  // "is false" means any other switch takes an open box -- and its draft --
+  // with it.
+  it('hands the listener the value it had before', () => {
+    const seen: { next: HeaderSettings; prev: HeaderSettings }[] = []
+    const off = onHeaderSettingsChange((next, prev) => seen.push({ next, prev }))
+
+    setHeaderSettings({ showReply: false })
+    expect(seen).toEqual([
+      { next: { showJump: true, showReply: false }, prev: { showJump: true, showReply: true } },
+    ])
+
+    setHeaderSettings({ showJump: false })
+    expect(seen[1]).toEqual({
+      next: { showJump: false, showReply: false },
+      prev: { showJump: true, showReply: false },
+    })
+
+    off()
+  })
+
   it('keeps the field a patch does not name, and notifies nobody for a no-op', () => {
     const seen: HeaderSettings[] = []
     const off = onHeaderSettingsChange((s) => seen.push(s))

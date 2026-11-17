@@ -129,7 +129,7 @@ export function writeHeaderSettings(
 let store: SettingsStore | null = defaultStore()
 let settings: HeaderSettings | null = null
 const watchers = new Set<() => void>()
-const listeners = new Set<(s: HeaderSettings) => void>()
+const listeners = new Set<(next: HeaderSettings, prev: HeaderSettings) => void>()
 
 /** The `getSnapshot` the hook uses. Seeded from storage on first read. */
 export function getHeaderSettings(): HeaderSettings {
@@ -148,10 +148,18 @@ export function useHeaderSettings(): HeaderSettings {
 }
 
 /**
- * Be told the new value the moment it changes, before React is. Returns the
- * unsubscribe. See the header for the one case this exists for.
+ * Be told the new value the moment it changes, before React is, and what it
+ * was a moment ago. Returns the unsubscribe. See the header for the one case
+ * this exists for.
+ *
+ * Both values, because the listener is notified for a change to *either* flag:
+ * without `prev` it can only ask whether a flag is false, not whether it just
+ * became false, and the difference is a switch that takes an unrelated open
+ * reply box -- and its draft -- down with it.
  */
-export function onHeaderSettingsChange(fn: (s: HeaderSettings) => void): () => void {
+export function onHeaderSettingsChange(
+  fn: (next: HeaderSettings, prev: HeaderSettings) => void,
+): () => void {
   listeners.add(fn)
   return () => listeners.delete(fn)
 }
@@ -177,7 +185,7 @@ export function setHeaderSettings(patch: Partial<HeaderSettings>): void {
   settings = next
   writeHeaderSettings(next, store)
   // Before the React watchers, and synchronously: the ordering is the point.
-  for (const fn of listeners) fn(next)
+  for (const fn of listeners) fn(next, current)
   for (const cb of watchers) cb()
 }
 

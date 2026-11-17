@@ -90,6 +90,25 @@ test('the header offers only the way out of copy mode, and it follows the pane',
   await expect(control).toBeVisible({ timeout: 1_000 })
   await expect.poll(paneMode).toBe('copy-mode')
 
+  // Copy mode is driven from the keyboard -- arrows, `/`, `q` -- so the way in
+  // has to leave the keyboard in the terminal. The palette is the only
+  // deliberate way in now, and a palette row that asks for nothing leaves the
+  // caret on `<body>`: Radix restores focus to whatever had it before the
+  // dialog, and wterm has replaced that node by then (`harness.ts` records the
+  // same thing for a pane pick). So this row asks; see `AfterClose`.
+  // Asserted structurally rather than through a role locator, and that is a
+  // measurement, not a preference: with copy mode on, the only textarea on the
+  // page is wterm's own, inside `.wterm`, carrying `aria-hidden="true"` and no
+  // label -- so nothing names it in the accessibility tree and
+  // `getByRole('textbox', ...)` cannot reach it. Where the caret *is* remains
+  // exactly the property worth pinning.
+  const keyboardInTerminal = () =>
+    page.evaluate(() => document.activeElement?.closest('.wterm') !== null)
+  expect(
+    await keyboardInTerminal(),
+    'copy mode is on but the keyboard is nowhere -- arrows and / do nothing until you click',
+  ).toBe(true)
+
   // The pane leaves copy mode without this tab touching it -- which is what
   // happens when the owner presses `q` at their own terminal. The control has to
   // go on its own: the optimistic flip it is holding expires and the poll's

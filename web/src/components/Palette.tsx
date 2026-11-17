@@ -280,6 +280,12 @@ export interface PaletteProps {
    */
   onFocusReply: () => void
   /**
+   * Put the caret in the terminal. Called once, as this dialog closes over a
+   * pane it has just put into copy mode -- which is driven from the keyboard
+   * and useless without one.
+   */
+  onFocusTerminal: () => void
+  /**
    * Open the scrollback panel on the pane this tab is on. The panel names no
    * pane of its own, so there is nothing to pass: see `handleSelectPane`.
    */
@@ -303,6 +309,7 @@ export function Palette({
   replyOpen,
   onToggleReply,
   onFocusReply,
+  onFocusTerminal,
   onOpenCapture,
   onIntent,
 }: PaletteProps) {
@@ -314,11 +321,12 @@ export function Palette({
 /**
  * What a row asked to happen once this dialog's focus scope lets go.
  *
- * Two rows need that moment, and for opposite reasons -- one wants the caret
- * placed, the other wants it left alone -- so the ref carries which, not a
- * boolean. `null` is every other row: Radix's own restore, untouched.
+ * Three rows need that moment, and not for the same thing -- two want a caret
+ * placed, in different boxes, and one wants a panel mounted with the caret left
+ * alone -- so the ref carries which, not a boolean. `null` is every other row:
+ * Radix's own restore, untouched.
  */
-type AfterClose = 'focus-reply' | 'open-capture'
+type AfterClose = 'focus-reply' | 'focus-terminal' | 'open-capture'
 
   // The chord toggles, so the same keystroke closes what it opened. Held in a
   // ref so the listener is installed once rather than re-installed on every
@@ -350,7 +358,8 @@ type AfterClose = 'focus-reply' | 'open-capture'
       case 'pane':
         onSelectPane(action.paneId, action.groupKey)
         break
-      case 'toggle-copy':
+      case 'toggle-copy': {
+        const entering = !copy.inCopy
         if (!onToggleCopy()) {
           // Stay open and say so. The terminal refuses both directions when the
           // socket is not ready, and that is exactly the moment a user would
@@ -362,7 +371,13 @@ type AfterClose = 'focus-reply' | 'open-capture'
           )
           return
         }
+        // This row is the only deliberate way *into* copy mode now that the
+        // header offers only the way out, so it is the only thing left that can
+        // leave the keyboard where copy mode needs it. Entering only: leaving
+        // puts the caret back in the terminal through `App`'s own path.
+        if (entering) afterClose.current = 'focus-terminal'
         break
+      }
       case 'toggle-reply':
         // Nothing to refuse: the box is this app's own, and showing it needs no
         // socket. It is the one row here that changes the layout rather than
@@ -408,6 +423,15 @@ type AfterClose = 'focus-reply' | 'open-capture'
         const after = afterClose.current
         afterClose.current = null
         if (after === null) return
+        if (after === 'focus-terminal') {
+          // Same two halves as the reply box below, aimed at the terminal: the
+          // restore would put the caret on `<body>`, because wterm has replaced
+          // the node Radix saved, and copy mode with the keyboard nowhere is a
+          // mode whose arrows and `/` do nothing until you click.
+          event.preventDefault()
+          onFocusTerminal()
+          return
+        }
         if (after === 'open-capture') {
           // Prevented for the same reason as below -- Radix would put the caret
           // on `<body>` either way, but it does it *after* the panel has

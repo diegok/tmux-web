@@ -612,9 +612,12 @@ export default function App() {
     let ok: boolean
     if (entering) {
       ok = term.current?.copyMode() ?? false
-      // Copy mode is driven from the keyboard, so it is useless without focus
-      // -- and the header button steals it on click.
-      if (ok) term.current?.focus()
+      // The focus that used to be here moved to the palette's own
+      // `afterClose`. Copy mode is driven from the keyboard and useless without
+      // one, but entering is only ever asked for from the palette now, and a
+      // focus call made here is undone a moment later: Radix restores focus as
+      // that dialog closes, onto `<body>`, because wterm has replaced the node
+      // it saved. See `AfterClose` in Palette.tsx.
     } else {
       // Always named, unlike the way in: the daemon refuses an end-mode with no
       // pane rather than aiming it at whatever is current.
@@ -684,11 +687,24 @@ export default function App() {
    * `showReply(false)` ends by focusing the terminal, and focusing the terminal
    * from inside an open menu is a soft keyboard rising on a phone for a switch
    * that was already off.
+   *
+   * Two clauses, and the first is a *transition* rather than a state. The
+   * listener is called for a change to either flag, so "the reply flag is
+   * false" was true of a box opened from the palette on a device whose header
+   * never carried the button -- and then flipping the magnifier, in either
+   * direction, unmounted that box and discarded whatever was half-typed in it.
+   *
+   * The second clause is the design's first anti-goal, held deliberately rather
+   * than by accident: the reply flag already off, a box opened from the palette
+   * row, and the magnifier then switched off too leaves a device with nothing
+   * on it that can close the box.
    */
   useEffect(
     () =>
-      onHeaderSettingsChange((next) => {
-        if (!next.showReply && replyOpen) showReply(false)
+      onHeaderSettingsChange((next, prev) => {
+        if (!replyOpen) return
+        if (prev.showReply && !next.showReply) showReply(false)
+        else if (!next.showReply && !next.showJump) showReply(false)
       }),
     [replyOpen, showReply],
   )
@@ -900,6 +916,7 @@ export default function App() {
           replyOpen={replyOpen}
           onToggleReply={() => showReply(!replyOpen)}
           onFocusReply={focusReply}
+          onFocusTerminal={() => term.current?.focus()}
           onOpenCapture={() => setCaptureOpen(true)}
           onIntent={handleIntent}
         />

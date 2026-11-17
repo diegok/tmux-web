@@ -326,6 +326,7 @@ describe('<Palette>', () => {
         replyOpen={false}
         onToggleReply={() => {}}
         onFocusReply={() => {}}
+        onFocusTerminal={() => {}}
         onOpenCapture={() => {}}
         onIntent={() => {}}
       />,

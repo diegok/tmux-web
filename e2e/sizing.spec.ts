@@ -296,16 +296,35 @@ test('the breadcrumb is readable on a phone, not squeezed by the controls', asyn
   // pass against the very layout it exists to reject.
   tmuxWeb.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'tools', tmuxWeb.fakeAgent('codewatch'))
   await enroll(page, tmuxWeb, 'phone')
+  await page.setViewportSize({ width: 390, height: 844 })
 
   // Picked through the palette rather than the sidebar: the palette's rows are
   // named after the pane's own command, which is the string this test is about.
+  //
+  // And picked at 390px on purpose. Below `sm` the button's text is
+  // `display:none`, which takes it out of the accessible name, so this click is
+  // the one place in the suite that goes through the `aria-label` the header's
+  // controls carry for exactly this width. Delete that label and this line
+  // stops finding the button -- which is the point: without it the whole
+  // decision was mutation-survivable.
   await page.getByRole('button', { name: /Jump to/ }).click()
   await page.getByRole('option', { name: /codewatch/ }).click()
   const command = page.getByLabel('Location').locator('span').last()
   await expect(command).toHaveText('codewatch')
 
-  await page.setViewportSize({ width: 390, height: 844 })
-  await expect(command).toHaveText('codewatch')
+  // The names must not change with the width, which is the whole of why these
+  // two carry an explicit `aria-label`. Below `sm` their text is
+  // `display:none` and therefore out of the accessible name, so without the
+  // label each would be named by its `title` instead -- "Jump to a pane or run
+  // a command (…)" and "Show the reply box" -- and every locator in this suite
+  // that names them would be naming something else at this width.
+  //
+  // `toHaveAccessibleName` and not a `getByRole` name option: that option
+  // matches a substring by default, and "Reply box" is a substring of "Show the
+  // reply box", so the locator would survive the very mutation this asserts
+  // against. Measured: it did.
+  await expect(page.getByRole('button', { name: /Jump to/ })).toHaveAccessibleName('Jump to…')
+  await expect(page.getByRole('button', { name: /reply/i })).toHaveAccessibleName('Reply box')
 
   // Measured, both sides of the change, with this fixture: 74px of text in a
   // 56px box before -- the clip the owner was complaining about -- and 74 in 74

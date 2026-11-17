@@ -282,3 +282,28 @@ test('with both header controls off, the breadcrumb has the width to itself', as
   const fit = await command.evaluate((el) => ({ text: el.scrollWidth, box: el.clientWidth }))
   expect(fit.text, `${fit.text}px of text in ${fit.box}px of box`).toBeLessThanOrEqual(fit.box)
 })
+
+// The close in `App` used to fire on "showReply is false" rather than on
+// "showReply just went false", and `onHeaderSettingsChange` notifies for either
+// flag -- so turning the magnifier back ON closed a box opened from the palette
+// and threw away whatever was typed in it. The chord is how you get there with
+// no header buttons at all, which is also the configuration the owner is
+// heading for on the desktop.
+test('a switch that is not the reply box leaves an open box, and its draft, alone', async ({
+  page,
+  tmuxWeb,
+}) => {
+  await enroll(page, tmuxWeb, 'laptop')
+  await setHeaderControl(page, 'Reply box', false)
+  await setHeaderControl(page, 'Jump to…', false)
+
+  await page.keyboard.press('Control+Alt+KeyK')
+  await page.getByRole('option', { name: 'Show the reply box' }).click()
+  await replyBox(page).waitFor()
+  await replyBox(page).fill('half an answer')
+
+  await setHeaderControl(page, 'Jump to…', true)
+
+  await expect(replyBox(page), 'turning another control ON closed the box').toHaveCount(1)
+  await expect(replyBox(page), 'the draft went with it').toHaveValue('half an answer')
+})

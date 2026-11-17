@@ -20,11 +20,17 @@
  * ## What the header says
  *
  * The breadcrumb is `session › window › command`, resolved from the snapshot
- * for the pane the terminal reports. The dot is the socket, not tmux: green
- * only while input is actually going somewhere.
+ * for the pane the terminal reports, and on a phone it is the only thing up
+ * there that cannot be worked out from somewhere else -- which is why the
+ * controls beside it shrink to glyphs and the socket's state is not repeated
+ * here at all. It used to end in a dot, and every state that dot could show is
+ * said louder elsewhere: `ConnectionPill` over the terminal for connecting,
+ * reconnecting, ended, gone and dropped input, the `NoSession` panel instead of
+ * a terminal when there is nothing to attach to, and the sidebar's footer in
+ * words for all of them.
  */
 
-import { Plus, Search } from 'lucide-react'
+import { CopySlash, MessageSquare, Plus, Search } from 'lucide-react'
 import { ThemeProvider } from 'next-themes'
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import { toast } from 'sonner'
@@ -55,7 +61,7 @@ import type { TerminalHandle, TerminalStatus } from '@/components/Terminal'
 import { Separator } from '@/components/ui/separator'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 import { Toaster } from '@/components/ui/sonner'
-import { copyControl } from '@/lib/copyMode'
+import { copyControl, copyControlState } from '@/lib/copyMode'
 import type { CopyFlip } from '@/lib/copyMode'
 import { newSessionPrompt, runManage } from '@/lib/manage'
 import { reportScrollTarget, scrollTargetFor } from '@/lib/scrollGain'
@@ -552,6 +558,15 @@ export default function App() {
   const copy = copyControl(located?.pane.paneMode ?? '', activePane, copyFlip, Date.now())
 
   /**
+   * Which of the three the header does with that control. The way *in* is not
+   * here at all -- the wheel and the swipe already enter copy mode in a shell
+   * pane, and in an agent pane they go to the application instead -- so this is
+   * the way out, present only when there is a mode to leave. See
+   * `copyControlState`.
+   */
+  const copyState = copyControlState(copy.inCopy, status?.phase === 'ready')
+
+  /**
    * Tell the swipe how far one wheel notch goes in the attached pane.
    *
    * Reported from here because this is where both halves are: the pane's two
@@ -723,15 +738,19 @@ export default function App() {
                 disagree with itself the moment the two got out of step. The
                 name is the state here.
               */}
-              <button
-                type="button"
-                onClick={() => toggleCopy()}
-                disabled={status?.phase !== 'ready'}
-                className="hover:bg-accent hover:text-accent-foreground rounded-md border px-2 py-1 text-xs font-medium disabled:opacity-50"
-                title={copy.title}
-              >
-                {copy.label}
-              </button>
+              {copyState !== 'absent' && (
+                <button
+                  type="button"
+                  onClick={() => toggleCopy()}
+                  disabled={copyState === 'disabled'}
+                  aria-label={copy.label}
+                  className="hover:bg-accent hover:text-accent-foreground flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium disabled:opacity-50"
+                  title={copy.title}
+                >
+                  <CopySlash className="size-3" aria-hidden />
+                  <span className="hidden sm:inline">{copy.label}</span>
+                </button>
+              )}
               {/*
                 Off by default and driven by nothing but this button and its
                 palette row: no `pointer: coarse` branch and no viewport-width
@@ -744,12 +763,13 @@ export default function App() {
                 onClick={() => showReply(!replyOpen)}
                 aria-pressed={replyOpen}
                 disabled={!target}
-                className="hover:bg-accent hover:text-accent-foreground rounded-md border px-2 py-1 text-xs font-medium disabled:opacity-50 aria-pressed:bg-accent"
+                aria-label="Reply box"
+                className="hover:bg-accent hover:text-accent-foreground flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium disabled:opacity-50 aria-pressed:bg-accent"
                 title={replyToggleLabel(replyOpen)}
               >
-                Reply box
+                <MessageSquare className="size-3" aria-hidden />
+                <span className="hidden sm:inline">Reply box</span>
               </button>
-              <ConnectionDot status={status} />
             </div>
           </header>
           {/*
@@ -922,23 +942,6 @@ function Breadcrumb({
         )
       )}
     </nav>
-  )
-}
-
-/** The socket's state, in the one place a user glances at without reading. */
-function ConnectionDot({ status }: { status: TerminalStatus | null }) {
-  const phase = status?.phase ?? 'connecting'
-  const tone =
-    phase === 'ready'
-      ? 'bg-emerald-500'
-      : phase === 'ended' || phase === 'closed'
-        ? 'bg-muted-foreground'
-        : 'bg-amber-500 animate-pulse'
-  return (
-    <span className="text-muted-foreground flex items-center gap-1.5 text-xs" role="status">
-      <span className={`size-2 rounded-full ${tone}`} aria-hidden />
-      <span className="hidden sm:inline">{phase}</span>
-    </span>
   )
 }
 

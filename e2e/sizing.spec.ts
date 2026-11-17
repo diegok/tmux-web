@@ -10,7 +10,7 @@
  * unit-tested in `web/src/components/__tests__`; the seam above it is only
  * observable in a real browser, which is this file.
  */
-import { test, expect, enroll, openReplyBox, replyBox } from './harness'
+import { test, expect, enroll, openReplyBox, replyBox, BASE_SESSION } from './harness'
 import type { Page } from '@playwright/test'
 import type { TmuxWeb } from './harness'
 
@@ -277,4 +277,48 @@ test('the terminal draws to its own edge, not inside wterm’s 12px frame', asyn
     '1px',
     '1px',
   ])
+})
+
+// The owner's complaint, in a browser: "en movil entre la lupa y el resto de
+// elementos no deja lugar para ver en que estás." The breadcrumb is the only
+// thing in the header that says which pane you are looking at, and the four
+// controls to its right were three text buttons that never shrink.
+//
+// Measured here rather than in pixels of header: a pixel budget would have to
+// be rewritten the next time a glyph changes, and the property that matters is
+// the one the owner named -- can you read which pane you are in.
+test('the breadcrumb is readable on a phone, not squeezed by the controls', async ({
+  page,
+  tmuxWeb,
+}) => {
+  // A command with a name of a realistic length. `sh`, which the base window
+  // runs, fits in the ~30px the old header left over, and this test would then
+  // pass against the very layout it exists to reject.
+  tmuxWeb.tmux('new-window', '-d', '-t', BASE_SESSION, '-n', 'tools', tmuxWeb.fakeAgent('codewatch'))
+  await enroll(page, tmuxWeb, 'phone')
+
+  // Picked through the palette rather than the sidebar: the palette's rows are
+  // named after the pane's own command, which is the string this test is about.
+  await page.getByRole('button', { name: /Jump to/ }).click()
+  await page.getByRole('option', { name: /codewatch/ }).click()
+  const command = page.getByLabel('Location').locator('span').last()
+  await expect(command).toHaveText('codewatch')
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(command).toHaveText('codewatch')
+
+  // Measured, both sides of the change, with this fixture: 74px of text in a
+  // 56px box before -- the clip the owner was complaining about -- and 74 in 74
+  // after, which is the span taking exactly what its text needs because the
+  // room is finally there. The estimate in the design said ~30px of breadcrumb
+  // and ~260 after; the real figures are 56 and enough, so the table was
+  // optimistic about the old header and right about the shape of the fix.
+  const fit = await command.evaluate((el) => ({
+    text: el.scrollWidth,
+    box: el.clientWidth,
+  }))
+  expect(
+    fit.text,
+    `the pane's command is clipped on a phone: ${fit.text}px of text in ${fit.box}px of box`,
+  ).toBeLessThanOrEqual(fit.box)
 })

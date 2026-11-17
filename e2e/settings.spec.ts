@@ -14,7 +14,15 @@
  * invariant below stays green over a terminal drawing wider than its own box --
  * which is the defect, not the absence of one.
  */
-import { test, expect, enroll, openTerminalSettings, BASE_SESSION } from './harness'
+import {
+  test,
+  expect,
+  enroll,
+  openReplyBox,
+  openTerminalSettings,
+  replyBox,
+  BASE_SESSION,
+} from './harness'
 import type { Page } from '@playwright/test'
 import type { TmuxWeb } from './harness'
 
@@ -208,4 +216,69 @@ test('the terminal follows the interface until it is told not to', async ({ page
   await expect
     .poll(() => background(page), { message: 'picking Light did not paint the terminal light' })
     .toBe(light)
+})
+
+/**
+ * Flip one of the header's two switches, through the menu a person uses.
+ *
+ * The pre-state is asserted rather than assumed: a click that toggled the
+ * switch the other way would leave every assertion below passing for the wrong
+ * reason.
+ */
+async function setHeaderControl(page: Page, name: string, on: boolean): Promise<void> {
+  await page.locator('[data-slot="sidebar-footer"]').getByRole('button').first().click()
+  await page.getByRole('menuitem', { name: 'Header' }).click()
+  const item = page.getByRole('menuitemcheckbox', { name })
+  await expect(item).toHaveAttribute('aria-checked', String(!on))
+  await item.click()
+  await expect(item).toHaveCount(0)
+}
+
+// Review Focus #3. The box has no close of its own, so a switch that hid its
+// button over an open box would leave the box standing -- and with the
+// magnifier off too, nothing on that device could put it away. Done with the
+// pane in copy mode so the header is carrying both controls when the switch is
+// flipped, which is also the case where two layout changes could race.
+//
+// What this does NOT cover, measured rather than assumed: the subscriber's
+// ordering. Swapping `onHeaderSettingsChange` for a `useEffect` on the flag
+// keeps this test green, and it has to -- the switch is flipped from a
+// dropdown, so the focused element is a `menuitemcheckbox`, and
+// `suppressesResize` only holds a resize for a *text* control, so nothing is
+// suppressed in this path either way. The ordering is pinned in
+// `headerSettings.test.ts`; what is pinned here is that the box goes away.
+test('turning the reply box off closes the box, even in copy mode', async ({ page, tmuxWeb }) => {
+  await enroll(page, tmuxWeb, 'laptop')
+  await openReplyBox(page)
+
+  tmuxWeb.tmux('copy-mode', '-t', `${BASE_SESSION}:0`)
+  const exit = page.getByRole('button', { name: 'Exit copy' })
+  await expect(exit).toBeVisible()
+
+  await setHeaderControl(page, 'Reply box', false)
+
+  await expect(replyBox(page), 'the box outlived the button that was its only close').toHaveCount(0)
+  await expect(exit, 'the copy control went with it').toBeVisible()
+  await expect(page.getByRole('button', { name: 'Reply box' })).toHaveCount(0)
+})
+
+// Review Focus #4. "El usuario del movil elije si quiere una, las dos o
+// ninguna" -- so "ninguna" has to be a header, not a hole. The clipping claim
+// itself lives in `sizing.spec.ts`, against a command long enough to clip; what
+// this pins is that nothing but the sidebar's own trigger is left up there.
+test('with both header controls off, the breadcrumb has the width to itself', async ({
+  page,
+  tmuxWeb,
+}) => {
+  await enroll(page, tmuxWeb, 'phone')
+  await setHeaderControl(page, 'Jump to…', false)
+  await setHeaderControl(page, 'Reply box', false)
+  await page.setViewportSize({ width: 390, height: 844 })
+
+  const header = page.locator('header')
+  await expect(header.getByRole('button'), 'something is still taking width').toHaveCount(1)
+
+  const command = page.getByLabel('Location').locator('span').last()
+  const fit = await command.evaluate((el) => ({ text: el.scrollWidth, box: el.clientWidth }))
+  expect(fit.text, `${fit.text}px of text in ${fit.box}px of box`).toBeLessThanOrEqual(fit.box)
 })

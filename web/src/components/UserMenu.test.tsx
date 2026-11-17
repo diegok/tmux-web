@@ -243,6 +243,21 @@ describe('what the menu offers', () => {
     expect(source).toContain('<TerminalSettingsDialog')
   })
 
+  it('offers a Header submenu with both optional controls', () => {
+    // Between the two dialogs and the interface's theme, which is where it
+    // belongs: `Terminal…` and `Devices…` open something, `Appearance` is the
+    // app's light/dark, and this one is the header's own two switches.
+    const terminal = source.indexOf('Terminal…')
+    const header = source.indexOf('<HeaderMenu />')
+    const appearance = source.indexOf('<AppearanceMenu />')
+    expect(header).toBeGreaterThan(terminal)
+    expect(appearance).toBeGreaterThan(header)
+    // Named as the buttons they govern, so the switch and the thing it hides
+    // cannot come to be called two different things.
+    expect(source).toContain('Jump to…')
+    expect(source).toContain('Reply box')
+  })
+
   it('still has the three interface themes under Appearance', () => {
     for (const item of ['value="system"', 'value="light"', 'value="dark"']) {
       expect(source).toContain(item)

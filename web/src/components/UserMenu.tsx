@@ -31,8 +31,11 @@
 import {
   ChevronsUpDown,
   LogOut,
+  MessageSquare,
   Monitor,
   Moon,
+  PanelTop,
+  Search,
   Smartphone,
   SquareTerminal,
   Sun,
@@ -44,9 +47,11 @@ import { useCallback, useEffect, useState } from 'react'
 import { DevicesDialog, DeviceApiError, revokeDevice } from '@/components/DevicesDialog'
 import { TerminalSettingsDialog } from '@/components/TerminalSettingsDialog'
 import type { TerminalPhase } from '@/components/Terminal'
+import { setHeaderSettings, useHeaderSettings } from '@/lib/headerSettings'
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuCheckboxItem,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
@@ -306,6 +311,7 @@ export function UserMenu({ connection, fetchImpl }: UserMenuProps) {
               <SquareTerminal aria-hidden />
               Terminal…
             </DropdownMenuItem>
+            <HeaderMenu />
             <AppearanceMenu />
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" disabled={signingOut} onSelect={() => void signOut()}>
@@ -373,6 +379,48 @@ export function IdentityLines({
  * feature; a separate Appearance *panel* would be a dialog with one control in
  * it.
  */
+/**
+ * The header's two optional controls.
+ *
+ * Checkbox items rather than a dialog: two booleans do not earn a panel, and in
+ * the sheet this menu becomes on a phone each one is a single tap with the
+ * platform's own hit target -- which is the same argument the terminal's own
+ * dialog makes for native controls.
+ *
+ * Named after the buttons they govern, so the switch and the thing it hides
+ * cannot come to be called two different things. The copy-mode control is
+ * deliberately absent: it is only on screen when the pane is in a mode, and on
+ * a phone it is the only obvious way out of one, so a switch that could hide it
+ * is a switch that could trap you in it.
+ */
+function HeaderMenu() {
+  const { showJump, showReply } = useHeaderSettings()
+  return (
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger>
+        <PanelTop aria-hidden />
+        Header
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent>
+        <DropdownMenuCheckboxItem
+          checked={showJump}
+          onCheckedChange={(next) => setHeaderSettings({ showJump: next })}
+        >
+          <Search aria-hidden />
+          Jump to…
+        </DropdownMenuCheckboxItem>
+        <DropdownMenuCheckboxItem
+          checked={showReply}
+          onCheckedChange={(next) => setHeaderSettings({ showReply: next })}
+        >
+          <MessageSquare aria-hidden />
+          Reply box
+        </DropdownMenuCheckboxItem>
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
+  )
+}
+
 function AppearanceMenu() {
   const { theme, setTheme } = useTheme()
   return (

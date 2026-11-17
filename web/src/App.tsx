@@ -62,6 +62,7 @@ import { Separator } from '@/components/ui/separator'
 import { SidebarInset, SidebarProvider, SidebarTrigger } from '@/components/ui/sidebar'
 import { Toaster } from '@/components/ui/sonner'
 import { copyControl, copyControlState } from '@/lib/copyMode'
+import { onHeaderSettingsChange, useHeaderSettings } from '@/lib/headerSettings'
 import type { CopyFlip } from '@/lib/copyMode'
 import { newSessionPrompt, runManage } from '@/lib/manage'
 import { reportScrollTarget, scrollTargetFor } from '@/lib/scrollGain'
@@ -567,6 +568,14 @@ export default function App() {
   const copyState = copyControlState(copy.inCopy, status?.phase === 'ready')
 
   /**
+   * Which optional controls this device wants in the header. Named
+   * `headerControls` and not `header` because `showReply` below is a callback
+   * and `headerControls.showReply` is a flag: one of them puts the box away,
+   * the other decides whether there is a button for it.
+   */
+  const headerControls = useHeaderSettings()
+
+  /**
    * Tell the swipe how far one wheel notch goes in the attached pane.
    *
    * Reported from here because this is where both halves are: the pane's two
@@ -649,6 +658,42 @@ export default function App() {
   )
 
   /**
+   * Turning the reply box's control off puts the box away with it.
+   *
+   * The box has no close of its own: it is closed by the header button or by
+   * the palette's row. So hiding the button over an open box would leave the
+   * box standing, and with the magnifier switched off too there would be
+   * nothing left on that device that could close it.
+   *
+   * Through `showReply`, not `setReplyOpen`, because that is the path that arms
+   * `noteLayoutChange` before React is told.
+   *
+   * And through `onHeaderSettingsChange` rather than an effect watching the
+   * flag, so that the arming really is before React rather than after the
+   * commit that already unmounted the box. **Measured honestly: swapping this
+   * for an effect passes the e2e.** It has to, and not because the test is
+   * weak: the switch is flipped from a dropdown, so the focused element is a
+   * `menuitemcheckbox`, and `suppressesResize` only holds resizes for a *text*
+   * control -- nothing is suppressed in this path either way. What the
+   * subscriber buys is that `showReply`'s documented ordering holds for any
+   * caller of the flag rather than only for the one that happens to run with
+   * the keyboard somewhere harmless. The ordering itself is pinned in
+   * `headerSettings.test.ts`.
+   *
+   * Guarded on the box actually being open, and that guard is not tidiness:
+   * `showReply(false)` ends by focusing the terminal, and focusing the terminal
+   * from inside an open menu is a soft keyboard rising on a phone for a switch
+   * that was already off.
+   */
+  useEffect(
+    () =>
+      onHeaderSettingsChange((next) => {
+        if (!next.showReply && replyOpen) showReply(false)
+      }),
+    [replyOpen, showReply],
+  )
+
+  /**
    * The reply box's frames, onto the wire in the array's order.
    *
    * `term.current` is the sink, and its `send` is `TerminalSession.write` --
@@ -706,18 +751,21 @@ export default function App() {
               loaded={loaded}
             />
             <div className="ml-auto flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setPaletteOpen(true)}
-                className="hover:bg-accent hover:text-accent-foreground flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium"
-                title={`Jump to a pane or run a command (${PALETTE_CHORD_LABEL})`}
-              >
-                <Search className="size-3" aria-hidden />
-                <span className="hidden sm:inline">Jump to…</span>
-                <kbd className="text-muted-foreground hidden font-mono text-[10px] md:inline">
-                  {PALETTE_CHORD_LABEL}
-                </kbd>
-              </button>
+              {headerControls.showJump && (
+                <button
+                  type="button"
+                  onClick={() => setPaletteOpen(true)}
+                  aria-label="Jump to…"
+                  className="hover:bg-accent hover:text-accent-foreground flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium"
+                  title={`Jump to a pane or run a command (${PALETTE_CHORD_LABEL})`}
+                >
+                  <Search className="size-3" aria-hidden />
+                  <span className="hidden sm:inline">Jump to…</span>
+                  <kbd className="text-muted-foreground hidden font-mono text-[10px] md:inline">
+                    {PALETTE_CHORD_LABEL}
+                  </kbd>
+                </button>
+              )}
               {/*
                 One button for one idea. It said "Copy mode" and "End mode"
                 side by side until the owner asked what the second one meant --
@@ -752,24 +800,34 @@ export default function App() {
                 </button>
               )}
               {/*
-                Off by default and driven by nothing but this button and its
-                palette row: no `pointer: coarse` branch and no viewport-width
-                one. Which device wants a second text box is a question the
-                person holding it can answer, and `aria-pressed` is what says
-                the button is a switch rather than an action.
+                Off by default and driven by this button, its palette row and
+                now a switch in the user menu: still no `pointer: coarse` branch
+                and no viewport-width one. Which device wants a second text box
+                is a question the person holding it can answer -- the owner
+                answered it with "en desktop la reply box no la uso jamas" --
+                and `aria-pressed` is what says the button is a switch rather
+                than an action.
+
+                The switch hides this button, not the box: the palette's row
+                still opens one on a device whose header does not carry a
+                button, because wanting no button is not the same as wanting no
+                feature. Turning it off over an open box closes it; see the
+                subscriber above.
               */}
-              <button
-                type="button"
-                onClick={() => showReply(!replyOpen)}
-                aria-pressed={replyOpen}
-                disabled={!target}
-                aria-label="Reply box"
-                className="hover:bg-accent hover:text-accent-foreground flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium disabled:opacity-50 aria-pressed:bg-accent"
-                title={replyToggleLabel(replyOpen)}
-              >
-                <MessageSquare className="size-3" aria-hidden />
-                <span className="hidden sm:inline">Reply box</span>
-              </button>
+              {headerControls.showReply && (
+                <button
+                  type="button"
+                  onClick={() => showReply(!replyOpen)}
+                  aria-pressed={replyOpen}
+                  disabled={!target}
+                  aria-label="Reply box"
+                  className="hover:bg-accent hover:text-accent-foreground flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium disabled:opacity-50 aria-pressed:bg-accent"
+                  title={replyToggleLabel(replyOpen)}
+                >
+                  <MessageSquare className="size-3" aria-hidden />
+                  <span className="hidden sm:inline">Reply box</span>
+                </button>
+              )}
             </div>
           </header>
           {/*
